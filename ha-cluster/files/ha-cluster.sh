@@ -4,8 +4,9 @@
 # /usr/lib/ha-cluster/ha-cluster.sh
 # Library functions for HA cluster management
 
-. /lib/functions.sh
-. /lib/config/uci.sh
+HA_CLUSTER_ROOT="${IPKG_INSTROOT:-}"
+. "${HA_CLUSTER_ROOT}/lib/functions.sh"
+. "${HA_CLUSTER_ROOT}/lib/config/uci.sh"
 
 HA_CLUSTER_CONFIG="/etc/config/ha-cluster"
 # Generated configs are placed in a dedicated directory to avoid conflicts
@@ -340,7 +341,7 @@ _ha_collect_vip_for_instance() {
 	[ -z "$vip_address" ] && [ -z "$vip_address6" ] && { ha_log_warning "VIP $vip_section has no address (IPv4 or IPv6)"; return 1; }
 
 	# Resolve interface name
-	. /lib/functions/network.sh
+	. "${HA_CLUSTER_ROOT}/lib/functions/network.sh"
 	local vip_iface_resolved
 	if network_get_device vip_iface_resolved "$vip_interface_logical" 2>/dev/null; then
 		ha_log_debug "VIP $vip_section: resolved interface '$vip_interface_logical' to device '$vip_iface_resolved'"
@@ -399,7 +400,7 @@ ha_generate_vrrp_group() {
 	[ -z "$vrid" ] && { ha_log_warning "vrrp_instance $section has no VRID"; return 1; }
 
 	# Resolve primary interface
-	. /lib/functions/network.sh
+	. "${HA_CLUSTER_ROOT}/lib/functions/network.sh"
 	if network_get_device interface "$interface_logical" 2>/dev/null; then
 		ha_log_debug "vrrp_instance $section: resolved interface '$interface_logical' to device '$interface'"
 	else
