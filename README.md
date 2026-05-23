@@ -26,6 +26,12 @@ A high-availability solution for OpenWrt routers, providing automatic failover, 
 - **Two or more routers** on a shared network segment
 - **dnsmasq-ha** (for DHCP lease sync)
 
+## woffko build branch
+
+Branch `woffko-ha-master-pr2-dnsmasq-cve-2026` is a build integration branch for the x86_64 OpenWrt 25.12.4 images. It is based on `pgaufillet/master`, includes PR #2 (`Fix HA DHCPv6 lease synchronization and BACKUP node suppression`), and adds local `dnsmasq-ha` 2.92 CVE backports as OpenWrt package patches.
+
+This branch is intended to make the firmware build reproducible while PR #2 and the dnsmasq backports are not yet available from a single upstream feed ref.
+
 ## Installation
 
 ### Add the Feed
