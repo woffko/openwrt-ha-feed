@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=7
+PKG_RELEASE:=8
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -18,7 +18,7 @@ define Package/ha-cluster
   CATEGORY:=Network
   SUBMENU:=IP Addresses and Names
   TITLE:=High Availability Cluster Management
-  DEPENDS:=+keepalived +nftables-json
+  DEPENDS:=+keepalived +nftables-json +ip
   PKGARCH:=all
 endef
 
@@ -54,6 +54,7 @@ define Package/ha-cluster/install
 
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/keepalived
 	$(INSTALL_BIN) ./files/dhcpv6-backup-guard.hotplug $(1)/etc/hotplug.d/keepalived/20-dhcpv6-backup-guard
+	$(INSTALL_BIN) ./files/ra-backup-guard.hotplug $(1)/etc/hotplug.d/keepalived/21-RA-backup-guard
 
 endef
 

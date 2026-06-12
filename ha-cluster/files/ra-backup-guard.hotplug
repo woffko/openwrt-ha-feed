@@ -1,0 +1,534 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Manage IPv6 Router Advertisements for HA IPv6 VRRP instances.
+#
+# BACKUP/FAULT/STOP:
+#   - block locally generated IPv6 Router Advertisements on the interface
+#   - remove the virtual link-local router address from the interface
+#
+# MASTER:
+#   - unblock Router Advertisements on the interface
+#   - add a stable virtual link-local router address, default fe80::5/64
+#   - optionally deprecate other link-local addresses so RA source selection
+#     prefers the virtual fe80::5 address instead of the node-specific fe80::MAC
+#
+# Interface resolution follows the same logic as DHCPv6 BACKUP guard:
+#   NAME=lan_v6  -> instance=lan  -> ha-cluster.lan.interface
+#   then network.<logical>.device / network.<logical>.ifname / logical fallback
+
+PATH="${HA_GUARD_PATH:-/usr/sbin:/usr/bin:/sbin:/bin}"
+
+TAG="ha-cluster"
+TABLE="ha_cluster_ra"
+SET="backup_ifaces"
+
+RUN_DIR="${RUN_DIR:-/tmp/ha-cluster}"
+STATE_DIR="$RUN_DIR/ra-backup-guard"
+LOCK_DIR="$RUN_DIR/ra-backup-guard.lock"
+APPLIED_FILE="$STATE_DIR/.applied"
+PENDING_FILE="$STATE_DIR/.pending"
+
+# Default virtual router link-local address.
+# Can be overridden globally:
+#   HA_RA_VIRTUAL_LL_DEFAULT='fe80::5/64'
+#
+# Or per HA instance via UCI, for example:
+#   uci set ha-cluster.lan.virtual_link_local='fe80::5/64'
+#   uci set ha-cluster.wifi.virtual_link_local='fe80::5/64'
+VIRTUAL_LL_DEFAULT="${HA_RA_VIRTUAL_LL_DEFAULT:-fe80::5/64}"
+
+# If enabled, on MASTER we deprecate other fe80::* addresses on the same
+# interface to make kernel/source selection prefer the virtual fe80::5 address.
+#
+# 1 = prefer virtual LL strongly
+# 0 = only add virtual LL, do not touch other LL addresses
+PREFER_VIRTUAL_LL="${HA_RA_PREFER_VIRTUAL_LL:-1}"
+
+log_info() {
+	logger -t "$TAG" -p daemon.info "$@"
+}
+
+log_warning() {
+	logger -t "$TAG" -p daemon.warning "$@"
+}
+
+mono_ms() {
+	awk '{ printf "%d\n", $1 * 1000 }' /proc/uptime 2>/dev/null
+}
+
+safe_name() {
+	printf '%s' "$1" | sed 's/[^A-Za-z0-9_.-]/_/g'
+}
+
+should_handle_event() {
+	[ -n "${ACTION:-}" ] || return 1
+	[ -n "${NAME:-}" ] || return 1
+
+	if [ -n "${TYPE:-}" ] && [ "$TYPE" != "INSTANCE" ]; then
+		return 1
+	fi
+
+	case "$NAME" in
+		*_v6) ;;
+		*) return 1 ;;
+	esac
+
+	case "$ACTION" in
+		MASTER|BACKUP|FAULT|STOP) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+desired_from_action() {
+	case "$1" in
+		MASTER)
+			echo "MASTER"
+			;;
+		BACKUP|FAULT|STOP)
+			echo "BACKUP"
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+normalize_lladdr() {
+	local addr="$1"
+
+	[ -n "$addr" ] || return 1
+
+	case "$addr" in
+		fe80:*) ;;
+		*)
+			log_warning "Invalid virtual link-local address '$addr': must start with fe80:"
+			return 1
+			;;
+	esac
+
+	case "$addr" in
+		*/*)
+			printf '%s\n' "$addr"
+			;;
+		*)
+			printf '%s/64\n' "$addr"
+			;;
+	esac
+}
+
+resolve_instance_device() {
+	local instance="${1%_v6}"
+	local logical device
+
+	logical="$(uci -q get "ha-cluster.${instance}.interface")"
+	[ -n "$logical" ] || return 1
+
+	device="$(uci -q get "network.${logical}.device")"
+	[ -n "$device" ] || device="$(uci -q get "network.${logical}.ifname" | awk '{print $1}')"
+	[ -n "$device" ] || device="$logical"
+
+	printf '%s\n' "$device"
+}
+
+resolve_instance_lladdr() {
+	local instance="${1%_v6}"
+	local lladdr
+
+	lladdr="$(uci -q get "ha-cluster.${instance}.virtual_link_local")"
+	[ -n "$lladdr" ] || lladdr="$(uci -q get "ha-cluster.${instance}.ra_link_local")"
+	[ -n "$lladdr" ] || lladdr="$(uci -q get "ha-cluster.${instance}.link_local")"
+	[ -n "$lladdr" ] || lladdr="$VIRTUAL_LL_DEFAULT"
+
+	normalize_lladdr "$lladdr"
+}
+
+state_path() {
+	printf '%s/%s.state\n' "$STATE_DIR" "$(safe_name "$1")"
+}
+
+write_latest_state() {
+	local desired="$1"
+	local token="$2"
+	local iface="$3"
+	local lladdr="$4"
+	local path
+
+	mkdir -p "$STATE_DIR" || return 1
+	path="$(state_path "$NAME")"
+
+	printf '%s|%s|%s|%s|%s|%s|%s\n' \
+		"$desired" "$token" "${ACTION:-}" "${TYPE:-INSTANCE}" "$NAME" "$iface" "$lladdr" > "${path}.tmp.$$" || return 1
+
+	mv "${path}.tmp.$$" "$path"
+	: > "$PENDING_FILE"
+}
+
+acquire_lock() {
+	local pid
+
+	mkdir -p "$RUN_DIR" || return 1
+
+	if mkdir "$LOCK_DIR" 2>/dev/null; then
+		printf '%s\n' "$$" > "$LOCK_DIR/pid"
+		return 0
+	fi
+
+	pid="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+	if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+		rm -rf "$LOCK_DIR"
+		if mkdir "$LOCK_DIR" 2>/dev/null; then
+			printf '%s\n' "$$" > "$LOCK_DIR/pid"
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+release_lock() {
+	rm -rf "$LOCK_DIR"
+}
+
+cleanup() {
+	[ "${LOCK_HELD:-0}" = "1" ] && release_lock
+}
+
+ensure_table() {
+	local output
+
+	if ! nft list table inet "$TABLE" >/dev/null 2>&1; then
+		output="$(nft -f - 2>&1 <<-NFT
+		table inet $TABLE {
+			set $SET {
+				type ifname;
+			}
+
+			chain output {
+				type filter hook output priority -310; policy accept;
+				meta oifname @$SET meta nfproto ipv6 icmpv6 type 134 counter drop comment "ha-cluster: drop RA while BACKUP"
+			}
+		}
+		NFT
+		)" || {
+			log_warning "Failed to create RA BACKUP guard nft table: $output"
+			return 1
+		}
+	fi
+
+	if ! nft list set inet "$TABLE" "$SET" >/dev/null 2>&1; then
+		output="$(nft add set inet "$TABLE" "$SET" '{ type ifname; }' 2>&1)" || {
+			log_warning "Failed to create RA BACKUP guard nft set: $output"
+			return 1
+		}
+	fi
+
+	if ! nft list chain inet "$TABLE" output >/dev/null 2>&1; then
+		output="$(nft add chain inet "$TABLE" output '{ type filter hook output priority -310; policy accept; }' 2>&1)" || {
+			log_warning "Failed to create RA BACKUP guard nft output chain: $output"
+			return 1
+		}
+	fi
+
+	# Keep exactly one rule in our private output chain.
+	output="$(nft -f - 2>&1 <<-NFT
+	flush chain inet $TABLE output
+	add rule inet $TABLE output meta oifname @$SET meta nfproto ipv6 icmpv6 type 134 counter drop comment "ha-cluster: drop RA while BACKUP"
+	NFT
+	)" || {
+		log_warning "Failed to reconcile RA BACKUP guard nft output rule: $output"
+		return 1
+	}
+}
+
+collect_desired_ifaces() {
+	local file desired token action type name iface lladdr blocked
+
+	for file in "$STATE_DIR"/*.state; do
+		[ -f "$file" ] || continue
+		IFS='|' read -r desired token action type name iface lladdr < "$file"
+		[ "$desired" = "BACKUP" ] || continue
+		[ -n "$iface" ] || continue
+
+		case " $blocked " in
+			*" $iface "*) ;;
+			*) blocked="${blocked:+$blocked }$iface" ;;
+		esac
+	done
+
+	printf '%s\n' "$blocked"
+}
+
+collect_state_signature() {
+	local file
+
+	for file in "$STATE_DIR"/*.state; do
+		[ -f "$file" ] || continue
+		printf '%s:' "$(basename "$file")"
+		cat "$file" 2>/dev/null
+	done
+}
+
+build_nft_elements() {
+	local iface elements sep
+
+	for iface in $1; do
+		case "$iface" in
+			*\"*|*\\*|*\|*)
+				log_warning "Ignoring invalid interface name for RA BACKUP guard: $iface"
+				return 1
+				;;
+		esac
+
+		elements="$elements$sep\"$iface\""
+		sep=", "
+	done
+
+	printf '%s\n' "$elements"
+}
+
+current_set_elements() {
+	nft list set inet "$TABLE" "$SET" 2>/dev/null | \
+		sed -n 's/.*elements = { \(.*\) }.*/\1/p' | \
+		head -n 1
+}
+
+reconcile_set() {
+	local desired="$1"
+	local elements output current
+
+	ensure_table || return 1
+
+	if [ -n "$desired" ]; then
+		elements="$(build_nft_elements "$desired")" || return 1
+		output="$(nft -f - 2>&1 <<-NFT
+		flush set inet $TABLE $SET
+		add element inet $TABLE $SET { $elements }
+		NFT
+		)" || {
+			log_warning "Failed to reconcile RA BACKUP guard nft set to '$desired': $output"
+			return 1
+		}
+	else
+		output="$(nft flush set inet "$TABLE" "$SET" 2>&1)" || {
+			log_warning "Failed to clear RA BACKUP guard nft set: $output"
+			return 1
+		}
+	fi
+
+	printf '%s\n' "$desired" > "$APPLIED_FILE"
+	current="$(current_set_elements)"
+	[ -n "$current" ] || current="empty"
+	log_info "RA BACKUP guard reconciled blocked ifaces: desired=${desired:-empty}; nft=$current"
+	return 0
+}
+
+lladdr_no_prefix() {
+	printf '%s\n' "$1" | sed 's,/.*,,'
+}
+
+has_addr_on_iface() {
+	local iface="$1"
+	local lladdr="$2"
+	local addr
+
+	addr="$(lladdr_no_prefix "$lladdr")"
+
+	ip -o -6 addr show dev "$iface" scope link 2>/dev/null | \
+		awk '{print $4}' | sed 's,/.*,,' | grep -Fxq "$addr"
+}
+
+add_virtual_ll() {
+	local iface="$1"
+	local lladdr="$2"
+	local output
+
+	[ -n "$iface" ] || return 1
+	[ -n "$lladdr" ] || return 1
+
+	if has_addr_on_iface "$iface" "$lladdr"; then
+		return 0
+	fi
+
+	output="$(ip -6 addr add "$lladdr" dev "$iface" scope link 2>&1)" || {
+		# If it raced with another handler and already exists, accept it.
+		if has_addr_on_iface "$iface" "$lladdr"; then
+			return 0
+		fi
+		log_warning "Failed to add virtual link-local $lladdr on $iface: $output"
+		return 1
+	}
+
+	log_info "RA BACKUP guard added virtual router link-local $lladdr on $iface"
+	return 0
+}
+
+del_virtual_ll() {
+	local iface="$1"
+	local lladdr="$2"
+	local output
+
+	[ -n "$iface" ] || return 0
+	[ -n "$lladdr" ] || return 0
+
+	if ! has_addr_on_iface "$iface" "$lladdr"; then
+		return 0
+	fi
+
+	output="$(ip -6 addr del "$lladdr" dev "$iface" 2>&1)" || {
+		if ! has_addr_on_iface "$iface" "$lladdr"; then
+			return 0
+		fi
+		log_warning "Failed to remove virtual link-local $lladdr from $iface: $output"
+		return 1
+	}
+
+	log_info "RA BACKUP guard removed virtual router link-local $lladdr from $iface"
+	return 0
+}
+
+deprecate_other_link_locals() {
+	local iface="$1"
+	local virtual="$2"
+	local virtual_addr addr output
+
+	[ "$PREFER_VIRTUAL_LL" = "1" ] || return 0
+
+	virtual_addr="$(lladdr_no_prefix "$virtual")"
+
+	ip -o -6 addr show dev "$iface" scope link 2>/dev/null | awk '{print $4}' | while read -r addr; do
+		[ -n "$addr" ] || continue
+		case "$addr" in
+			fe80:*) ;;
+			*) continue ;;
+		esac
+
+		[ "$(lladdr_no_prefix "$addr")" = "$virtual_addr" ] && continue
+
+		output="$(ip -6 addr change "$addr" dev "$iface" preferred_lft 0 2>&1)" || {
+			log_warning "Failed to deprecate non-virtual link-local $addr on $iface: $output"
+			continue
+		}
+
+		log_info "RA BACKUP guard deprecated non-virtual link-local $addr on $iface to prefer $virtual"
+	done
+}
+
+restore_other_link_locals() {
+	local iface="$1"
+	local virtual="$2"
+	local virtual_addr addr output
+
+	[ "$PREFER_VIRTUAL_LL" = "1" ] || return 0
+
+	virtual_addr="$(lladdr_no_prefix "$virtual")"
+
+	ip -o -6 addr show dev "$iface" scope link 2>/dev/null | awk '{print $4}' | while read -r addr; do
+		[ -n "$addr" ] || continue
+		case "$addr" in
+			fe80:*) ;;
+			*) continue ;;
+		esac
+
+		[ "$(lladdr_no_prefix "$addr")" = "$virtual_addr" ] && continue
+
+		output="$(ip -6 addr change "$addr" dev "$iface" preferred_lft forever 2>&1)" || {
+			log_warning "Failed to restore non-virtual link-local $addr on $iface: $output"
+			continue
+		}
+	done
+}
+
+reconcile_virtual_link_locals() {
+	local file desired token action type name iface lladdr
+
+	for file in "$STATE_DIR"/*.state; do
+		[ -f "$file" ] || continue
+		IFS='|' read -r desired token action type name iface lladdr < "$file"
+
+		[ -n "$iface" ] || continue
+		[ -n "$lladdr" ] || continue
+
+		case "$desired" in
+			MASTER)
+				add_virtual_ll "$iface" "$lladdr" || return 1
+				deprecate_other_link_locals "$iface" "$lladdr"
+				;;
+			BACKUP)
+				del_virtual_ll "$iface" "$lladdr" || return 1
+				restore_other_link_locals "$iface" "$lladdr"
+				;;
+		esac
+	done
+
+	return 0
+}
+
+process_latest_states() {
+	local before after desired
+
+	while :; do
+		rm -f "$PENDING_FILE"
+
+		while :; do
+			before="$(collect_state_signature)"
+			desired="$(collect_desired_ifaces)"
+
+			reconcile_virtual_link_locals || return 1
+			reconcile_set "$desired" || return 1
+
+			# Coalesce near-simultaneous keepalived transitions. If another handler
+			# queued a newer state while this process owned the lock, run again.
+			sleep 1
+			after="$(collect_state_signature)"
+			[ "$before" = "$after" ] && break
+
+			log_info "RA BACKUP guard detected queued state change; reconciling again"
+		done
+
+		[ -e "$PENDING_FILE" ] || break
+		log_info "RA BACKUP guard detected pending event; reconciling again"
+	done
+}
+
+should_handle_event || exit 0
+
+DESIRED="$(desired_from_action "$ACTION")" || exit 0
+IFACE="$(resolve_instance_device "$NAME")" || {
+	log_warning "Cannot resolve interface for IPv6 VRRP instance $NAME"
+	exit 0
+}
+LLADDR="$(resolve_instance_lladdr "$NAME")" || {
+	log_warning "Cannot resolve virtual link-local address for IPv6 VRRP instance $NAME"
+	exit 0
+}
+TOKEN="${DESIRED}:$$:$(mono_ms)"
+
+write_latest_state "$DESIRED" "$TOKEN" "$IFACE" "$LLADDR" || exit 1
+
+if ! acquire_lock; then
+	log_info "RA BACKUP guard handler busy, queued desired=$DESIRED iface=$IFACE lladdr=$LLADDR name=$NAME token=$TOKEN"
+	exit 0
+fi
+
+LOCK_HELD=1
+trap 'cleanup' EXIT INT TERM
+
+log_info "RA BACKUP guard processing action=$ACTION desired=$DESIRED iface=$IFACE lladdr=$LLADDR name=$NAME token=$TOKEN"
+
+while :; do
+	process_latest_states || exit 1
+
+	release_lock
+	LOCK_HELD=0
+
+	[ -e "$PENDING_FILE" ] || exit 0
+
+	if ! acquire_lock; then
+		exit 0
+	fi
+
+	LOCK_HELD=1
+	log_info "RA BACKUP guard picked up pending state after releasing lock"
+done
+
+exit 0
