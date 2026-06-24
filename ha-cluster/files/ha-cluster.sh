@@ -16,7 +16,8 @@ KEEPALIVED_CONF="${HA_CLUSTER_RUN_DIR}/keepalived.conf"
 OWSYNC_CONF="${HA_CLUSTER_RUN_DIR}/owsync.conf"
 LEASE_SYNC_CONF="${HA_CLUSTER_RUN_DIR}/lease-sync.conf"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
-HA_DHCPV6_GUARD_STATE_DIR="${HA_CLUSTER_RUN_DIR}/dhcpv6-backup-guard"
+HA_RA_GUARD_TABLE="ha_cluster_ra"
+HA_IPV6_GUARD_STATE_DIR="${HA_CLUSTER_RUN_DIR}/ipv6-backup-guard"
 
 # Log level constants (matches syslog priorities)
 HA_LOG_LEVEL_ERROR=0
@@ -992,10 +993,14 @@ ha_release_dnsmasq() {
 	/etc/init.d/dnsmasq restart 2>/dev/null
 }
 
-# Remove DHCPv6 BACKUP guard state/rules when ha-cluster stops.
-ha_release_dhcpv6_guard() {
-	rm -rf "$HA_DHCPV6_GUARD_STATE_DIR"
+# Remove IPv6 BACKUP guard state/rules when ha-cluster stops.
+ha_release_ipv6_guard() {
+	rm -rf "$HA_IPV6_GUARD_STATE_DIR"
+	rm -rf "${HA_CLUSTER_RUN_DIR}/ipv6-backup-guard.lock"
+	rm -rf "${HA_CLUSTER_RUN_DIR}/dhcpv6-backup-guard" "${HA_CLUSTER_RUN_DIR}/dhcpv6-backup-guard.lock"
+	rm -rf "${HA_CLUSTER_RUN_DIR}/ra-backup-guard" "${HA_CLUSTER_RUN_DIR}/ra-backup-guard.lock"
 	nft delete table inet "$HA_DHCPV6_GUARD_TABLE" >/dev/null 2>&1 || true
+	nft delete table inet "$HA_RA_GUARD_TABLE" >/dev/null 2>&1 || true
 }
 
 # Apply all configurations

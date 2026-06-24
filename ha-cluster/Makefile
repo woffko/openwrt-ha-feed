@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=8
+PKG_RELEASE:=9
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -53,8 +53,7 @@ define Package/ha-cluster/install
 	$(INSTALL_BIN) ./files/ha-cluster.sh $(1)/usr/lib/ha-cluster/
 
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/keepalived
-	$(INSTALL_BIN) ./files/dhcpv6-backup-guard.hotplug $(1)/etc/hotplug.d/keepalived/20-dhcpv6-backup-guard
-	$(INSTALL_BIN) ./files/ra-backup-guard.hotplug $(1)/etc/hotplug.d/keepalived/21-RA-backup-guard
+	$(INSTALL_BIN) ./files/ipv6-backup-guard.hotplug $(1)/etc/hotplug.d/keepalived/20-ipv6-backup-guard
 
 endef
 
@@ -69,6 +68,8 @@ endef
 
 define Package/ha-cluster/postinst
 #!/bin/sh
+rm -f "$${IPKG_INSTROOT}/etc/hotplug.d/keepalived/20-dhcpv6-backup-guard"
+rm -f "$${IPKG_INSTROOT}/etc/hotplug.d/keepalived/21-RA-backup-guard"
 [ -n "$${IPKG_INSTROOT}" ] || {
 	/etc/init.d/ha-cluster enable
 	/etc/init.d/ha-cluster start

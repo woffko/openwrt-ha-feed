@@ -85,8 +85,8 @@ stop_service() {
 	# Remove dnsmasq HA overlay and restart dnsmasq
 	ha_release_dnsmasq
 
-	# Remove DHCPv6 BACKUP guard nft rules
-	ha_release_dhcpv6_guard
+	# Remove IPv6 BACKUP guard nft rules
+	ha_release_ipv6_guard
 
 	# Release service management back to standalone init scripts
 	ha_manage_services "release"

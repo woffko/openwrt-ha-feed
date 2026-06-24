@@ -1,0 +1,544 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Keep IPv6 HA advertisements authoritative for IPv6 VRRP instances.
+#
+# BACKUP/FAULT/STOP:
+#   - drop locally generated Router Advertisements on the interface
+#   - drop inbound DHCPv6 client requests on the interface
+#
+# MASTER:
+#   - allow DHCPv6 client requests
+#   - allow Router Advertisements only when their source address is the
+#     configured virtual link-local address for this VRRP instance
+#
+# The script intentionally does not add, delete, or deprecate IPv6 addresses.
+# keepalived owns virtual addresses; this hook only reconciles nftables.
+
+PATH="${HA_GUARD_PATH:-/usr/sbin:/usr/bin:/sbin:/bin}"
+
+TAG="ha-cluster"
+DHCPV6_TABLE="ha_cluster_dhcpv6"
+RA_TABLE="ha_cluster_ra"
+SET="backup_ifaces"
+
+RUN_DIR="${RUN_DIR:-/tmp/ha-cluster}"
+STATE_DIR="$RUN_DIR/ipv6-backup-guard"
+LOCK_DIR="$RUN_DIR/ipv6-backup-guard.lock"
+PENDING_FILE="$STATE_DIR/.pending"
+
+VIRTUAL_LL_DEFAULT="${HA_RA_VIRTUAL_LL_DEFAULT:-fe80::5/64}"
+SOURCE_GUARD="${HA_RA_SOURCE_GUARD:-1}"
+
+log_info() {
+	logger -t "$TAG" -p daemon.info "$@"
+}
+
+log_warning() {
+	logger -t "$TAG" -p daemon.warning "$@"
+}
+
+mono_ms() {
+	awk '{ printf "%d\n", $1 * 1000 }' /proc/uptime 2>/dev/null
+}
+
+safe_name() {
+	printf '%s' "$1" | sed 's/[^A-Za-z0-9_.-]/_/g'
+}
+
+lladdr_no_prefix() {
+	printf '%s\n' "$1" | sed 's,/.*,,'
+}
+
+valid_nft_ifname() {
+	case "$1" in
+		''|*[!A-Za-z0-9_.:-]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+is_link_local_addr() {
+	local addr
+
+	addr="$(lladdr_no_prefix "$1")"
+	case "$addr" in
+		fe80:*[!0-9A-Fa-f:.]*|fe80:|fe80) return 1 ;;
+		fe80:*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+normalize_lladdr() {
+	local addr="$1"
+
+	[ -n "$addr" ] || return 1
+
+	if ! is_link_local_addr "$addr"; then
+		log_warning "Invalid virtual link-local address '$addr': must be a fe80::/10 address"
+		return 1
+	fi
+
+	case "$addr" in
+		*/*) printf '%s\n' "$addr" ;;
+		*) printf '%s/64\n' "$addr" ;;
+	esac
+}
+
+should_handle_event() {
+	[ -n "${ACTION:-}" ] || return 1
+	[ -n "${NAME:-}" ] || return 1
+
+	if [ -n "${TYPE:-}" ] && [ "$TYPE" != "INSTANCE" ]; then
+		return 1
+	fi
+
+	case "$NAME" in
+		*_v6) ;;
+		*) return 1 ;;
+	esac
+
+	case "$ACTION" in
+		MASTER|BACKUP|FAULT|STOP) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+desired_from_action() {
+	case "$1" in
+		MASTER)
+			echo "MASTER"
+			;;
+		BACKUP|FAULT|STOP)
+			echo "BACKUP"
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+resolve_instance_device() {
+	local instance="${1%_v6}"
+	local logical device
+
+	logical="$(uci -q get "ha-cluster.${instance}.interface")"
+	[ -n "$logical" ] || return 1
+
+	device="$(uci -q get "network.${logical}.device")"
+	[ -n "$device" ] || device="$(uci -q get "network.${logical}.ifname" | awk '{print $1}')"
+	[ -n "$device" ] || device="$logical"
+
+	printf '%s\n' "$device"
+}
+
+_find_vip_lladdr() {
+	local section="$1"
+	local enabled vip_instance address6
+
+	[ -z "$FOUND_LLADDR" ] || return 0
+
+	config_get_bool enabled "$section" enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+
+	config_get vip_instance "$section" vrrp_instance ""
+	[ "$vip_instance" = "$TARGET_INSTANCE" ] || return 0
+
+	config_get address6 "$section" address6 ""
+	is_link_local_addr "$address6" || return 0
+
+	FOUND_LLADDR="$address6"
+}
+
+resolve_instance_vip_lladdr() {
+	local instance="$1"
+	local lladdr
+
+	lladdr="$(uci -q get "ha-cluster.${instance}.address6")"
+	if is_link_local_addr "$lladdr"; then
+		normalize_lladdr "$lladdr"
+		return $?
+	fi
+
+	[ -r /lib/functions.sh ] || return 1
+
+	. /lib/functions.sh
+	TARGET_INSTANCE="$instance"
+	FOUND_LLADDR=""
+	config_load ha-cluster
+	config_foreach _find_vip_lladdr vip
+
+	[ -n "$FOUND_LLADDR" ] || return 1
+	normalize_lladdr "$FOUND_LLADDR"
+}
+
+resolve_instance_lladdr() {
+	local instance="${1%_v6}"
+	local lladdr
+
+	lladdr="$(uci -q get "ha-cluster.${instance}.virtual_link_local")"
+	[ -n "$lladdr" ] || lladdr="$(uci -q get "ha-cluster.${instance}.ra_link_local")"
+	[ -n "$lladdr" ] || lladdr="$(uci -q get "ha-cluster.${instance}.link_local")"
+	[ -n "$lladdr" ] || lladdr="$(resolve_instance_vip_lladdr "$instance")"
+	[ -n "$lladdr" ] || lladdr="$VIRTUAL_LL_DEFAULT"
+
+	normalize_lladdr "$lladdr"
+}
+
+state_path() {
+	printf '%s/%s.state\n' "$STATE_DIR" "$(safe_name "$1")"
+}
+
+write_latest_state() {
+	local desired="$1"
+	local token="$2"
+	local iface="$3"
+	local lladdr="$4"
+	local old_desired old_token old_action old_type old_name old_iface old_lladdr
+	local path
+
+	mkdir -p "$STATE_DIR" || return 1
+	path="$(state_path "$NAME")"
+
+	STATE_CHANGED=1
+	if [ -f "$path" ]; then
+		IFS='|' read -r old_desired old_token old_action old_type old_name old_iface old_lladdr < "$path"
+		if [ "$old_desired" = "$desired" ] && [ "$old_iface" = "$iface" ] && [ "$old_lladdr" = "$lladdr" ]; then
+			STATE_CHANGED=0
+			return 0
+		fi
+	fi
+
+	printf '%s|%s|%s|%s|%s|%s|%s\n' \
+		"$desired" "$token" "${ACTION:-}" "${TYPE:-INSTANCE}" "$NAME" "$iface" "$lladdr" > "${path}.tmp.$$" || return 1
+	mv "${path}.tmp.$$" "$path"
+	: > "$PENDING_FILE"
+}
+
+acquire_lock() {
+	local pid
+
+	mkdir -p "$RUN_DIR" || return 1
+
+	if mkdir "$LOCK_DIR" 2>/dev/null; then
+		printf '%s\n' "$$" > "$LOCK_DIR/pid"
+		return 0
+	fi
+
+	pid="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+	if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+		rm -rf "$LOCK_DIR"
+		if mkdir "$LOCK_DIR" 2>/dev/null; then
+			printf '%s\n' "$$" > "$LOCK_DIR/pid"
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+release_lock() {
+	rm -rf "$LOCK_DIR"
+}
+
+cleanup() {
+	[ "${LOCK_HELD:-0}" = "1" ] && release_lock
+}
+
+collect_backup_ifaces() {
+	local file desired token action type name iface lladdr blocked
+
+	for file in "$STATE_DIR"/*.state; do
+		[ -f "$file" ] || continue
+		IFS='|' read -r desired token action type name iface lladdr < "$file"
+		[ "$desired" = "BACKUP" ] || continue
+		[ -n "$iface" ] || continue
+
+		case " $blocked " in
+			*" $iface "*) ;;
+			*) blocked="${blocked:+$blocked }$iface" ;;
+		esac
+	done
+
+	printf '%s\n' "$blocked"
+}
+
+collect_state_signature() {
+	local file desired token action type name iface lladdr
+
+	for file in "$STATE_DIR"/*.state; do
+		[ -f "$file" ] || continue
+		printf '%s:' "$(basename "$file")"
+		IFS='|' read -r desired token action type name iface lladdr < "$file"
+		printf '%s|%s|%s\n' "$desired" "$iface" "$lladdr"
+	done
+}
+
+build_nft_elements() {
+	local iface elements sep
+
+	for iface in $1; do
+		if ! valid_nft_ifname "$iface"; then
+			log_warning "Ignoring invalid interface name for IPv6 BACKUP guard: $iface"
+			return 1
+		fi
+
+		elements="$elements$sep\"$iface\""
+		sep=", "
+	done
+
+	printf '%s\n' "$elements"
+}
+
+current_set_elements() {
+	local table="$1"
+
+	nft list set inet "$table" "$SET" 2>/dev/null | \
+		sed -n 's/.*elements = { \(.*\) }.*/\1/p' | \
+		head -n 1
+}
+
+reconcile_set() {
+	local table="$1"
+	local desired="$2"
+	local label="$3"
+	local elements output current
+
+	if [ -n "$desired" ]; then
+		elements="$(build_nft_elements "$desired")" || return 1
+		output="$(nft -f - 2>&1 <<-NFT
+		flush set inet $table $SET
+		add element inet $table $SET { $elements }
+		NFT
+		)" || {
+			log_warning "Failed to reconcile $label BACKUP guard nft set to '$desired': $output"
+			return 1
+		}
+	else
+		output="$(nft flush set inet "$table" "$SET" 2>&1)" || {
+			log_warning "Failed to clear $label BACKUP guard nft set: $output"
+			return 1
+		}
+	fi
+
+	current="$(current_set_elements "$table")"
+	[ -n "$current" ] || current="empty"
+	log_info "$label BACKUP guard reconciled blocked ifaces: desired=${desired:-empty}; nft=$current"
+	return 0
+}
+
+ensure_dhcpv6_table() {
+	local output
+
+	if ! nft list table inet "$DHCPV6_TABLE" >/dev/null 2>&1; then
+		output="$(nft -f - 2>&1 <<-NFT
+		table inet $DHCPV6_TABLE {
+			set $SET {
+				type ifname;
+			}
+
+			chain input {
+				type filter hook input priority -310; policy accept;
+			}
+		}
+		NFT
+		)" || {
+			log_warning "Failed to create DHCPv6 BACKUP guard nft table: $output"
+			return 1
+		}
+	fi
+
+	if ! nft list set inet "$DHCPV6_TABLE" "$SET" >/dev/null 2>&1; then
+		output="$(nft add set inet "$DHCPV6_TABLE" "$SET" '{ type ifname; }' 2>&1)" || {
+			log_warning "Failed to create DHCPv6 BACKUP guard nft set: $output"
+			return 1
+		}
+	fi
+
+	if ! nft list chain inet "$DHCPV6_TABLE" input >/dev/null 2>&1; then
+		output="$(nft add chain inet "$DHCPV6_TABLE" input '{ type filter hook input priority -310; policy accept; }' 2>&1)" || {
+			log_warning "Failed to create DHCPv6 BACKUP guard nft input chain: $output"
+			return 1
+		}
+	fi
+
+	output="$(nft -f - 2>&1 <<-NFT
+	flush chain inet $DHCPV6_TABLE input
+	add rule inet $DHCPV6_TABLE input meta iifname @$SET meta nfproto ipv6 udp dport 547 counter drop comment "ha-cluster: drop DHCPv6 while BACKUP"
+	NFT
+	)" || {
+		log_warning "Failed to reconcile DHCPv6 BACKUP guard nft input rule: $output"
+		return 1
+	}
+
+	nft delete chain inet "$DHCPV6_TABLE" backup_input >/dev/null 2>&1 || true
+}
+
+ensure_ra_table() {
+	local output
+
+	if ! nft list table inet "$RA_TABLE" >/dev/null 2>&1; then
+		output="$(nft -f - 2>&1 <<-NFT
+		table inet $RA_TABLE {
+			set $SET {
+				type ifname;
+			}
+
+			chain output {
+				type filter hook output priority -310; policy accept;
+			}
+		}
+		NFT
+		)" || {
+			log_warning "Failed to create RA BACKUP guard nft table: $output"
+			return 1
+		}
+	fi
+
+	if ! nft list set inet "$RA_TABLE" "$SET" >/dev/null 2>&1; then
+		output="$(nft add set inet "$RA_TABLE" "$SET" '{ type ifname; }' 2>&1)" || {
+			log_warning "Failed to create RA BACKUP guard nft set: $output"
+			return 1
+		}
+	fi
+
+	if ! nft list chain inet "$RA_TABLE" output >/dev/null 2>&1; then
+		output="$(nft add chain inet "$RA_TABLE" output '{ type filter hook output priority -310; policy accept; }' 2>&1)" || {
+			log_warning "Failed to create RA BACKUP guard nft output chain: $output"
+			return 1
+		}
+	fi
+}
+
+collect_ra_source_rules() {
+	local file desired token action type name iface lladdr addr rules seen_ifaces
+
+	[ "$SOURCE_GUARD" = "1" ] || return 0
+
+	for file in "$STATE_DIR"/*.state; do
+		[ -f "$file" ] || continue
+		IFS='|' read -r desired token action type name iface lladdr < "$file"
+		[ "$desired" = "MASTER" ] || continue
+		[ -n "$iface" ] || continue
+		[ -n "$lladdr" ] || continue
+
+		if ! valid_nft_ifname "$iface"; then
+			log_warning "Ignoring invalid interface name for RA source guard: $iface"
+			continue
+		fi
+
+		if ! is_link_local_addr "$lladdr"; then
+			log_warning "Ignoring invalid virtual link-local for RA source guard: $lladdr"
+			continue
+		fi
+
+		case "$seen_ifaces" in
+			*"|$iface|"*)
+				log_warning "Ignoring conflicting RA source guard for $iface: $lladdr"
+				continue
+				;;
+		esac
+
+		addr="$(lladdr_no_prefix "$lladdr")"
+		seen_ifaces="${seen_ifaces}|$iface|"
+		rules="${rules}add rule inet $RA_TABLE output meta oifname \"$iface\" meta nfproto ipv6 ip6 saddr != $addr icmpv6 type 134 counter drop comment \"ha-cluster: drop RA with non-virtual source\"
+"
+	done
+
+	printf '%s' "$rules"
+}
+
+reconcile_ra_output_rules() {
+	local source_rules="$1"
+	local output
+
+	output="$(nft -f - 2>&1 <<-NFT
+	flush chain inet $RA_TABLE output
+	add rule inet $RA_TABLE output meta oifname @$SET meta nfproto ipv6 icmpv6 type 134 counter drop comment "ha-cluster: drop RA while BACKUP"
+	$source_rules
+	NFT
+	)" || {
+		log_warning "Failed to reconcile RA BACKUP guard nft output rules: $output"
+		return 1
+	}
+}
+
+reconcile_all() {
+	local backup_ifaces source_rules
+
+	backup_ifaces="$(collect_backup_ifaces)"
+	source_rules="$(collect_ra_source_rules)"
+
+	ensure_dhcpv6_table || return 1
+	ensure_ra_table || return 1
+
+	reconcile_set "$DHCPV6_TABLE" "$backup_ifaces" "DHCPv6" || return 1
+	reconcile_set "$RA_TABLE" "$backup_ifaces" "RA" || return 1
+	reconcile_ra_output_rules "$source_rules" || return 1
+}
+
+process_latest_states() {
+	local before after
+
+	while :; do
+		rm -f "$PENDING_FILE"
+
+		while :; do
+			before="$(collect_state_signature)"
+
+			reconcile_all || return 1
+
+			# Coalesce near-simultaneous keepalived transitions. If another handler
+			# queued a newer state while this process owned the lock, run again.
+			sleep 1
+			after="$(collect_state_signature)"
+			[ "$before" = "$after" ] && break
+
+			log_info "IPv6 BACKUP guard detected queued state change; reconciling again"
+		done
+
+		[ -e "$PENDING_FILE" ] || break
+		log_info "IPv6 BACKUP guard detected pending event; reconciling again"
+	done
+}
+
+should_handle_event || exit 0
+
+DESIRED="$(desired_from_action "$ACTION")" || exit 0
+IFACE="$(resolve_instance_device "$NAME")" || {
+	log_warning "Cannot resolve interface for IPv6 VRRP instance $NAME"
+	exit 0
+}
+LLADDR="$(resolve_instance_lladdr "$NAME")" || {
+	log_warning "Cannot resolve virtual link-local address for IPv6 VRRP instance $NAME"
+	exit 0
+}
+TOKEN="${DESIRED}:$$:$(mono_ms)"
+
+write_latest_state "$DESIRED" "$TOKEN" "$IFACE" "$LLADDR" || exit 1
+
+if ! acquire_lock; then
+	[ "${STATE_CHANGED:-1}" = "1" ] && log_info "IPv6 BACKUP guard handler busy, queued desired=$DESIRED iface=$IFACE lladdr=$LLADDR name=$NAME token=$TOKEN"
+	exit 0
+fi
+
+LOCK_HELD=1
+trap 'cleanup' EXIT INT TERM
+
+log_info "IPv6 BACKUP guard processing action=$ACTION desired=$DESIRED iface=$IFACE lladdr=$LLADDR name=$NAME token=$TOKEN"
+
+while :; do
+	process_latest_states || exit 1
+
+	release_lock
+	LOCK_HELD=0
+
+	[ -e "$PENDING_FILE" ] || exit 0
+
+	if ! acquire_lock; then
+		exit 0
+	fi
+
+	LOCK_HELD=1
+	log_info "IPv6 BACKUP guard picked up pending state after releasing lock"
+done
+
+exit 0
