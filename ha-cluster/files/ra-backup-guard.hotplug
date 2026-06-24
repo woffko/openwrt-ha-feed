@@ -4,14 +4,14 @@
 #
 # BACKUP/FAULT/STOP:
 #   - block locally generated IPv6 Router Advertisements on the interface
-#   - keep the virtual link-local router address by default to avoid feeding
-#     keepalived an IPv6 address delete event for its own VRRP interface
+#   - do not change interface IPv6 addresses by default
 #
 # MASTER:
 #   - unblock Router Advertisements on the interface
-#   - add a stable virtual link-local router address, default fe80::5/64
-#   - optionally deprecate other link-local addresses so RA source selection
-#     prefers the virtual fe80::5 address instead of the node-specific fe80::MAC
+#   - block Router Advertisements whose source is not the configured virtual
+#     link-local address for that VRRP instance
+#   - optionally manage a stable virtual link-local router address when
+#     HA_RA_MANAGE_VIRTUAL_LL=1
 #
 # Interface resolution follows the same logic as DHCPv6 BACKUP guard:
 #   NAME=lan_v6  -> instance=lan  -> ha-cluster.lan.interface
@@ -35,12 +35,29 @@ PENDING_FILE="$STATE_DIR/.pending"
 #
 # Or per HA instance via UCI, for example:
 #   uci set ha-cluster.lan.virtual_link_local='fe80::5/64'
-#   uci set ha-cluster.wifi.virtual_link_local='fe80::5/64'
+#   uci set ha-cluster.wifi.virtual_link_local='fe80::9/64'
 VIRTUAL_LL_DEFAULT="${HA_RA_VIRTUAL_LL_DEFAULT:-fe80::5/64}"
+
+# Filter MASTER RAs by source address. This keeps node-specific kernel
+# link-local addresses usable for normal IPv6 but prevents dnsmasq/odhcpd from
+# advertising them as router sources while the VRRP instance is MASTER.
+#
+# 1 = allow only the configured virtual LL as RA source on MASTER interfaces
+# 0 = only block all RAs on BACKUP interfaces
+SOURCE_GUARD="${HA_RA_SOURCE_GUARD:-1}"
+
+# Address management is opt-in. The guard's primary job is to block/unblock
+# locally generated RAs through nftables. Adding/removing link-local addresses
+# from a keepalived notify hook can feed keepalived its own netlink events.
+#
+# 1 = add/restore/deprecate/remove virtual LL according to state
+# 0 = leave interface IPv6 addresses untouched
+MANAGE_VIRTUAL_LL="${HA_RA_MANAGE_VIRTUAL_LL:-0}"
 
 # Keep the virtual link-local address on BACKUP/FAULT by default. Removing it
 # generates netlink DELADDR events and can make keepalived briefly consider an
 # IPv6 VRRP interface address-less, causing BACKUP/MASTER feedback loops.
+# Only used when HA_RA_MANAGE_VIRTUAL_LL=1.
 #
 # 1 = keep virtual LL while BACKUP/FAULT
 # 0 = remove virtual LL while BACKUP/FAULT (legacy behavior)
@@ -50,6 +67,7 @@ KEEP_VIRTUAL_LL="${HA_RA_KEEP_VIRTUAL_LL:-1}"
 # interface to make kernel/source selection prefer the virtual fe80::5 address.
 # This is disabled by default because changing preferred_lft also generates
 # netlink address events observed by keepalived.
+# Only used when HA_RA_MANAGE_VIRTUAL_LL=1.
 #
 # 1 = prefer virtual LL strongly
 # 0 = only add virtual LL, do not touch other LL addresses
@@ -109,13 +127,10 @@ normalize_lladdr() {
 
 	[ -n "$addr" ] || return 1
 
-	case "$addr" in
-		fe80:*) ;;
-		*)
-			log_warning "Invalid virtual link-local address '$addr': must start with fe80:"
-			return 1
-			;;
-	esac
+	if ! is_link_local_addr "$addr"; then
+		log_warning "Invalid virtual link-local address '$addr': must be a fe80::/10 address"
+		return 1
+	fi
 
 	case "$addr" in
 		*/*)
@@ -124,6 +139,17 @@ normalize_lladdr() {
 		*)
 			printf '%s/64\n' "$addr"
 			;;
+	esac
+}
+
+is_link_local_addr() {
+	local addr
+
+	addr="$(lladdr_no_prefix "$1")"
+	case "$addr" in
+		fe80:*[!0-9A-Fa-f:.]*|fe80:|fe80) return 1 ;;
+		fe80:*) return 0 ;;
+		*) return 1 ;;
 	esac
 }
 
@@ -141,6 +167,46 @@ resolve_instance_device() {
 	printf '%s\n' "$device"
 }
 
+_ra_find_vip_lladdr() {
+	local section="$1"
+	local enabled vip_instance address6
+
+	[ -z "$_RA_FOUND_LLADDR" ] || return 0
+
+	config_get_bool enabled "$section" enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+
+	config_get vip_instance "$section" vrrp_instance ""
+	[ "$vip_instance" = "$_RA_TARGET_INSTANCE" ] || return 0
+
+	config_get address6 "$section" address6 ""
+	is_link_local_addr "$address6" || return 0
+
+	_RA_FOUND_LLADDR="$address6"
+}
+
+resolve_instance_vip_lladdr() {
+	local instance="$1"
+	local lladdr
+
+	lladdr="$(uci -q get "ha-cluster.${instance}.address6")"
+	if is_link_local_addr "$lladdr"; then
+		normalize_lladdr "$lladdr"
+		return $?
+	fi
+
+	[ -r /lib/functions.sh ] || return 1
+
+	. /lib/functions.sh
+	_RA_TARGET_INSTANCE="$instance"
+	_RA_FOUND_LLADDR=""
+	config_load ha-cluster
+	config_foreach _ra_find_vip_lladdr vip
+
+	[ -n "$_RA_FOUND_LLADDR" ] || return 1
+	normalize_lladdr "$_RA_FOUND_LLADDR"
+}
+
 resolve_instance_lladdr() {
 	local instance="${1%_v6}"
 	local lladdr
@@ -148,6 +214,7 @@ resolve_instance_lladdr() {
 	lladdr="$(uci -q get "ha-cluster.${instance}.virtual_link_local")"
 	[ -n "$lladdr" ] || lladdr="$(uci -q get "ha-cluster.${instance}.ra_link_local")"
 	[ -n "$lladdr" ] || lladdr="$(uci -q get "ha-cluster.${instance}.link_local")"
+	[ -n "$lladdr" ] || lladdr="$(resolve_instance_vip_lladdr "$instance")"
 	[ -n "$lladdr" ] || lladdr="$VIRTUAL_LL_DEFAULT"
 
 	normalize_lladdr "$lladdr"
@@ -250,15 +317,6 @@ ensure_table() {
 		}
 	fi
 
-	# Keep exactly one rule in our private output chain.
-	output="$(nft -f - 2>&1 <<-NFT
-	flush chain inet $TABLE output
-	add rule inet $TABLE output meta oifname @$SET meta nfproto ipv6 icmpv6 type 134 counter drop comment "ha-cluster: drop RA while BACKUP"
-	NFT
-	)" || {
-		log_warning "Failed to reconcile RA BACKUP guard nft output rule: $output"
-		return 1
-	}
 }
 
 collect_desired_ifaces() {
@@ -306,6 +364,73 @@ build_nft_elements() {
 	done
 
 	printf '%s\n' "$elements"
+}
+
+valid_nft_ifname() {
+	case "$1" in
+		''|*[!A-Za-z0-9_.:-]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+collect_master_source_rules() {
+	local file desired token action type name iface lladdr addr rules seen_pairs seen_ifaces
+
+	[ "$SOURCE_GUARD" = "1" ] || return 0
+
+	for file in "$STATE_DIR"/*.state; do
+		[ -f "$file" ] || continue
+		IFS='|' read -r desired token action type name iface lladdr < "$file"
+		[ "$desired" = "MASTER" ] || continue
+		[ -n "$iface" ] || continue
+		[ -n "$lladdr" ] || continue
+
+		if ! valid_nft_ifname "$iface"; then
+			log_warning "Ignoring invalid interface name for RA source guard: $iface"
+			continue
+		fi
+
+		if ! is_link_local_addr "$lladdr"; then
+			log_warning "Ignoring invalid virtual link-local for RA source guard: $lladdr"
+			continue
+		fi
+
+		addr="$(lladdr_no_prefix "$lladdr")"
+
+		case "$seen_pairs" in
+			*"|$iface $addr|"*) continue ;;
+		esac
+		case "$seen_ifaces" in
+			*"|$iface|"*)
+				log_warning "Ignoring conflicting RA source guard for $iface: $addr"
+				continue
+				;;
+		esac
+
+		seen_pairs="${seen_pairs}|$iface $addr|"
+		seen_ifaces="${seen_ifaces}|$iface|"
+		rules="${rules}add rule inet $TABLE output meta oifname \"$iface\" meta nfproto ipv6 ip6 saddr != $addr icmpv6 type 134 counter drop comment \"ha-cluster: drop RA with non-virtual source\"
+"
+	done
+
+	printf '%s' "$rules"
+}
+
+reconcile_output_rules() {
+	local source_rules="$1"
+	local output
+
+	ensure_table || return 1
+
+	output="$(nft -f - 2>&1 <<-NFT
+	flush chain inet $TABLE output
+	add rule inet $TABLE output meta oifname @$SET meta nfproto ipv6 icmpv6 type 134 counter drop comment "ha-cluster: drop RA while BACKUP"
+	$source_rules
+	NFT
+	)" || {
+		log_warning "Failed to reconcile RA BACKUP guard nft output rules: $output"
+		return 1
+	}
 }
 
 current_set_elements() {
@@ -485,6 +610,8 @@ reconcile_virtual_link_locals() {
 	local filter="${1:-}"
 	local file desired token action type name iface lladdr
 
+	[ "$MANAGE_VIRTUAL_LL" = "1" ] || return 0
+
 	for file in "$STATE_DIR"/*.state; do
 		[ -f "$file" ] || continue
 		IFS='|' read -r desired token action type name iface lladdr < "$file"
@@ -511,7 +638,7 @@ reconcile_virtual_link_locals() {
 }
 
 process_latest_states() {
-	local before after desired
+	local before after desired source_rules
 
 	while :; do
 		rm -f "$PENDING_FILE"
@@ -519,9 +646,11 @@ process_latest_states() {
 		while :; do
 			before="$(collect_state_signature)"
 			desired="$(collect_desired_ifaces)"
+			source_rules="$(collect_master_source_rules)"
 
 			reconcile_virtual_link_locals MASTER || return 1
 			reconcile_set "$desired" || return 1
+			reconcile_output_rules "$source_rules" || return 1
 			reconcile_virtual_link_locals BACKUP || return 1
 
 			# Coalesce near-simultaneous keepalived transitions. If another handler
@@ -552,10 +681,9 @@ LLADDR="$(resolve_instance_lladdr "$NAME")" || {
 TOKEN="${DESIRED}:$$:$(mono_ms)"
 
 write_latest_state "$DESIRED" "$TOKEN" "$IFACE" "$LLADDR" || exit 1
-[ "${STATE_CHANGED:-1}" = "1" ] || exit 0
 
 if ! acquire_lock; then
-	log_info "RA BACKUP guard handler busy, queued desired=$DESIRED iface=$IFACE lladdr=$LLADDR name=$NAME token=$TOKEN"
+	[ "${STATE_CHANGED:-1}" = "1" ] && log_info "RA BACKUP guard handler busy, queued desired=$DESIRED iface=$IFACE lladdr=$LLADDR name=$NAME token=$TOKEN"
 	exit 0
 fi
 
