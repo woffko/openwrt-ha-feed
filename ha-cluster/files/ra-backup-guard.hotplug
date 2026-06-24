@@ -25,6 +25,7 @@ SET="backup_ifaces"
 
 RUN_DIR="${RUN_DIR:-/tmp/ha-cluster}"
 STATE_DIR="$RUN_DIR/ra-backup-guard"
+DHCPV6_STATE_DIR="$RUN_DIR/dhcpv6-backup-guard"
 LOCK_DIR="$RUN_DIR/ra-backup-guard.lock"
 APPLIED_FILE="$STATE_DIR/.applied"
 PENDING_FILE="$STATE_DIR/.pending"
@@ -222,6 +223,34 @@ resolve_instance_lladdr() {
 
 state_path() {
 	printf '%s/%s.state\n' "$STATE_DIR" "$(safe_name "$1")"
+}
+
+dhcpv6_state_path() {
+	printf '%s/%s.state\n' "$DHCPV6_STATE_DIR" "$(safe_name "$1")"
+}
+
+dhcpv6_guard_desired() {
+	local path desired token action type name iface
+
+	path="$(dhcpv6_state_path "$NAME")"
+	[ -f "$path" ] || return 1
+
+	IFS='|' read -r desired token action type name iface < "$path"
+	[ "$name" = "$NAME" ] || return 1
+	[ "$iface" = "$IFACE" ] || return 1
+	[ -n "$desired" ] || return 1
+
+	printf '%s\n' "$desired"
+}
+
+ignore_stale_event() {
+	local dhcpv6_desired
+
+	dhcpv6_desired="$(dhcpv6_guard_desired)" || return 1
+	[ "$dhcpv6_desired" != "$DESIRED" ] || return 1
+
+	log_info "RA BACKUP guard ignoring stale action=$ACTION desired=$DESIRED iface=$IFACE name=$NAME because DHCPv6 guard desired=$dhcpv6_desired"
+	return 0
 }
 
 write_latest_state() {
@@ -679,6 +708,8 @@ LLADDR="$(resolve_instance_lladdr "$NAME")" || {
 	exit 0
 }
 TOKEN="${DESIRED}:$$:$(mono_ms)"
+
+ignore_stale_event && exit 0
 
 write_latest_state "$DESIRED" "$TOKEN" "$IFACE" "$LLADDR" || exit 1
 
