@@ -4,7 +4,8 @@
 #
 # BACKUP/FAULT/STOP:
 #   - block locally generated IPv6 Router Advertisements on the interface
-#   - remove the virtual link-local router address from the interface
+#   - keep the virtual link-local router address by default to avoid feeding
+#     keepalived an IPv6 address delete event for its own VRRP interface
 #
 # MASTER:
 #   - unblock Router Advertisements on the interface
@@ -37,12 +38,22 @@ PENDING_FILE="$STATE_DIR/.pending"
 #   uci set ha-cluster.wifi.virtual_link_local='fe80::5/64'
 VIRTUAL_LL_DEFAULT="${HA_RA_VIRTUAL_LL_DEFAULT:-fe80::5/64}"
 
+# Keep the virtual link-local address on BACKUP/FAULT by default. Removing it
+# generates netlink DELADDR events and can make keepalived briefly consider an
+# IPv6 VRRP interface address-less, causing BACKUP/MASTER feedback loops.
+#
+# 1 = keep virtual LL while BACKUP/FAULT
+# 0 = remove virtual LL while BACKUP/FAULT (legacy behavior)
+KEEP_VIRTUAL_LL="${HA_RA_KEEP_VIRTUAL_LL:-1}"
+
 # If enabled, on MASTER we deprecate other fe80::* addresses on the same
 # interface to make kernel/source selection prefer the virtual fe80::5 address.
+# This is disabled by default because changing preferred_lft also generates
+# netlink address events observed by keepalived.
 #
 # 1 = prefer virtual LL strongly
 # 0 = only add virtual LL, do not touch other LL addresses
-PREFER_VIRTUAL_LL="${HA_RA_PREFER_VIRTUAL_LL:-1}"
+PREFER_VIRTUAL_LL="${HA_RA_PREFER_VIRTUAL_LL:-0}"
 
 log_info() {
 	logger -t "$TAG" -p daemon.info "$@"
@@ -151,10 +162,20 @@ write_latest_state() {
 	local token="$2"
 	local iface="$3"
 	local lladdr="$4"
+	local old_desired old_token old_action old_type old_name old_iface old_lladdr
 	local path
 
 	mkdir -p "$STATE_DIR" || return 1
 	path="$(state_path "$NAME")"
+
+	STATE_CHANGED=1
+	if [ -f "$path" ]; then
+		IFS='|' read -r old_desired old_token old_action old_type old_name old_iface old_lladdr < "$path"
+		if [ "$old_desired" = "$desired" ] && [ "$old_iface" = "$iface" ] && [ "$old_lladdr" = "$lladdr" ]; then
+			STATE_CHANGED=0
+			return 0
+		fi
+	fi
 
 	printf '%s|%s|%s|%s|%s|%s|%s\n' \
 		"$desired" "$token" "${ACTION:-}" "${TYPE:-INSTANCE}" "$NAME" "$iface" "$lladdr" > "${path}.tmp.$$" || return 1
@@ -259,12 +280,13 @@ collect_desired_ifaces() {
 }
 
 collect_state_signature() {
-	local file
+	local file desired token action type name iface lladdr
 
 	for file in "$STATE_DIR"/*.state; do
 		[ -f "$file" ] || continue
 		printf '%s:' "$(basename "$file")"
-		cat "$file" 2>/dev/null
+		IFS='|' read -r desired token action type name iface lladdr < "$file"
+		printf '%s|%s|%s\n' "$desired" "$iface" "$lladdr"
 	done
 }
 
@@ -337,6 +359,23 @@ has_addr_on_iface() {
 		awk '{print $4}' | sed 's,/.*,,' | grep -Fxq "$addr"
 }
 
+link_local_addr_lifetimes() {
+	local iface="$1"
+
+	ip -o -6 addr show dev "$iface" scope link 2>/dev/null | awk '
+		{
+			addr = $4
+			preferred = ""
+			for (i = 1; i <= NF; i++) {
+				if ($i == "preferred_lft") {
+					preferred = $(i + 1)
+				}
+			}
+			print addr, preferred
+		}
+	'
+}
+
 add_virtual_ll() {
 	local iface="$1"
 	local lladdr="$2"
@@ -389,13 +428,13 @@ del_virtual_ll() {
 deprecate_other_link_locals() {
 	local iface="$1"
 	local virtual="$2"
-	local virtual_addr addr output
+	local virtual_addr addr preferred output
 
 	[ "$PREFER_VIRTUAL_LL" = "1" ] || return 0
 
 	virtual_addr="$(lladdr_no_prefix "$virtual")"
 
-	ip -o -6 addr show dev "$iface" scope link 2>/dev/null | awk '{print $4}' | while read -r addr; do
+	link_local_addr_lifetimes "$iface" | while read -r addr preferred; do
 		[ -n "$addr" ] || continue
 		case "$addr" in
 			fe80:*) ;;
@@ -403,6 +442,9 @@ deprecate_other_link_locals() {
 		esac
 
 		[ "$(lladdr_no_prefix "$addr")" = "$virtual_addr" ] && continue
+		case "$preferred" in
+			0|0sec) continue ;;
+		esac
 
 		output="$(ip -6 addr change "$addr" dev "$iface" preferred_lft 0 2>&1)" || {
 			log_warning "Failed to deprecate non-virtual link-local $addr on $iface: $output"
@@ -416,13 +458,13 @@ deprecate_other_link_locals() {
 restore_other_link_locals() {
 	local iface="$1"
 	local virtual="$2"
-	local virtual_addr addr output
+	local virtual_addr addr preferred output
 
 	[ "$PREFER_VIRTUAL_LL" = "1" ] || return 0
 
 	virtual_addr="$(lladdr_no_prefix "$virtual")"
 
-	ip -o -6 addr show dev "$iface" scope link 2>/dev/null | awk '{print $4}' | while read -r addr; do
+	link_local_addr_lifetimes "$iface" | while read -r addr preferred; do
 		[ -n "$addr" ] || continue
 		case "$addr" in
 			fe80:*) ;;
@@ -430,6 +472,7 @@ restore_other_link_locals() {
 		esac
 
 		[ "$(lladdr_no_prefix "$addr")" = "$virtual_addr" ] && continue
+		[ "$preferred" = "forever" ] && continue
 
 		output="$(ip -6 addr change "$addr" dev "$iface" preferred_lft forever 2>&1)" || {
 			log_warning "Failed to restore non-virtual link-local $addr on $iface: $output"
@@ -439,6 +482,7 @@ restore_other_link_locals() {
 }
 
 reconcile_virtual_link_locals() {
+	local filter="${1:-}"
 	local file desired token action type name iface lladdr
 
 	for file in "$STATE_DIR"/*.state; do
@@ -447,6 +491,7 @@ reconcile_virtual_link_locals() {
 
 		[ -n "$iface" ] || continue
 		[ -n "$lladdr" ] || continue
+		[ -z "$filter" ] || [ "$desired" = "$filter" ] || continue
 
 		case "$desired" in
 			MASTER)
@@ -454,8 +499,10 @@ reconcile_virtual_link_locals() {
 				deprecate_other_link_locals "$iface" "$lladdr"
 				;;
 			BACKUP)
-				del_virtual_ll "$iface" "$lladdr" || return 1
 				restore_other_link_locals "$iface" "$lladdr"
+				if [ "$KEEP_VIRTUAL_LL" != "1" ]; then
+					del_virtual_ll "$iface" "$lladdr" || return 1
+				fi
 				;;
 		esac
 	done
@@ -473,8 +520,9 @@ process_latest_states() {
 			before="$(collect_state_signature)"
 			desired="$(collect_desired_ifaces)"
 
-			reconcile_virtual_link_locals || return 1
+			reconcile_virtual_link_locals MASTER || return 1
 			reconcile_set "$desired" || return 1
+			reconcile_virtual_link_locals BACKUP || return 1
 
 			# Coalesce near-simultaneous keepalived transitions. If another handler
 			# queued a newer state while this process owned the lock, run again.
@@ -504,6 +552,7 @@ LLADDR="$(resolve_instance_lladdr "$NAME")" || {
 TOKEN="${DESIRED}:$$:$(mono_ms)"
 
 write_latest_state "$DESIRED" "$TOKEN" "$IFACE" "$LLADDR" || exit 1
+[ "${STATE_CHANGED:-1}" = "1" ] || exit 0
 
 if ! acquire_lock; then
 	log_info "RA BACKUP guard handler busy, queued desired=$DESIRED iface=$IFACE lladdr=$LLADDR name=$NAME token=$TOKEN"
