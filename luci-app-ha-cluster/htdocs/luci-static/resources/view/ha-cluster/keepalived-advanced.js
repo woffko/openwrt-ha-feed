@@ -403,7 +403,7 @@ return view.extend({
 
 		// === Health Checks (VRRP Scripts) ===
 		s = m.section(form.GridSection, 'script', _('Health Checks (VRRP Scripts)'),
-			_('Command checks may be referenced manually. Managed checks are attached to the selected VRRP instance automatically, including its generated IPv6 instance.'));
+			_('Command checks may be referenced manually. Managed checks are attached to every selected VRRP instance automatically, including generated IPv6 instances.'));
 		s.anonymous = false;
 		s.addremove = true;
 		s.sortable = true;
@@ -421,7 +421,10 @@ return view.extend({
 
 		o = s.option(form.DummyValue, '_managed_instance', _('VRRP Instance'));
 		o.cfgvalue = function(section_id) {
-			return uci.get('ha-cluster', section_id, 'vrrp_instance') || _('Manual');
+			var instances = uci.get('ha-cluster', section_id, 'vrrp_instance');
+			if (Array.isArray(instances))
+				return instances.join(', ');
+			return instances || _('Manual');
 		};
 		o.modalonly = false;
 
@@ -432,9 +435,8 @@ return view.extend({
 		checkTypeOption.rmempty = false;
 		checkTypeOption.modalonly = true;
 
-		o = s.option(form.ListValue, 'vrrp_instance', _('Managed VRRP Instance'),
-			_('Automatically track this check from the selected instance. Dataplane checks require a managed instance; no manual VRRP Instance edit is needed.'));
-		o.value('', _('Manual track_script only'));
+		o = s.option(form.DynamicList, 'vrrp_instance', _('Managed VRRP Instances'),
+			_('Automatically track this check from every selected instance. Select all internal gateway groups that must move together; no manual VRRP Instance edit is needed.'));
 		vrrpSections.forEach(function(instance) {
 			if (instance['.name'])
 				o.value(instance['.name'], instance['.name']);
@@ -443,8 +445,9 @@ return view.extend({
 		o.modalonly = true;
 		o.validate = function(section_id, value) {
 			var checkType = checkTypeOption.formvalue(section_id) || 'command';
-			if (checkType === 'dataplane' && !value)
-				return _('A managed VRRP instance is required for a dataplane check.');
+			var instances = this.formvalue(section_id);
+			if (checkType === 'dataplane' && (!instances || instances.length === 0))
+				return _('At least one managed VRRP instance is required for a dataplane check.');
 			return true;
 		};
 

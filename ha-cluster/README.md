@@ -213,8 +213,10 @@ Default exclusions: `network`, `system`, `owsync`, `ha-cluster`, `wireless`.
 ### Health check scripts (`config script '<name>'`)
 
 Command checks remain compatible with explicit `track_script` lists. Setting
-`vrrp_instance` makes a check package-managed: ha-cluster attaches it to the
-selected IPv4 instance and to the generated IPv6 instance automatically.
+`vrrp_instance` makes a check package-managed: ha-cluster attaches it to every
+selected IPv4 instance and to each generated IPv6 instance automatically. A
+legacy scalar `option vrrp_instance` remains supported; use repeated
+`list vrrp_instance` entries when related gateway groups must move together.
 
 The `dataplane` check type runs `/usr/lib/ha-cluster/check-dataplane`. It checks
 the selected device carrier, optionally checks the active 802.3ad member count,
@@ -226,7 +228,7 @@ unreachable.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `check_type` | string | `command` | `command` or package-managed `dataplane` |
-| `vrrp_instance` | string | | Automatically attach the check to this VRRP group; required for `dataplane` |
+| `vrrp_instance` | list | | Automatically attach the check to these VRRP groups; at least one is required for `dataplane` |
 | `script` | string | | Absolute command for `command` checks |
 | `interface` | string | | Linux device used by a `dataplane` check (for example `bond0.87`) |
 | `bond` | string | | Optional parent 802.3ad bond device |
@@ -246,7 +248,8 @@ Example:
 ```uci
 config script 'check_lan_dataplane'
 	option check_type 'dataplane'
-	option vrrp_instance 'main'
+	list vrrp_instance 'lan'
+	list vrrp_instance 'guest'
 	option interface 'bond0.20'
 	option bond 'bond0'
 	option min_lacp_members '1'

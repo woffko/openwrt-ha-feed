@@ -87,11 +87,19 @@ _ha_list_collect_unique() {
 _ha_script_instance=""
 _ha_collect_managed_script() {
 	local script_section="$1"
-	local managed_instance
+	local managed_instances managed_instance
 
-	config_get managed_instance "$script_section" vrrp_instance ""
-	[ "$managed_instance" = "$_ha_script_instance" ] || return 0
-	_ha_list_collect_unique "$script_section"
+	# config_get returns a scalar option unchanged and a UCI list as a
+	# space-separated value, so both the legacy single-instance form and the
+	# new multi-instance form follow the same path.
+	config_get managed_instances "$script_section" vrrp_instance ""
+	for managed_instance in $managed_instances; do
+		if [ "$managed_instance" = "$_ha_script_instance" ]; then
+			_ha_list_collect_unique "$script_section"
+			return 0
+		fi
+	done
+	return 0
 }
 
 # Conditional append to config file
@@ -865,7 +873,7 @@ _ha_validate_script_target() {
 ha_check_script_section() {
 	local section="$1"
 	local check_type script script_exec interval timeout weight rise fall user
-	local managed_instance managed_type interface bond min_lacp_members min_success probe_timeout
+	local managed_instances managed_instance managed_type interface bond min_lacp_members min_success probe_timeout
 
 	if ! _ha_is_safe_identifier "$section"; then
 		_ha_validation_error "script section has an unsafe name: $section"
@@ -879,7 +887,7 @@ ha_check_script_section() {
 	config_get rise "$section" rise ""
 	config_get fall "$section" fall ""
 	config_get user "$section" user ""
-	config_get managed_instance "$section" vrrp_instance ""
+	config_get managed_instances "$section" vrrp_instance ""
 
 	_ha_validate_uint_field "$section" interval "$interval" 1 86400
 	_ha_validate_uint_field "$section" timeout "$timeout" 1 86400
@@ -894,12 +902,12 @@ ha_check_script_section() {
 		_ha_validation_error "script $section: user contains unsupported characters"
 	fi
 
-	if [ -n "$managed_instance" ]; then
+	for managed_instance in $managed_instances; do
 		config_get managed_type "$managed_instance" TYPE ""
 		if ! _ha_is_safe_identifier "$managed_instance" || [ "$managed_type" != "vrrp_instance" ]; then
 			_ha_validation_error "script $section: vrrp_instance '$managed_instance' does not exist"
 		fi
-	fi
+	done
 
 	case "$check_type" in
 		command)
@@ -923,8 +931,8 @@ ha_check_script_section() {
 			fi
 			;;
 		dataplane)
-			if [ -z "$managed_instance" ]; then
-				_ha_validation_error "script $section: vrrp_instance is required for a dataplane check"
+			if [ -z "$managed_instances" ]; then
+				_ha_validation_error "script $section: at least one vrrp_instance is required for a dataplane check"
 			fi
 			if [ ! -x "${HA_CLUSTER_ROOT}${HA_DATAPLANE_CHECK}" ]; then
 				_ha_validation_error "script $section: dataplane helper is not executable"

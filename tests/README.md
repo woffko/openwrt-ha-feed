@@ -13,8 +13,8 @@ access:
 ```
 
 They validate the package-managed dataplane checker, UCI validation, generated
-Keepalived script blocks, automatic IPv4/IPv6 attachment, and compatibility
-with explicit `track_script` references.
+Keepalived script blocks, automatic multi-instance IPv4/IPv6 attachment, and
+compatibility with explicit `track_script` references.
 
 Then run the container integration suite:
 

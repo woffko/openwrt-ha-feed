@@ -145,6 +145,13 @@ write_config() {
 	add_option main track_script check_legacy
 	[ "$variant" = unknown_track ] && add_option main track_script missing_check
 
+	add_option guest TYPE vrrp_instance
+	add_option guest vrid 52
+	add_option guest interface lan
+	add_option guest priority 200
+	add_option guest nopreempt 0
+	add_option guest advert_int 1
+
 	add_option vip_main TYPE vip
 	add_option vip_main enabled 1
 	add_option vip_main vrrp_instance main
@@ -154,12 +161,21 @@ write_config() {
 	add_option vip_main address6 2001:db8::fe
 	add_option vip_main prefix6 64
 
+	add_option vip_guest TYPE vip
+	add_option vip_guest enabled 1
+	add_option vip_guest vrrp_instance guest
+	add_option vip_guest interface br-guest
+	add_option vip_guest address 198.51.100.254
+	add_option vip_guest netmask 255.255.255.0
+	add_option vip_guest address6 2001:db8:1::fe
+	add_option vip_guest prefix6 64
+
 	add_option check_dp TYPE script
 	add_option check_dp check_type dataplane
 	if [ "$variant" = unknown_instance ]; then
-		add_option check_dp vrrp_instance missing_instance
+		add_option check_dp vrrp_instance 'main missing_instance'
 	elif [ "$variant" != missing_instance ]; then
-		add_option check_dp vrrp_instance main
+		add_option check_dp vrrp_instance 'main guest'
 	fi
 	add_option check_dp interface bond0.20
 	add_option check_dp bond bond0
@@ -220,12 +236,16 @@ echo 'ok - dataplane command is synthesized and legacy command is preserved'
 
 main_block=$(sed -n '/^vrrp_instance main {/,/^}/p' "$CONF")
 main_v6_block=$(sed -n '/^vrrp_instance main_v6 {/,/^}/p' "$CONF")
+guest_block=$(sed -n '/^vrrp_instance guest {/,/^}/p' "$CONF")
+guest_v6_block=$(sed -n '/^vrrp_instance guest_v6 {/,/^}/p' "$CONF")
 
 [ "$(printf '%s\n' "$main_block" | grep -c '^        check_dp$')" -eq 1 ]
 [ "$(printf '%s\n' "$main_v6_block" | grep -c '^        check_dp$')" -eq 1 ]
+[ "$(printf '%s\n' "$guest_block" | grep -c '^        check_dp$')" -eq 1 ]
+[ "$(printf '%s\n' "$guest_v6_block" | grep -c '^        check_dp$')" -eq 1 ]
 [ "$(printf '%s\n' "$main_block" | grep -c '^        check_legacy$')" -eq 1 ]
 [ "$(printf '%s\n' "$main_v6_block" | grep -c '^        check_legacy$')" -eq 1 ]
-echo 'ok - managed and explicit checks attach once to IPv4 and IPv6 instances'
+echo 'ok - one managed check attaches once to multiple IPv4 and IPv6 instances'
 
 expect_validation_failure missing_target 'dataplane check without targets is rejected'
 expect_validation_failure excessive_min 'min_success above target count is rejected'
