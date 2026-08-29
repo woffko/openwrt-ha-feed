@@ -9,6 +9,7 @@ A high-availability solution for OpenWrt routers, providing automatic failover, 
 - **DHCP Lease Sync** - Real-time lease replication for seamless client experience (lease-sync)
 - **Web Interface** - LuCI integration for easy setup and monitoring
 - **IPv4 and IPv6** - Full dual-stack support for VIPs and sync traffic
+- **Dataplane Health Failover** - GUI-managed carrier, LACP membership, and interface-bound reachability checks
 
 ## Packages
 

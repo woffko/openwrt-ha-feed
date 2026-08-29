@@ -23,7 +23,7 @@ Web interface for managing High Availability clusters on OpenWrt.
 - Auto-refresh every 5 seconds
 
 ### Advanced Pages
-- **Keepalived (Advanced)**: VRRP instance tuning (timing/auth/tracking/unicast) and health checks
+- **Keepalived (Advanced)**: VRRP tuning and GUI-managed command or dataplane health checks, with automatic IPv4/IPv6 instance attachment
 - **owsync (Advanced)**: Custom sync groups, exclusions, poll interval
 - **DHCP Sync (Advanced)**: lease-sync tuning and logging
 

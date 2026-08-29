@@ -11,10 +11,11 @@ HA_CLUSTER_ROOT="${IPKG_INSTROOT:-}"
 HA_CLUSTER_CONFIG="/etc/config/ha-cluster"
 # Generated configs are placed in a dedicated directory to avoid conflicts
 # with standalone service init scripts (which use /tmp/*.conf)
-HA_CLUSTER_RUN_DIR="/tmp/ha-cluster"
+HA_CLUSTER_RUN_DIR="${HA_CLUSTER_RUN_DIR:-/tmp/ha-cluster}"
 KEEPALIVED_CONF="${HA_CLUSTER_RUN_DIR}/keepalived.conf"
 OWSYNC_CONF="${HA_CLUSTER_RUN_DIR}/owsync.conf"
 LEASE_SYNC_CONF="${HA_CLUSTER_RUN_DIR}/lease-sync.conf"
+HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
 HA_IPV6_GUARD_STATE_DIR="${HA_CLUSTER_RUN_DIR}/ipv6-backup-guard"
@@ -71,6 +72,26 @@ ha_log() {
 _ha_list_result=""
 _ha_list_collect() {
 	_ha_list_result="$_ha_list_result $1"
+}
+
+# Append a list item once. Keepalived rejects duplicate track_script entries.
+_ha_list_collect_unique() {
+	local item
+	for item in $_ha_list_result; do
+		[ "$item" = "$1" ] && return 0
+	done
+	_ha_list_result="$_ha_list_result $1"
+}
+
+# Collect script sections managed by the current VRRP instance.
+_ha_script_instance=""
+_ha_collect_managed_script() {
+	local script_section="$1"
+	local managed_instance
+
+	config_get managed_instance "$script_section" vrrp_instance ""
+	[ "$managed_instance" = "$_ha_script_instance" ] || return 0
+	_ha_list_collect_unique "$script_section"
 }
 
 # Conditional append to config file
@@ -229,9 +250,14 @@ EOF
 # Generate a VRRP script block
 ha_generate_vrrp_script() {
 	local section="$1"
-	local script interval timeout weight rise fall user
+	local check_type script interval timeout weight rise fall user
 
-	config_get script "$section" script
+	config_get check_type "$section" check_type "command"
+	case "$check_type" in
+		dataplane) script="$HA_DATAPLANE_CHECK $section" ;;
+		command) config_get script "$section" script "" ;;
+		*) ha_log_error "script $section: unsupported check_type '$check_type'"; return 1 ;;
+	esac
 	[ -z "$script" ] && return 0
 
 	config_get interval "$section" interval "5"
@@ -432,9 +458,13 @@ ha_generate_vrrp_group() {
 		track_ifaces="$track_interface"
 	fi
 
-	# Collect track scripts
+	# Collect explicit legacy references, then package-managed references from
+	# script sections. The latter lets LuCI attach a check without editing the
+	# managed VRRP instance itself.
 	_ha_list_result=""
-	config_list_foreach "$section" track_script _ha_list_collect
+	config_list_foreach "$section" track_script _ha_list_collect_unique
+	_ha_script_instance="$section"
+	config_foreach _ha_collect_managed_script script
 	track_scripts="$_ha_list_result"
 
 	# Normalize auth_type
@@ -767,6 +797,197 @@ ha_add_lease_sync_peer_flat() {
 	fi
 }
 
+# Validation helpers for package-managed and custom VRRP scripts.
+_ha_is_safe_identifier() {
+	case "$1" in
+		''|*[!A-Za-z0-9_]*) return 1 ;;
+	esac
+	[ "${#1}" -le 63 ]
+}
+
+_ha_is_safe_ifname() {
+	case "$1" in
+		''|*[!A-Za-z0-9_.:-]*) return 1 ;;
+	esac
+	[ "${#1}" -le 15 ]
+}
+
+_ha_is_uint() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	return 0
+}
+
+_ha_is_integer() {
+	local value="$1"
+	case "$value" in
+		-*) value="${value#-}" ;;
+	esac
+	_ha_is_uint "$value"
+}
+
+_ha_validation_error() {
+	ha_log_error "$@"
+	errors=$((errors + 1))
+}
+
+_ha_validate_uint_field() {
+	local section="$1"
+	local option="$2"
+	local value="$3"
+	local minimum="$4"
+	local maximum="$5"
+
+	[ -z "$value" ] && return 0
+	if ! _ha_is_uint "$value" || [ "$value" -lt "$minimum" ] || [ "$value" -gt "$maximum" ]; then
+		_ha_validation_error "script $section: $option must be $minimum-$maximum (got: $value)"
+		return 1
+	fi
+	return 0
+}
+
+_ha_target_count=0
+_ha_target_invalid=0
+_ha_validate_script_target() {
+	local target="$1"
+
+	case "$target" in
+		''|*[!0-9A-Fa-f:.]*) _ha_target_invalid=1; return 0 ;;
+	esac
+	case "$target" in
+		*.*|*:*) ;;
+		*) _ha_target_invalid=1; return 0 ;;
+	esac
+	_ha_target_count=$((_ha_target_count + 1))
+}
+
+ha_check_script_section() {
+	local section="$1"
+	local check_type script script_exec interval timeout weight rise fall user
+	local managed_instance managed_type interface bond min_lacp_members min_success probe_timeout
+
+	if ! _ha_is_safe_identifier "$section"; then
+		_ha_validation_error "script section has an unsafe name: $section"
+		return 1
+	fi
+
+	config_get check_type "$section" check_type "command"
+	config_get interval "$section" interval "5"
+	config_get timeout "$section" timeout ""
+	config_get weight "$section" weight ""
+	config_get rise "$section" rise ""
+	config_get fall "$section" fall ""
+	config_get user "$section" user ""
+	config_get managed_instance "$section" vrrp_instance ""
+
+	_ha_validate_uint_field "$section" interval "$interval" 1 86400
+	_ha_validate_uint_field "$section" timeout "$timeout" 1 86400
+	_ha_validate_uint_field "$section" rise "$rise" 1 255
+	_ha_validate_uint_field "$section" fall "$fall" 1 255
+	if [ -n "$weight" ]; then
+		if ! _ha_is_integer "$weight" || [ "$weight" -lt -253 ] || [ "$weight" -gt 253 ]; then
+			_ha_validation_error "script $section: weight must be -253..253 (got: $weight)"
+		fi
+	fi
+	if [ -n "$user" ] && ! _ha_is_safe_identifier "$user"; then
+		_ha_validation_error "script $section: user contains unsupported characters"
+	fi
+
+	if [ -n "$managed_instance" ]; then
+		config_get managed_type "$managed_instance" TYPE ""
+		if ! _ha_is_safe_identifier "$managed_instance" || [ "$managed_type" != "vrrp_instance" ]; then
+			_ha_validation_error "script $section: vrrp_instance '$managed_instance' does not exist"
+		fi
+	fi
+
+	case "$check_type" in
+		command)
+			config_get script "$section" script ""
+			if [ -z "$script" ]; then
+				_ha_validation_error "script $section: Script Command is required"
+				return 1
+			fi
+			case "$script" in
+				/*) ;;
+				*) _ha_validation_error "script $section: command must use an absolute path"; return 1 ;;
+			esac
+			if [ "$(printf '%s\n' "$script" | wc -l)" -ne 1 ] || \
+				printf '%s' "$script" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+				_ha_validation_error "script $section: command cannot contain control characters"
+				return 1
+			fi
+			script_exec="${script%% *}"
+			if [ ! -x "${HA_CLUSTER_ROOT}${script_exec}" ]; then
+				_ha_validation_error "script $section: executable not found: $script_exec"
+			fi
+			;;
+		dataplane)
+			if [ -z "$managed_instance" ]; then
+				_ha_validation_error "script $section: vrrp_instance is required for a dataplane check"
+			fi
+			if [ ! -x "${HA_CLUSTER_ROOT}${HA_DATAPLANE_CHECK}" ]; then
+				_ha_validation_error "script $section: dataplane helper is not executable"
+			fi
+
+			config_get interface "$section" interface ""
+			config_get bond "$section" bond ""
+			config_get min_lacp_members "$section" min_lacp_members "0"
+			config_get min_success "$section" min_success "1"
+			config_get probe_timeout "$section" probe_timeout "1"
+
+			_ha_is_safe_ifname "$interface" || _ha_validation_error "script $section: invalid dataplane interface '$interface'"
+			if [ -n "$bond" ] && ! _ha_is_safe_ifname "$bond"; then
+				_ha_validation_error "script $section: invalid bond interface '$bond'"
+			fi
+			_ha_validate_uint_field "$section" min_lacp_members "$min_lacp_members" 0 64
+			_ha_validate_uint_field "$section" min_success "$min_success" 1 64
+			_ha_validate_uint_field "$section" probe_timeout "$probe_timeout" 1 60
+			if _ha_is_uint "$min_lacp_members" && [ "$min_lacp_members" -gt 0 ] && [ -z "$bond" ]; then
+				_ha_validation_error "script $section: bond is required when min_lacp_members is greater than 0"
+			fi
+
+			_ha_target_count=0
+			_ha_target_invalid=0
+			config_list_foreach "$section" target _ha_validate_script_target
+			if [ "$_ha_target_invalid" -ne 0 ]; then
+				_ha_validation_error "script $section: targets must be literal IPv4 or IPv6 addresses"
+			fi
+			if [ "$_ha_target_count" -eq 0 ]; then
+				_ha_validation_error "script $section: at least one target is required"
+			elif _ha_is_uint "$min_success" && [ "$min_success" -gt "$_ha_target_count" ]; then
+				_ha_validation_error "script $section: min_success exceeds the number of targets"
+			fi
+			if [ "$_ha_target_count" -gt 0 ] && _ha_is_uint "$probe_timeout" && _ha_is_uint "$interval"; then
+				local effective_timeout required_timeout
+				effective_timeout="${timeout:-$interval}"
+				required_timeout=$((_ha_target_count * probe_timeout + 1))
+				if _ha_is_uint "$effective_timeout" && [ "$effective_timeout" -lt "$required_timeout" ]; then
+					_ha_validation_error "script $section: timeout must be at least $required_timeout seconds for $_ha_target_count targets"
+				fi
+			fi
+			;;
+		*)
+			_ha_validation_error "script $section: check_type must be 'command' or 'dataplane'"
+			;;
+	esac
+}
+
+_ha_validate_track_script_ref() {
+	local script_name="$1"
+	local section_type
+
+	config_get section_type "$script_name" TYPE ""
+	if ! _ha_is_safe_identifier "$script_name" || [ "$section_type" != "script" ]; then
+		_ha_validation_error "vrrp_instance $_ha_track_instance: unknown track_script '$script_name'"
+	fi
+}
+
+ha_check_track_script_refs() {
+	_ha_track_instance="$1"
+	config_list_foreach "$_ha_track_instance" track_script _ha_validate_track_script_ref
+}
+
 # Validate ha-cluster configuration
 ha_validate_config() {
 	local errors=0
@@ -780,6 +1001,11 @@ ha_validate_config() {
 
 	# Validate VRIDs are unique across vrrp_instance sections
 	config_foreach ha_check_vrid_unique vrrp_instance
+
+	# Validate script definitions, managed instance references and legacy
+	# track_script references before writing keepalived.conf.
+	config_foreach ha_check_script_section script
+	config_foreach ha_check_track_script_refs vrrp_instance
 
 	# Check for peer configuration
 	local peer_count=0

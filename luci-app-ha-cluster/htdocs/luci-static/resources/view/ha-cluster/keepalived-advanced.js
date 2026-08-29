@@ -160,6 +160,7 @@ return view.extend({
 		});
 		var interfaces = data[3] || [];
 		var scriptSections = uci.sections('ha-cluster', 'script') || [];
+		var vrrpSections = uci.sections('ha-cluster', 'vrrp_instance') || [];
 		var m, s, o;
 		var self = this;
 
@@ -402,18 +403,137 @@ return view.extend({
 
 		// === Health Checks (VRRP Scripts) ===
 		s = m.section(form.GridSection, 'script', _('Health Checks (VRRP Scripts)'),
-			_('Custom checks referenced by track_script. Examples: ping gateway, check DNS, verify VPN.'));
+			_('Command checks may be referenced manually. Managed checks are attached to the selected VRRP instance automatically, including its generated IPv6 instance.'));
 		s.anonymous = false;
 		s.addremove = true;
 		s.sortable = true;
 
-		o = s.option(form.DummyValue, '_script', _('Script'));
-		o.cfgvalue = function(section_id) { return uci.get('ha-cluster', section_id, 'script') || '-'; };
+		o = s.option(form.DummyValue, '_check_summary', _('Check'));
+		o.cfgvalue = function(section_id) {
+			var checkType = uci.get('ha-cluster', section_id, 'check_type') || 'command';
+			if (checkType === 'dataplane') {
+				var device = uci.get('ha-cluster', section_id, 'interface') || '-';
+				return _('Dataplane on %s').format(device);
+			}
+			return uci.get('ha-cluster', section_id, 'script') || '-';
+		};
 		o.modalonly = false;
+
+		o = s.option(form.DummyValue, '_managed_instance', _('VRRP Instance'));
+		o.cfgvalue = function(section_id) {
+			return uci.get('ha-cluster', section_id, 'vrrp_instance') || _('Manual');
+		};
+		o.modalonly = false;
+
+		var checkTypeOption = s.option(form.ListValue, 'check_type', _('Health Check Type'));
+		checkTypeOption.value('command', _('Command'));
+		checkTypeOption.value('dataplane', _('Dataplane reachability'));
+		checkTypeOption.default = 'command';
+		checkTypeOption.rmempty = false;
+		checkTypeOption.modalonly = true;
+
+		o = s.option(form.ListValue, 'vrrp_instance', _('Managed VRRP Instance'),
+			_('Automatically track this check from the selected instance. Dataplane checks require a managed instance; no manual VRRP Instance edit is needed.'));
+		o.value('', _('Manual track_script only'));
+		vrrpSections.forEach(function(instance) {
+			if (instance['.name'])
+				o.value(instance['.name'], instance['.name']);
+		});
+		o.optional = true;
+		o.modalonly = true;
+		o.validate = function(section_id, value) {
+			var checkType = checkTypeOption.formvalue(section_id) || 'command';
+			if (checkType === 'dataplane' && !value)
+				return _('A managed VRRP instance is required for a dataplane check.');
+			return true;
+		};
 
 		o = s.option(form.Value, 'script', _('Script Command'),
 			_('Command returning 0 for success. Use absolute paths.'));
 		o.placeholder = '/bin/ping -c 1 -W 1 8.8.8.8';
+		o.depends('check_type', 'command');
+		o.optional = true;
+		o.modalonly = true;
+		o.validate = function(section_id, value) {
+			var checkType = checkTypeOption.formvalue(section_id) || 'command';
+			if (checkType !== 'command')
+				return true;
+			if (!value)
+				return _('A script command is required for a command check.');
+			if (value.charAt(0) !== '/')
+				return _('The script command must use an absolute path.');
+			if (/[\r\n\t]/.test(value))
+				return _('Control characters are not supported.');
+			return true;
+		};
+
+		o = s.option(form.ListValue, 'interface', _('Dataplane Device'),
+			_('Linux device used for carrier checks and interface-bound probes, for example bond0.87.'));
+		o.depends('check_type', 'dataplane');
+		netDevs.forEach(function(dev) {
+			if (dev.getName)
+				o.value(dev.getName(), dev.getName());
+		});
+		o.optional = true;
+		o.modalonly = true;
+		o.cfgvalue = function(section_id) {
+			var device = uci.get('ha-cluster', section_id, 'interface');
+			if (device && !(this.keylist || []).includes(device))
+				this.value(device, device);
+			return device;
+		};
+		o.validate = function(section_id, value) {
+			var checkType = checkTypeOption.formvalue(section_id) || 'command';
+			if (checkType === 'dataplane' && !value)
+				return _('A dataplane device is required.');
+			return true;
+		};
+
+		o = s.option(form.ListValue, 'bond', _('LACP Bond Device'),
+			_('Optional parent 802.3ad bond. When set, the checker also verifies the active LACP member count.'));
+		o.depends('check_type', 'dataplane');
+		o.value('', _('None'));
+		netDevs.forEach(function(dev) {
+			if (dev.getName && dev.getType && dev.getType() === 'bonding')
+				o.value(dev.getName(), dev.getName());
+		});
+		o.optional = true;
+		o.modalonly = true;
+		o.cfgvalue = function(section_id) {
+			var device = uci.get('ha-cluster', section_id, 'bond');
+			if (device && !(this.keylist || []).includes(device))
+				this.value(device, device);
+			return device;
+		};
+
+		o = s.option(form.DynamicList, 'target', _('Probe Targets'),
+			_('Literal IPv4 or IPv6 addresses reachable through the dataplane device. Local addresses are skipped automatically.'));
+		o.depends('check_type', 'dataplane');
+		o.datatype = 'ipaddr';
+		o.rmempty = false;
+		o.modalonly = true;
+
+		o = s.option(form.Value, 'min_success', _('Minimum Successful Targets'),
+			_('The check succeeds as soon as this many non-local targets reply. Use 1 to fail only when every target is unreachable.'));
+		o.depends('check_type', 'dataplane');
+		o.datatype = 'range(1,64)';
+		o.default = '1';
+		o.rmempty = false;
+		o.modalonly = true;
+
+		o = s.option(form.Value, 'min_lacp_members', _('Minimum LACP Members'),
+			_('Minimum active members reported by the parent bond. Use 0 to disable this check.'));
+		o.depends('check_type', 'dataplane');
+		o.datatype = 'range(0,64)';
+		o.default = '0';
+		o.rmempty = false;
+		o.modalonly = true;
+
+		o = s.option(form.Value, 'probe_timeout', _('Per-Target Probe Timeout'),
+			_('Seconds allowed for each individual ping. Keep the VRRP script timeout above the worst-case total.'));
+		o.depends('check_type', 'dataplane');
+		o.datatype = 'range(1,60)';
+		o.default = '1';
 		o.rmempty = false;
 		o.modalonly = true;
 
@@ -425,16 +545,16 @@ return view.extend({
 		o.modalonly = true;
 
 		o = s.option(form.Value, 'timeout', _('Timeout'),
-			_('Max seconds for script.'));
+			_('Maximum seconds for the complete check. For dataplane checks, allow for all targets to time out.'));
 		o.datatype = 'uinteger';
 		o.placeholder = '2';
 		o.optional = true;
 		o.modalonly = true;
 
 		o = s.option(form.Value, 'weight', _('Weight'),
-			_('Priority adjustment on failure (e.g., -10).'));
-		o.datatype = 'integer';
-		o.placeholder = '-10';
+			_('Leave empty or use 0 to put the instance in FAULT after repeated failures. A non-zero value only adjusts priority.'));
+		o.datatype = 'range(-253,253)';
+		o.placeholder = '0';
 		o.optional = true;
 		o.modalonly = true;
 
@@ -455,7 +575,7 @@ return view.extend({
 		o = s.option(form.Value, 'user', _('User'),
 			_('Run as user (default: root).'));
 		o.datatype = 'and(minlength(1),maxlength(32))';
-		o.placeholder = 'nobody';
+		o.placeholder = 'root';
 		o.optional = true;
 		o.modalonly = true;
 

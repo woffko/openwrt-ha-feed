@@ -5,6 +5,19 @@ keepalived, owsync, lease-sync, and ha-cluster integration.
 
 ## Quick Start
 
+Run the host-side shell tests first; they do not require containers or router
+access:
+
+```bash
+./unit/run-tests.sh
+```
+
+They validate the package-managed dataplane checker, UCI validation, generated
+Keepalived script blocks, automatic IPv4/IPv6 attachment, and compatibility
+with explicit `track_script` references.
+
+Then run the container integration suite:
+
 ```bash
 # Build images and start 2-node cluster
 ./scripts/setup.sh

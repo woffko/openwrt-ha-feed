@@ -212,15 +212,54 @@ Default exclusions: `network`, `system`, `owsync`, `ha-cluster`, `wireless`.
 
 ### Health check scripts (`config script '<name>'`)
 
+Command checks remain compatible with explicit `track_script` lists. Setting
+`vrrp_instance` makes a check package-managed: ha-cluster attaches it to the
+selected IPv4 instance and to the generated IPv6 instance automatically.
+
+The `dataplane` check type runs `/usr/lib/ha-cluster/check-dataplane`. It checks
+the selected device carrier, optionally checks the active 802.3ad member count,
+and sends interface-bound probes to literal IP targets. A target assigned to
+the local node is skipped, so peers may use mirrored target lists. With
+`min_success='1'`, the check fails only when every eligible target is
+unreachable.
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `script` | string | | Command to run |
+| `check_type` | string | `command` | `command` or package-managed `dataplane` |
+| `vrrp_instance` | string | | Automatically attach the check to this VRRP group; required for `dataplane` |
+| `script` | string | | Absolute command for `command` checks |
+| `interface` | string | | Linux device used by a `dataplane` check (for example `bond0.87`) |
+| `bond` | string | | Optional parent 802.3ad bond device |
+| `target` | list | | Literal IPv4/IPv6 probe targets |
+| `min_success` | int | `1` | Required successful non-local targets |
+| `min_lacp_members` | int | `0` | Required active LACP members; `0` disables this check |
+| `probe_timeout` | int | `1` | Per-target ping timeout in seconds |
 | `interval` | int | `5` | Check interval (seconds) |
-| `timeout` | int | | Script timeout (seconds, keepalived default applies) |
-| `weight` | int | | Priority adjustment on failure (keepalived default applies) |
+| `timeout` | int | | Complete script timeout; allow for every target probe to time out |
+| `weight` | int | | Empty/`0` causes FAULT; a non-zero value adjusts priority only |
 | `rise` | int | | Successes before marking UP (keepalived default applies) |
 | `fall` | int | | Failures before marking DOWN (keepalived default applies) |
 | `user` | string | | User to run script as |
+
+Example:
+
+```uci
+config script 'check_lan_dataplane'
+	option check_type 'dataplane'
+	option vrrp_instance 'main'
+	option interface 'bond0.20'
+	option bond 'bond0'
+	option min_lacp_members '1'
+	list target '192.168.20.10'
+	list target '192.168.20.11'
+	option min_success '1'
+	option probe_timeout '1'
+	option interval '2'
+	option timeout '3'
+	option weight '0'
+	option rise '5'
+	option fall '3'
+```
 
 ### Advanced settings (`config advanced`)
 
