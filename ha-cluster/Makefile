@@ -31,10 +31,9 @@ endef
 
 define Package/ha-cluster/conffiles
 /etc/config/ha-cluster
-/etc/ha-cluster/service_states
-/etc/hotplug.d/keepalived
-/etc/keepalived/scripts
-/etc/keepalived/keys
+/etc/hotplug.d/keepalived/
+/etc/keepalived/scripts/
+/etc/keepalived/keys/
 /etc/keepalived.user
 endef
 
