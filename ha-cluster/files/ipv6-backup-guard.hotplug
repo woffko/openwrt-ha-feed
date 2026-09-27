@@ -136,7 +136,7 @@ _find_vip_lladdr() {
 
 	[ -z "$FOUND_LLADDR" ] || return 0
 
-	config_get_bool enabled "$section" enabled 0
+	config_get_bool enabled "$section" enabled 1
 	[ "$enabled" -eq 1 ] || return 0
 
 	config_get vip_instance "$section" vrrp_instance ""
