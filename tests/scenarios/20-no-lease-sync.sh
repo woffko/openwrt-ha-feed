@@ -21,7 +21,7 @@ TEST_DIR="$(dirname "$SCRIPT_DIR")"
 
 LEASE_SYNC_BIN="/usr/sbin/lease-sync"
 LEASE_SYNC_INIT="/etc/init.d/lease-sync"
-LEASE_SYNC_CONF="/tmp/ha-cluster/lease-sync.conf"
+LEASE_SYNC_CONF="/var/run/ha-cluster/lease-sync.conf"
 
 # Saved state for restoration
 ORIGINAL_SYNC_LEASES=""
