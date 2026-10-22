@@ -1,0 +1,319 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: harden the listener against unauthenticated clients
+
+The sync port is reachable by every host that can route to the node.
+Before this change any client could occupy all worker slots by staying
+silent, make the server allocate up to MAX_MESSAGE_SIZE per connection
+before the AES-GCM tag was checked, and hand json_tokener_parse() a buffer
+without a NUL terminator.
+
+- accept only connections from the addresses of the configured peers
+  (standalone "owsync server" without peers keeps accepting everyone);
+- socket send/receive timeouts of 30 seconds on every session;
+- frames are capped at 64 KiB until the peer's HELLO has been validated,
+  and empty frames are rejected;
+- receive and decrypt buffers get a NUL terminator;
+- a FileContent frame without path or data is malformed;
+- the sync root boundary check requires a "/" after the prefix;
+- fchmod() gets permission bits only, never setuid/setgid/sticky.
+
+The two-node exchange is unchanged: both peers are configured on each
+side, HELLO stays well below 64 KiB, and a healthy session finishes long
+before a 30 second idle timeout.
+
+diff -ruN owsync-1.2.0/owsync-1.2.0/include/net.h owsync-work/include/net.h
+--- a/include/net.h	2026-02-11 23:25:14.000000000 +0200
++++ b/include/net.h	2026-10-22 20:51:11.263086231 +0300
+@@ -47,10 +47,21 @@
+     } payload;
+ } message_t;
+ 
++/* Largest frame accepted before the peer's HELLO has been validated.
++ * A HELLO is a few hundred bytes; the full MAX_MESSAGE_SIZE is only
++ * granted once the peer proved it holds the key (or, in plain mode,
++ * spoke the protocol). */
++#define OWSYNC_PREAUTH_MAX_MESSAGE (64 * 1024)
++
++/* Socket send/receive timeout for sync sessions, in seconds. A peer that
++ * connects and goes silent must not hold a worker slot forever. */
++#define OWSYNC_IO_TIMEOUT_SEC 30
++
+ /* TCP channel with optional encryption */
+ typedef struct {
+     int fd;                /* Socket file descriptor */
+     bool is_encrypted;     /* True if using AES-256-GCM encryption */
++    uint32_t max_message;  /* Largest frame accepted on this channel right now */
+ #ifdef ENABLE_ENCRYPTION
+     security_context_t *security_ctx;  /* Encryption context (NULL if plain) */
+ #endif
+@@ -66,6 +77,12 @@
+ int channel_send(channel_t *channel, message_t *msg);
+ int channel_receive(channel_t *channel, message_t **out_msg);
+ 
++/* Restrict the server to connections from the configured peers.
++ * peers use the "addr[,source_addr]" format of the daemon configuration;
++ * every address a peer name resolves to is accepted. With count == 0 the
++ * server accepts any client (standalone "owsync server" mode). */
++void net_set_allowed_peers(char **peers, size_t count);
++
+ /* Server mode: listen for incoming connections, spawn threads */
+ int start_server(const char *host, const char *port, const char *key,
+                  const char *root, const char *db_path, file_filter_t *filter,
+diff -ruN owsync-1.2.0/owsync-1.2.0/src/crypto.c owsync-work/src/crypto.c
+--- a/src/crypto.c	2026-02-11 23:25:14.000000000 +0200
++++ b/src/crypto.c	2026-10-22 20:51:11.263621272 +0300
+@@ -154,7 +154,8 @@
+     size_t encrypted_len = ciphertext_len - AES_NONCE_SIZE - 16;
+     const uint8_t *tag = ciphertext + ciphertext_len - 16;
+ 
+-    uint8_t *output = malloc(encrypted_len + EVP_MAX_BLOCK_LENGTH);
++    /* One extra byte so the plaintext can be handed to string functions */
++    uint8_t *output = malloc(encrypted_len + EVP_MAX_BLOCK_LENGTH + 1);
+     if (!output) {
+         return OWSYNC_ERROR_MEMORY;
+     }
+@@ -181,6 +182,7 @@
+         return OWSYNC_ERROR_CRYPTO;
+     }
+     total_len += len;
++    output[total_len] = '\0';
+ 
+     *plaintext = output;
+     *plaintext_len = total_len;
+diff -ruN owsync-1.2.0/owsync-1.2.0/src/daemon.c owsync-work/src/daemon.c
+--- a/src/daemon.c	2026-02-11 23:25:14.000000000 +0200
++++ b/src/daemon.c	2026-10-22 20:51:11.263702256 +0300
+@@ -279,6 +279,9 @@
+ 
+     log_info("Starting listen server on %s:%s", ctx->host, ctx->port);
+ 
++    /* Only the configured peers may open sync sessions */
++    net_set_allowed_peers(ctx->peers, ctx->peer_count);
++
+     /* start_server runs until process termination */
+     int result = start_server(ctx->host, ctx->port, ctx->key, ctx->root,
+                               ctx->db_path, ctx->filter, ctx->clock_offset);
+diff -ruN owsync-1.2.0/owsync-1.2.0/src/net.c owsync-work/src/net.c
+--- a/src/net.c	2026-02-11 23:25:14.000000000 +0200
++++ b/src/net.c	2026-10-22 20:51:11.263378706 +0300
+@@ -17,6 +17,8 @@
+ #include <libgen.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <sys/socket.h>
++#include <sys/time.h>
+ 
+ #define MAX_CONNECTIONS 50  /* Limit concurrent connections to prevent resource exhaustion */
+ static volatile int active_connections = 0;  /* Atomic counter for DoS protection */
+@@ -343,6 +345,12 @@
+             msg->payload.file_content.data_len = data_len;
+         }
+ 
++        /* A file frame without a path or without data is malformed */
++        if (!msg->payload.file_content.path || !msg->payload.file_content.data) {
++            message_free(msg);
++            return NULL;
++        }
++
+     } else if (strcmp(type_str, "EndOfSync") == 0) {
+         msg = message_new(MSG_END_OF_SYNC);
+     }
+@@ -356,6 +364,7 @@
+ 
+     channel->fd = fd;
+     channel->is_encrypted = is_encrypted;
++    channel->max_message = OWSYNC_PREAUTH_MAX_MESSAGE;
+ 
+ #ifdef ENABLE_ENCRYPTION
+     channel->security_ctx = security_ctx;
+@@ -453,14 +462,17 @@
+     }
+ 
+     uint32_t len = ntohl(len_be);
+-    if (len > MAX_MESSAGE_SIZE) {
+-        log_error("Incoming message size %u exceeds MAX_MESSAGE_SIZE (%d)",
+-                  len, MAX_MESSAGE_SIZE);
++    if (len == 0 || len > channel->max_message) {
++        log_error("Incoming message size %u outside the accepted range (1..%u)",
++                  len, channel->max_message);
+         return OWSYNC_ERROR;
+     }
+ 
+-    uint8_t *buffer = malloc(len);
++    /* One extra byte: json_tokener_parse() needs a NUL-terminated string,
++     * and the wire frame carries none. */
++    uint8_t *buffer = malloc((size_t)len + 1);
+     if (!buffer) return OWSYNC_ERROR_MEMORY;
++    buffer[len] = '\0';
+ 
+     ssize_t total_read = 0;
+     while (total_read < len) {
+@@ -589,6 +601,9 @@
+     log_debug("Handshake OK, hostname=%s", peer_hello->payload.hello.hostname);
+     message_free(peer_hello);
+ 
++    /* The peer passed the handshake: allow full-size file frames from now on */
++    channel->max_message = MAX_MESSAGE_SIZE;
++
+     /* Load DB and scan filesystem for current state */
+     log_debug("Loading database from %s", db_path);
+     database_t *db = database_new();
+@@ -806,7 +821,11 @@
+             char real_root[MAX_PATH_LEN];
+             bool safe = false;
+             if (realpath(dir, real_dir) && realpath(root, real_root)) {
+-                if (strncmp(real_dir, real_root, strlen(real_root)) == 0) {
++                size_t root_len = strlen(real_root);
++                /* Prefix match plus a boundary: "/etc/config2" must not pass
++                 * as being inside "/etc/config" */
++                if (strncmp(real_dir, real_root, root_len) == 0 &&
++                        (real_dir[root_len] == '\0' || real_dir[root_len] == '/')) {
+                     safe = true;
+                 }
+             }
+@@ -826,7 +845,9 @@
+             int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+             if (fd >= 0) {
+                 write(fd, msg->payload.file_content.data, msg->payload.file_content.data_len);
+-                fchmod(fd, msg->payload.file_content.mode);
++                /* Permission bits only: a peer must never hand out setuid,
++                 * setgid or sticky bits */
++                fchmod(fd, msg->payload.file_content.mode & 0777);
+                 close(fd);
+                 if (rename(tmp_path, full_path) == 0) {
+                     log_info("Synced: %s", path);
+@@ -863,6 +884,110 @@
+     return OWSYNC_OK;
+ }
+ 
++/*
++ * Accept filter: addresses of the configured peers. Resolved once when the
++ * daemon starts; a connection from any other address is closed before a
++ * worker thread or a receive buffer is spent on it.
++ */
++#define ALLOWED_PEER_ADDRS 64
++static struct sockaddr_storage allowed_peer_addrs[ALLOWED_PEER_ADDRS];
++static size_t allowed_peer_addr_count = 0;
++static bool allowed_peers_configured = false;
++
++void net_set_allowed_peers(char **peers, size_t count) {
++    allowed_peer_addr_count = 0;
++    allowed_peers_configured = (count > 0);
++
++    for (size_t i = 0; i < count; i++) {
++        if (!peers[i]) continue;
++
++        /* Peer format: "addr[,source_addr]" */
++        const char *comma = strchr(peers[i], ',');
++        size_t host_len = comma ? (size_t)(comma - peers[i]) : strlen(peers[i]);
++        char host[256];
++        if (host_len == 0 || host_len >= sizeof(host)) continue;
++        memcpy(host, peers[i], host_len);
++        host[host_len] = '\0';
++
++        struct addrinfo hints = {0};
++        hints.ai_family = AF_UNSPEC;
++        hints.ai_socktype = SOCK_STREAM;
++        struct addrinfo *result = NULL;
++        if (getaddrinfo(host, NULL, &hints, &result) != 0) {
++            log_warning("Accept filter: cannot resolve peer %s", host);
++            continue;
++        }
++        for (struct addrinfo *rp = result;
++                rp && allowed_peer_addr_count < ALLOWED_PEER_ADDRS; rp = rp->ai_next) {
++            if (rp->ai_addrlen > sizeof(struct sockaddr_storage)) continue;
++            memcpy(&allowed_peer_addrs[allowed_peer_addr_count], rp->ai_addr, rp->ai_addrlen);
++            allowed_peer_addr_count++;
++        }
++        freeaddrinfo(result);
++    }
++
++    if (allowed_peers_configured && allowed_peer_addr_count == 0) {
++        log_error("Accept filter: no peer address resolved; incoming connections will be refused");
++    } else {
++        log_info("Accept filter: %zu peer address(es)", allowed_peer_addr_count);
++    }
++}
++
++/* Raw address bytes of a socket address; IPv4-mapped IPv6 counts as IPv4 */
++static int address_bytes(const struct sockaddr_storage *ss, const uint8_t **bytes, size_t *len) {
++    if (ss->ss_family == AF_INET) {
++        *bytes = (const uint8_t *)&((const struct sockaddr_in *)ss)->sin_addr;
++        *len = 4;
++        return 0;
++    }
++    if (ss->ss_family == AF_INET6) {
++        const struct in6_addr *addr = &((const struct sockaddr_in6 *)ss)->sin6_addr;
++        if (IN6_IS_ADDR_V4MAPPED(addr)) {
++            *bytes = (const uint8_t *)addr->s6_addr + 12;
++            *len = 4;
++        } else {
++            *bytes = (const uint8_t *)addr->s6_addr;
++            *len = 16;
++        }
++        return 0;
++    }
++    return -1;
++}
++
++static bool peer_allowed(const struct sockaddr_storage *client) {
++    if (!allowed_peers_configured) return true;
++
++    const uint8_t *client_bytes;
++    size_t client_len;
++    if (address_bytes(client, &client_bytes, &client_len) != 0) return false;
++
++    for (size_t i = 0; i < allowed_peer_addr_count; i++) {
++        const uint8_t *peer_bytes;
++        size_t peer_len;
++        if (address_bytes(&allowed_peer_addrs[i], &peer_bytes, &peer_len) != 0) continue;
++        if (peer_len == client_len && memcmp(peer_bytes, client_bytes, client_len) == 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static void describe_address(const struct sockaddr_storage *ss, char *out, size_t out_len) {
++    const uint8_t *bytes;
++    size_t len;
++    out[0] = '\0';
++    if (address_bytes(ss, &bytes, &len) == 0) {
++        inet_ntop(len == 4 ? AF_INET : AF_INET6, bytes, out, out_len);
++    }
++}
++
++/* A sync session is request/response: a silent peer must not block a slot */
++static void set_io_timeouts(int fd) {
++    struct timeval tv = { .tv_sec = OWSYNC_IO_TIMEOUT_SEC, .tv_usec = 0 };
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
++}
++
+ /* Thread entry point for handling incoming connections */
+ static void *handle_connection(void *arg) {
+     connection_args_t *args = (connection_args_t *)arg;
+@@ -1056,6 +1181,15 @@
+             continue;
+         }
+ 
++        if (!peer_allowed(&client_addr)) {
++            char who[INET6_ADDRSTRLEN];
++            describe_address(&client_addr, who, sizeof(who));
++            log_warning("Refused connection from %s: not a configured peer", who);
++            close(client_fd);
++            continue;
++        }
++        set_io_timeouts(client_fd);
++
+         int count = __sync_add_and_fetch(&active_connections, 1);
+         if (count > MAX_CONNECTIONS) {
+             __sync_sub_and_fetch(&active_connections, 1);
+@@ -1160,6 +1294,7 @@
+         }
+ 
+         if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
++            set_io_timeouts(sockfd);
+             break;  /* Success */
+         }
+ 
