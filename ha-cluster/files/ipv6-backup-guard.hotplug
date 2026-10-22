@@ -21,7 +21,7 @@ DHCPV6_TABLE="ha_cluster_dhcpv6"
 RA_TABLE="ha_cluster_ra"
 SET="backup_ifaces"
 
-RUN_DIR="${RUN_DIR:-/tmp/ha-cluster}"
+RUN_DIR="${RUN_DIR:-/var/run/ha-cluster}"
 STATE_DIR="$RUN_DIR/ipv6-backup-guard"
 LOCK_DIR="$RUN_DIR/ipv6-backup-guard.lock"
 PENDING_FILE="$STATE_DIR/.pending"

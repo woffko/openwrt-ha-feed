@@ -52,12 +52,12 @@ Optional: `luci-app-ha-cluster` for web interface.
 ## How It Works
 
 ha-cluster reads `/etc/config/ha-cluster` and generates flat config files
-for each service under `/tmp/ha-cluster/`:
+for each service under `/var/run/ha-cluster/`:
 
 ```
-/etc/config/ha-cluster  →  /tmp/ha-cluster/keepalived.conf
-                        →  /tmp/ha-cluster/owsync.conf
-                        →  /tmp/ha-cluster/lease-sync.conf
+/etc/config/ha-cluster  →  /var/run/ha-cluster/keepalived.conf
+                        →  /var/run/ha-cluster/owsync.conf
+                        →  /var/run/ha-cluster/lease-sync.conf
 ```
 
 All three daemons are started as procd instances by ha-cluster. Do **not**
@@ -299,7 +299,7 @@ Available environment variables:
 /etc/config/ha-cluster                  UCI configuration
 /etc/init.d/ha-cluster                  procd init script (START=19, STOP=91)
 /usr/lib/ha-cluster/ha-cluster.sh       Core library
-/tmp/ha-cluster/                        Generated configs (runtime)
+/var/run/ha-cluster/                        Generated configs (runtime)
 ```
 
 ## License
