@@ -1,0 +1,87 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] lease-sync: root-only marker directory and peer check for every message
+
+The reflected-event markers were written with fopen() under /tmp, where any
+local user can pre-create the directory or place a symlink. They now live
+under /var/run/lease-sync (0700) and are opened with O_NOFOLLOW.
+
+Only a sync request was checked against the configured peers; ADD, UPDATE,
+DELETE and SYNC_RESPONSE from an unknown address are now dropped as well.
+
+diff -ruN lease-sync-patched/daemon/peer-sync.c ls-work/daemon/peer-sync.c
+--- a/daemon/peer-sync.c	2026-10-22 17:55:30.208766172 +0300
++++ b/daemon/peer-sync.c	2026-10-22 20:51:12.107341159 +0300
+@@ -743,6 +743,17 @@
+         }
+     }
+ 
++  /* Every message type changes lease state or triggers a full dump, so
++   * all of them have to come from a configured peer, not only the sync
++   * request. The key proves the sender knows the cluster secret; the
++   * address check keeps a stray or replayed datagram from another host
++   * out even then. */
++  if (state->config.peer_count > 0 && i == state->config.peer_count)
++    {
++      log_warning("Dropping message type %u from unknown peer %s", msg.action, from_ip);
++      return;
++    }
++
+   state->total_sync_messages_received++;
+ 
+   /* Handle different message types */
+diff -ruN lease-sync-patched/daemon/ubus-handler.c ls-work/daemon/ubus-handler.c
+--- a/daemon/ubus-handler.c	2026-10-22 17:55:30.208985064 +0300
++++ b/daemon/ubus-handler.c	2026-10-22 20:51:12.107044337 +0300
+@@ -27,6 +27,7 @@
+ #include <errno.h>
+ #include <ctype.h>
+ #include <sys/stat.h>
++#include <fcntl.h>
+ #include <libubox/blobmsg_json.h>
+ #include <libubus.h>
+ 
+@@ -37,8 +38,10 @@
+ 
+ #define SUPPRESSED_EVENT_RING_SIZE 64
+ #define SUPPRESSED_EVENT_TTL_MS 10000
+-#define SUPPRESSED_EVENT_PARENT_DIR "/tmp/lease-sync"
+-#define SUPPRESSED_EVENT_DIR "/tmp/lease-sync/suppress"
++/* Marker files live under /var/run, which only root can populate, so no
++ * other local user can plant a path or a symlink where the daemon writes. */
++#define SUPPRESSED_EVENT_PARENT_DIR "/var/run/lease-sync"
++#define SUPPRESSED_EVENT_DIR "/var/run/lease-sync/suppress"
+ 
+ #define SUPPRESSED_ACTION_UPSERT 1
+ #define SUPPRESSED_ACTION_DELETE 2
+@@ -84,19 +87,27 @@
+ {
+   char path[sizeof(SUPPRESSED_EVENT_DIR) + INET6_ADDRSTRLEN * 2 + 16];
+   FILE *f;
++  int fd;
+ 
+   if (!ip || !*ip || action == 0)
+     return;
+ 
+-  if (mkdir(SUPPRESSED_EVENT_PARENT_DIR, 0755) < 0 && errno != EEXIST)
++  if (mkdir(SUPPRESSED_EVENT_PARENT_DIR, 0700) < 0 && errno != EEXIST)
+     return;
+-  if (mkdir(SUPPRESSED_EVENT_DIR, 0755) < 0 && errno != EEXIST)
++  if (mkdir(SUPPRESSED_EVENT_DIR, 0700) < 0 && errno != EEXIST)
+     return;
+ 
+   build_suppressed_event_path(ip, action, path, sizeof(path));
+-  f = fopen(path, "w");
+-  if (!f)
++  /* Never follow a link in place of the marker */
++  fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
++  if (fd < 0)
+     return;
++  f = fdopen(fd, "w");
++  if (!f)
++    {
++      close(fd);
++      return;
++    }
+ 
+   fprintf(f, "%llu\n", (unsigned long long)((expires_ms + 999) / 1000));
+   fclose(f);

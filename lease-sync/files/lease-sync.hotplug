@@ -13,7 +13,7 @@
 UBUS_EVENT="dhcp.lease"
 LOG_TAG="lease-sync-hotplug"
 NODE_ID_FILE="/etc/lease-sync/node-id"
-SUPPRESS_DIR="/tmp/lease-sync/suppress"
+SUPPRESS_DIR="/var/run/lease-sync/suppress"
 
 # Logging function
 log() {

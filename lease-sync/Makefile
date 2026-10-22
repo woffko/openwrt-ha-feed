@@ -5,12 +5,12 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lease-sync
 PKG_VERSION:=1.2.0
-PKG_RELEASE:=5
+PKG_RELEASE:=6
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/pgaufillet/lease-sync.git
 PKG_SOURCE_VERSION:=4594901d8ce2c55ded7be141f86e1ca74c4115ef
-PKG_MIRROR_HASH:=skip
+PKG_MIRROR_HASH:=9b503f1da28bd2103eb1ef52e857675e4950c199d7f774bf151ff96ebf3c1da0
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=GPL-2.0-or-later
