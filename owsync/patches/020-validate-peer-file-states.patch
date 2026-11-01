@@ -1,0 +1,195 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: validate the file states and numbers a peer sends
+
+Patch 010 checks MSG_FILE_CONTENT, but a SyncState entry without a
+"path" string still entered the file list: file_filter_matches() treated
+the NULL path as a match and the next serialisation of that list called
+strlen(NULL) (ASan SEGV in file_state_to_json). Negative or NaN "mtime",
+"size" and "timestamp" values were cast to uint64_t (undefined behaviour,
+0x8000000000000000 on x86) and would win every last-write-wins compare.
+MSG_FILE_CONTENT created the directory chain before realpath() checked
+it, so a symlink planted below the sync root could redirect mkdir.
+
+- json_to_file_state() drops entries whose path is missing, absolute,
+  contains "..", control characters or exceeds MAX_PATH_LEN;
+- file_filter_matches() never matches a NULL path;
+- JSON numbers outside [0, 2^62] read as 0 (parser and database loader);
+- a Hello without a hostname gets "unknown";
+- the deepest existing ancestor of the target directory must resolve
+  inside the sync root before mkdir_recursive().
+
+A conforming peer is unaffected: its entries carry a relative path and
+non-negative numbers (harness: logs/security-fixes-20261101 of the image
+tree).
+
+diff -ruN a/src/net.c b/src/net.c
+--- a/src/net.c	2026-11-01 18:41:02.478070366 +0200
++++ b/src/net.c	2026-11-01 18:41:02.661647005 +0200
+@@ -52,6 +52,57 @@
+     return 0;
+ }
+ 
++/* A path received from a peer, before any file system access: relative,
++ * without "..", without control characters and short enough for the
++ * buffers. is_path_safe() checks the resolved path again before a write;
++ * this check runs on SyncState entries that may not exist locally yet. */
++static int is_peer_path_plausible(const char *path) {
++    if (!path || !*path || path[0] == '/') return 0;
++    if (strlen(path) >= MAX_PATH_LEN) return 0;
++    if (strstr(path, "..")) return 0;
++    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
++        if (*p < 0x20 || *p == 0x7f) return 0;
++    }
++    return 1;
++}
++
++/* JSON numbers from a peer become unsigned timestamps and sizes. A
++ * negative, NaN or out-of-range value must not turn into a huge value that
++ * wins every last-write-wins comparison, so anything outside [0, 2^62]
++ * reads as 0. */
++static uint64_t json_to_u64(struct json_object *val) {
++    if (!val) return 0;
++    if (json_object_is_type(val, json_type_double)) {
++        double d = json_object_get_double(val);
++        if (!(d >= 0.0) || d > 4611686018427387904.0) return 0;
++        return (uint64_t)d;
++    }
++    int64_t v = json_object_get_int64(val);
++    return v < 0 ? 0 : (uint64_t)v;
++}
++
++/* The deepest existing ancestor of dir must resolve inside root, so that
++ * mkdir_recursive() never creates directories through a symlink that was
++ * planted below the sync root. */
++static int dir_ancestor_inside_root(const char *dir, const char *root) {
++    char real_root[MAX_PATH_LEN];
++    char probe[MAX_PATH_LEN];
++    char real_probe[MAX_PATH_LEN];
++
++    if (!realpath(root, real_root)) return 0;
++    if (snprintf(probe, sizeof(probe), "%s", dir) >= (int)sizeof(probe)) return 0;
++    for (;;) {
++        if (realpath(probe, real_probe)) {
++            size_t root_len = strlen(real_root);
++            return strncmp(real_probe, real_root, root_len) == 0 &&
++                   (real_probe[root_len] == '\0' || real_probe[root_len] == '/');
++        }
++        char *slash = strrchr(probe, '/');
++        if (!slash || slash == probe) return 0;
++        *slash = '\0';
++    }
++}
++
+ /*
+  * Validate that relative_path stays within root directory.
+  * Prevents path traversal attacks (e.g., "../../../etc/passwd").
+@@ -174,12 +225,12 @@
+ 
+     struct json_object *mtime = NULL;
+     if (json_object_object_get_ex(obj, "mtime", &mtime)) {
+-        state->mtime = (uint64_t)json_object_get_double(mtime);
++        state->mtime = json_to_u64(mtime);
+     }
+ 
+     struct json_object *size = NULL;
+     if (json_object_object_get_ex(obj, "size", &size)) {
+-        state->size = (uint64_t)json_object_get_double(size);
++        state->size = json_to_u64(size);
+     }
+ 
+     struct json_object *mode = NULL;
+@@ -193,6 +244,14 @@
+         state->deleted = json_object_get_boolean(deleted);
+     }
+ 
++    if (!is_peer_path_plausible(state->path)) {
++        log_debug("Rejecting a file state without a usable path");
++        free(state->path);
++        free(state->hash);
++        free(state);
++        return NULL;
++    }
++
+     return state;
+ }
+ 
+@@ -275,9 +334,14 @@
+             msg->payload.hello.hostname = strdup(json_object_get_string(hostname));
+         }
+ 
++        if (!msg->payload.hello.hostname) {
++            /* Logged with %s later; a peer may leave it out */
++            msg->payload.hello.hostname = strdup("unknown");
++        }
++
+         struct json_object *timestamp = NULL;
+         if (json_object_object_get_ex(root, "timestamp", &timestamp)) {
+-            msg->payload.hello.timestamp = (uint64_t)json_object_get_double(timestamp);
++            msg->payload.hello.timestamp = json_to_u64(timestamp);
+         }
+ 
+         struct json_object *version = NULL;
+@@ -810,6 +874,13 @@
+             char *dir_path = strdup(full_path);
+             char *dir = dirname(dir_path);
+ 
++            if (!dir_ancestor_inside_root(dir, root)) {
++                log_warning("Refusing %s: its directory resolves outside the sync root", path);
++                free(dir_path);
++                message_free(msg);
++                continue;
++            }
++
+             if (mkdir_recursive(dir, 0755) != 0) {
+                 free(dir_path);
+                 message_free(msg);
+diff -ruN a/src/state.c b/src/state.c
+--- a/src/state.c	2026-11-01 18:41:02.478880931 +0200
++++ b/src/state.c	2026-11-01 18:41:02.661901278 +0200
+@@ -12,6 +12,20 @@
+ #include <openssl/evp.h>
+ #include <json-c/json.h>
+ 
++/* See json_to_u64() in net.c: the database on disk is written by this
++ * daemon, but a corrupted or hand-edited file must not produce a huge
++ * unsigned timestamp either. */
++static uint64_t db_json_to_u64(struct json_object *val) {
++    if (!val) return 0;
++    if (json_object_is_type(val, json_type_double)) {
++        double d = json_object_get_double(val);
++        if (!(d >= 0.0) || d > 4611686018427387904.0) return 0;
++        return (uint64_t)d;
++    }
++    int64_t v = json_object_get_int64(val);
++    return v < 0 ? 0 : (uint64_t)v;
++}
++
+ #define DB_BUCKET_COUNT 256  /* Hash table buckets - power of 2 for fast modulo */
+ 
+ /*
+@@ -313,12 +327,12 @@
+ 
+         struct json_object *mtime = NULL;
+         if (json_object_object_get_ex(entry, "mtime", &mtime)) {
+-            state.mtime = (uint64_t)json_object_get_double(mtime);
++            state.mtime = db_json_to_u64(mtime);
+         }
+ 
+         struct json_object *size = NULL;
+         if (json_object_object_get_ex(entry, "size", &size)) {
+-            state.size = (uint64_t)json_object_get_double(size);
++            state.size = db_json_to_u64(size);
+         }
+ 
+         struct json_object *mode = NULL;
+@@ -670,7 +684,9 @@
+  * Conservative default: if no includes defined, nothing matches.
+  */
+ bool file_filter_matches(file_filter_t *filter, const char *path) {
+-    if (!filter || !path) return true;
++    if (!filter) return true;
++    /* An entry without a path matches nothing: it cannot be a listed file */
++    if (!path) return false;
+ 
+     /* Excludes take precedence */
+     for (size_t i = 0; i < filter->excludes.count; i++) {
