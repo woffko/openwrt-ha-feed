@@ -212,7 +212,7 @@ case "$1" in
 							*:*) ping_cmd="ping6" ;;
 							*) ping_cmd="ping" ;;
 						esac
-						if $ping_cmd -c 1 -W 1 "$peer_addr" >/dev/null 2>&1; then
+						if $ping_cmd -c 1 -W 1 -- "$peer_addr" >/dev/null 2>&1; then
 							peer_online=1
 							peers_online=$((peers_online + 1))
 							last_seen="Just now"
