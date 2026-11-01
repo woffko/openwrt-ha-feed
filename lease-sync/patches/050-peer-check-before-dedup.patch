@@ -1,0 +1,107 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] lease-sync: check the peer before the dedup ring, canonical peer text, bounded table
+
+The authenticated datagram was recorded in the 256-slot dedup ring before
+the source address check of patch 040 ran. A host that holds the cluster
+key but is not a configured peer could therefore reserve (sequence, node)
+pairs and make the real peer's next message with that pair look like a
+duplicate. The ring is now updated only after the sender was accepted.
+
+config_add_peer() stored the UCI text of an IPv6 peer while incoming
+datagrams are matched against inet_ntop() output, so "FD00::2" or
+"fd00:0000::2" never matched; the canonical text is stored instead and
+the change is logged.
+
+lease_db_add() grows without limit from peer messages; it now refuses new
+entries above 16384 leases with a warning.
+
+diff -ruN a/daemon/config.c b/daemon/config.c
+--- a/daemon/config.c	2026-11-01 18:41:02.554999233 +0200
++++ b/daemon/config.c	2026-11-01 18:41:02.662206757 +0200
+@@ -207,6 +207,9 @@
+       addr4->sin_family = AF_INET;
+       addr4->sin_port = htons(config->sync_port);
+       peer->addr_len = sizeof(struct sockaddr_in);
++      /* Store the canonical text: incoming datagrams are matched against
++       * inet_ntop() output */
++      inet_ntop(AF_INET, &addr4->sin_addr, peer->address, sizeof(peer->address));
+     }
+   /* Try IPv6 */
+   else if (inet_pton(AF_INET6, peer_addr, &addr6->sin6_addr) == 1)
+@@ -214,6 +217,11 @@
+       addr6->sin6_family = AF_INET6;
+       addr6->sin6_port = htons(config->sync_port);
+       peer->addr_len = sizeof(struct sockaddr_in6);
++      /* "FD00::2" or "fd00:0000::2" in the config must match the
++       * compressed lowercase form that inet_ntop() produces */
++      inet_ntop(AF_INET6, &addr6->sin6_addr, peer->address, sizeof(peer->address));
++      if (strcmp(peer->address, peer_addr) != 0)
++        log_info("Peer address %s stored as %s", peer_addr, peer->address);
+     }
+   else
+     {
+diff -ruN a/daemon/lease-db.c b/daemon/lease-db.c
+--- a/daemon/lease-db.c	2026-11-01 18:41:02.559620043 +0200
++++ b/daemon/lease-db.c	2026-11-01 18:41:02.662307836 +0200
+@@ -24,6 +24,10 @@
+ 
+ #include "common.h"
+ 
++/* Upper bound for the lease table. A peer that holds the cluster key can
++ * add leases; it must not be able to grow the table without limit. */
++#define LEASE_DB_MAX_ENTRIES 16384
++
+ /* Global state (defined in main) */
+ extern struct daemon_state *g_state;
+ 
+@@ -211,6 +215,13 @@
+       entry = entry->next;
+     }
+ 
++  if (g_state->lease_count >= LEASE_DB_MAX_ENTRIES)
++    {
++      log_warning("lease_db_add: table full (%d entries), dropping %s",
++                  g_state->lease_count, new_entry->ip_str);
++      return -1;
++    }
++
+   /* Allocate new entry */
+   copy = malloc(sizeof(struct lease_entry));
+   if (!copy)
+diff -ruN a/daemon/peer-sync.c b/daemon/peer-sync.c
+--- a/daemon/peer-sync.c	2026-11-01 18:41:02.559834107 +0200
++++ b/daemon/peer-sync.c	2026-11-01 18:41:02.662077150 +0200
+@@ -693,15 +693,6 @@
+       return;
+     }
+ 
+-  /* Deduplication */
+-  seq = ntohs(msg.sequence);
+-  if (is_seen_message(seq, msg.node_id))
+-    {
+-      log_debug("Ignoring duplicate message (seq %d from %s)", seq, msg.node_id);
+-      return;
+-    }
+-  mark_message_seen(seq, msg.node_id);
+-
+   /* Update peer last-seen
+    *
+    * IMPORTANT: Normalize IPv6-mapped IPv4 addresses to plain IPv4 format
+@@ -754,6 +745,17 @@
+       return;
+     }
+ 
++  /* Deduplication, after the sender is known: a datagram from a host that
++   * is not a peer must not reserve a (sequence, node) pair in the ring and
++   * make the real peer's message with that pair look like a duplicate. */
++  seq = ntohs(msg.sequence);
++  if (is_seen_message(seq, msg.node_id))
++    {
++      log_debug("Ignoring duplicate message (seq %d from %s)", seq, msg.node_id);
++      return;
++    }
++  mark_message_seen(seq, msg.node_id);
++
+   state->total_sync_messages_received++;
+ 
+   /* Handle different message types */
