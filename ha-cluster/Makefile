@@ -73,10 +73,6 @@ define Package/ha-cluster/postinst
 #!/bin/sh
 rm -f "$${IPKG_INSTROOT}/etc/hotplug.d/keepalived/20-dhcpv6-backup-guard"
 rm -f "$${IPKG_INSTROOT}/etc/hotplug.d/keepalived/21-RA-backup-guard"
-[ -n "$${IPKG_INSTROOT}" ] || {
-	/etc/init.d/ha-cluster enable
-	/etc/init.d/ha-cluster start
-}
 exit 0
 endef
 
