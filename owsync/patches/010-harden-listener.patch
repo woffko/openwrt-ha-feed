@@ -10,7 +10,10 @@ before the AES-GCM tag is checked.
 
 - accept only connections from the addresses of the configured peers
   (standalone "owsync server" without peers keeps accepting everyone);
-- frames are capped at 64 KiB until the peer's HELLO has been validated;
+- frames are capped at 64 KiB until a HELLO has been accepted on the
+  connection. This is not proof of the key, since the server's own HELLO
+  sent back to it passes, but a client that sends nothing valid can no
+  longer make the server read a large frame;
 - a FileContent frame without path, without data or with data that is
   not hex is malformed: written as received, it would replace the
   destination with an empty file.
@@ -26,14 +29,16 @@ side and HELLO stays well below 64 KiB.
 
 --- a/include/net.h
 +++ b/include/net.h
-@@ -47,10 +47,17 @@ typedef struct {
+@@ -47,10 +47,19 @@ typedef struct {
      } payload;
  } message_t;
  
-+/* Largest frame accepted before the peer's HELLO has been validated.
++/* Largest frame accepted before a HELLO has been accepted on the channel.
 + * A HELLO is a few hundred bytes; the full MAX_MESSAGE_SIZE is only
-+ * granted once the peer proved it holds the key (or, in plain mode,
-+ * spoke the protocol). */
++ * granted after one. This keeps a client that sends nothing valid from
++ * making the server read large frames. It is not proof of the key: the
++ * server speaks first, and its own HELLO sent back passes. The accept
++ * filter and the aggregate receive budget bound what remains. */
 +#define OWSYNC_PREAUTH_MAX_MESSAGE (64 * 1024)
 +
  /* TCP channel with optional encryption */
@@ -44,7 +49,7 @@ side and HELLO stays well below 64 KiB.
  #ifdef ENABLE_ENCRYPTION
      security_context_t *security_ctx;  /* Encryption context (NULL if plain) */
  #endif
-@@ -66,6 +73,12 @@ void channel_free(channel_t *channel);  /* Closes socket */
+@@ -66,6 +75,12 @@ void channel_free(channel_t *channel);  /* Closes socket */
  int channel_send(channel_t *channel, message_t *msg);
  int channel_receive(channel_t *channel, message_t **out_msg);
  
