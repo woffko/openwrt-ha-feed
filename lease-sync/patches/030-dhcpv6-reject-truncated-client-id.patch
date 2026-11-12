@@ -19,6 +19,7 @@ add_lease calls to lose the real client identity.
 --- a/tests/test_lease_db.c
 +++ b/tests/test_lease_db.c
 @@ -432,6 +432,36 @@ void test_dhcpv6_similar_duid_prefixes_do_not_conflict(void)
+     }
  }
  
 +/* ============================================
@@ -54,7 +55,6 @@ add_lease calls to lose the real client identity.
  /* ============================================
   * Test: DHCPv6 wildcard MAC is not a conflict
   * ============================================ */
- void test_dhcpv6_wildcard_mac_not_conflict(void)
 @@ -808,6 +838,7 @@ int main(void)
      test_lease_db_update_conflict_newer_wins();
      test_lease_db_update_mac_conflict();
@@ -65,7 +65,7 @@ add_lease calls to lose the real client identity.
      test_lease_db_delete();
 --- a/tests/test_peer_sync.c
 +++ b/tests/test_peer_sync.c
-@@ -53,7 +53,7 @@ struct lease_entry *lease_db_find_dhcpv6_identity(const struct lease_entry *need
+@@ -54,7 +54,7 @@ struct lease_entry *lease_db_find_dhcpv6_identity(const struct lease_entry *need
  
  bool lease_entry_has_dhcpv6_identity(const struct lease_entry *entry)
  {

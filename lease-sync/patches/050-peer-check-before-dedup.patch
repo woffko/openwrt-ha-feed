@@ -15,10 +15,9 @@ the change is logged.
 lease_db_add() grows without limit from peer messages; it now refuses new
 entries above 16384 leases with a warning.
 
-diff -ruN a/daemon/config.c b/daemon/config.c
---- a/daemon/config.c	2026-11-01 18:41:02.554999233 +0200
-+++ b/daemon/config.c	2026-11-01 18:41:02.662206757 +0200
-@@ -207,6 +207,9 @@
+--- a/daemon/config.c
++++ b/daemon/config.c
+@@ -207,6 +207,9 @@ static int config_add_peer(struct config *config, const char *value)
        addr4->sin_family = AF_INET;
        addr4->sin_port = htons(config->sync_port);
        peer->addr_len = sizeof(struct sockaddr_in);
@@ -28,7 +27,7 @@ diff -ruN a/daemon/config.c b/daemon/config.c
      }
    /* Try IPv6 */
    else if (inet_pton(AF_INET6, peer_addr, &addr6->sin6_addr) == 1)
-@@ -214,6 +217,11 @@
+@@ -214,6 +217,11 @@ static int config_add_peer(struct config *config, const char *value)
        addr6->sin6_family = AF_INET6;
        addr6->sin6_port = htons(config->sync_port);
        peer->addr_len = sizeof(struct sockaddr_in6);
@@ -40,9 +39,8 @@ diff -ruN a/daemon/config.c b/daemon/config.c
      }
    else
      {
-diff -ruN a/daemon/lease-db.c b/daemon/lease-db.c
---- a/daemon/lease-db.c	2026-11-01 18:41:02.559620043 +0200
-+++ b/daemon/lease-db.c	2026-11-01 18:41:02.662307836 +0200
+--- a/daemon/lease-db.c
++++ b/daemon/lease-db.c
 @@ -24,6 +24,10 @@
  
  #include "common.h"
@@ -54,7 +52,7 @@ diff -ruN a/daemon/lease-db.c b/daemon/lease-db.c
  /* Global state (defined in main) */
  extern struct daemon_state *g_state;
  
-@@ -211,6 +215,13 @@
+@@ -211,6 +215,13 @@ int lease_db_add(struct lease_entry *new_entry)
        entry = entry->next;
      }
  
@@ -68,10 +66,9 @@ diff -ruN a/daemon/lease-db.c b/daemon/lease-db.c
    /* Allocate new entry */
    copy = malloc(sizeof(struct lease_entry));
    if (!copy)
-diff -ruN a/daemon/peer-sync.c b/daemon/peer-sync.c
---- a/daemon/peer-sync.c	2026-11-01 18:41:02.559834107 +0200
-+++ b/daemon/peer-sync.c	2026-11-01 18:41:02.662077150 +0200
-@@ -693,15 +693,6 @@
+--- a/daemon/peer-sync.c
++++ b/daemon/peer-sync.c
+@@ -693,15 +693,6 @@ void peer_sync_handle_message(struct daemon_state *state)
        return;
      }
  
@@ -87,7 +84,7 @@ diff -ruN a/daemon/peer-sync.c b/daemon/peer-sync.c
    /* Update peer last-seen
     *
     * IMPORTANT: Normalize IPv6-mapped IPv4 addresses to plain IPv4 format
-@@ -754,6 +745,17 @@
+@@ -754,6 +745,17 @@ void peer_sync_handle_message(struct daemon_state *state)
        return;
      }
  

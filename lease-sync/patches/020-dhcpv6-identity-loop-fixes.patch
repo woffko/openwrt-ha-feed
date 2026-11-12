@@ -12,9 +12,9 @@ add_lease/delete_lease calls. The hotplug script consumes these markers before
 publishing, so reflected add/update/delete events are dropped before they can
 be re-emitted to peers.
 
---- a/daemon/common.h	2026-05-02 14:07:33.000000000 +0300
-+++ b/daemon/common.h	2026-05-09 13:17:00.383221009 +0300
-@@ -305,6 +305,11 @@
+--- a/daemon/common.h
++++ b/daemon/common.h
+@@ -300,6 +300,11 @@ extern struct daemon_state *g_state;
  int lease_db_init(void);
  void lease_db_cleanup(void);
  struct lease_entry *lease_db_find(const char *ip);
@@ -26,9 +26,9 @@ be re-emitted to peers.
  int lease_db_add(struct lease_entry *entry);
  int lease_db_update(struct lease_entry *entry);
  int lease_db_delete(const char *ip);
---- a/daemon/lease-db.c	2026-05-02 14:07:33.000000000 +0300
-+++ b/daemon/lease-db.c	2026-05-09 13:17:40.303451477 +0300
-@@ -38,6 +38,83 @@
+--- a/daemon/lease-db.c
++++ b/daemon/lease-db.c
+@@ -38,6 +38,83 @@ static uint32_t hash_ip(const char *ip)
    return hash % HASH_TABLE_SIZE;
  }
  
@@ -112,7 +112,7 @@ be re-emitted to peers.
  int lease_db_init(void)
  {
    if (!g_state)
-@@ -183,9 +260,39 @@
+@@ -183,9 +260,39 @@ int lease_db_update(struct lease_entry *new_entry)
            struct lease_entry *next;
            bool was_local;
            bool is_local;
@@ -154,7 +154,7 @@ be re-emitted to peers.
              {
                log_debug("Ignoring older lease update for %s (local: %llu, remote: %llu)",
                          new_entry->ip_str,
-@@ -194,8 +301,12 @@
+@@ -194,8 +301,12 @@ int lease_db_update(struct lease_entry *new_entry)
                return 0;  /* Not an error, just ignored */
              }
  
@@ -169,9 +169,9 @@ be re-emitted to peers.
              {
                log_warning("Conflict detected for %s: MAC changed from %s to %s (resolving by timestamp)",
                            entry->ip_str, entry->mac, new_entry->mac);
---- a/daemon/peer-sync.c	2026-05-02 14:07:33.000000000 +0300
-+++ b/daemon/peer-sync.c	2026-05-09 13:18:55.759247177 +0300
-@@ -127,6 +127,54 @@
+--- a/daemon/peer-sync.c
++++ b/daemon/peer-sync.c
+@@ -127,6 +127,54 @@ static void sync_message_to_lease(struct sync_message *msg, struct lease_entry *
    entry->sequence = ntohs(msg->sequence);
  }
  
@@ -226,7 +226,7 @@ be re-emitted to peers.
  int peer_sync_init(struct daemon_state *state)
  {
    int sock;
-@@ -712,6 +760,9 @@
+@@ -712,6 +760,9 @@ void peer_sync_handle_message(struct daemon_state *state)
                 msg.action == SYNC_ACTION_ADD ? "ADD" : "UPDATE",
                 entry.ip_str, msg.node_id);
  
@@ -236,7 +236,7 @@ be re-emitted to peers.
        /* Check if we have a newer lease (race condition protection) */
        existing = lease_db_find(entry.ip_str);
        if (existing && existing->timestamp_ms >= entry.timestamp_ms)
-@@ -850,6 +901,9 @@
+@@ -850,6 +901,9 @@ void peer_sync_handle_message(struct daemon_state *state)
  
        log_debug("Received SYNC_RESPONSE for %s from %s", entry.ip_str, msg.node_id);
  
@@ -246,8 +246,8 @@ be re-emitted to peers.
        /* Check if we have a newer lease (same logic as ADD/UPDATE) */
        existing = lease_db_find(entry.ip_str);
        if (existing && existing->timestamp_ms >= entry.timestamp_ms)
---- a/daemon/ubus-handler.c	2026-05-09 13:29:29.125546455 +0300
-+++ b/daemon/ubus-handler.c	2026-05-09 13:18:38.785075658 +0300
+--- a/daemon/ubus-handler.c
++++ b/daemon/ubus-handler.c
 @@ -25,6 +25,8 @@
  #include <string.h>
  #include <unistd.h>
@@ -257,7 +257,7 @@ be re-emitted to peers.
  #include <libubox/blobmsg_json.h>
  #include <libubus.h>
  
-@@ -35,6 +37,8 @@
+@@ -35,6 +37,8 @@ extern struct daemon_state *g_state;
  
  #define SUPPRESSED_EVENT_RING_SIZE 64
  #define SUPPRESSED_EVENT_TTL_MS 10000
@@ -266,7 +266,7 @@ be re-emitted to peers.
  
  #define SUPPRESSED_ACTION_UPSERT 1
  #define SUPPRESSED_ACTION_DELETE 2
-@@ -49,6 +53,66 @@
+@@ -49,6 +53,66 @@ struct suppressed_lease_event
  static struct suppressed_lease_event suppressed_events[SUPPRESSED_EVENT_RING_SIZE];
  static unsigned int suppressed_event_index;
  
@@ -333,7 +333,7 @@ be re-emitted to peers.
  static uint8_t lease_event_action_class(const char *action)
  {
    if (!action)
-@@ -100,6 +164,7 @@
+@@ -100,6 +164,7 @@ static void remember_suppressed_lease_event(const char *ip, uint8_t action)
        if (entry->action == action && strcmp(entry->ip, ip) == 0)
          {
            entry->expires_ms = now + SUPPRESSED_EVENT_TTL_MS;
@@ -341,7 +341,7 @@ be re-emitted to peers.
            log_debug("Extended reflected %s event suppression for %s",
                      suppressed_action_name(action), ip);
            return;
-@@ -111,11 +176,29 @@
+@@ -111,11 +176,29 @@ static void remember_suppressed_lease_event(const char *ip, uint8_t action)
    strncpy(entry->ip, ip, sizeof(entry->ip) - 1);
    entry->action = action;
    entry->expires_ms = now + SUPPRESSED_EVENT_TTL_MS;
@@ -371,7 +371,7 @@ be re-emitted to peers.
  static bool consume_suppressed_lease_event(const char *action, const char *ip)
  {
    struct suppressed_lease_event *entry;
-@@ -140,6 +223,7 @@
+@@ -140,6 +223,7 @@ static bool consume_suppressed_lease_event(const char *action, const char *ip)
          continue;
  
        log_info("Suppressing reflected %s lease event for %s (local ubus event ignored; not broadcast to peers)", action, ip);
@@ -379,9 +379,9 @@ be re-emitted to peers.
        memset(entry, 0, sizeof(*entry));
        return true;
      }
-@@ -225,6 +309,14 @@
-       uint64_t expected_ts = 0;
+@@ -217,6 +301,14 @@ static void handle_lease_event(struct ubus_context *ctx, struct ubus_event_handl
        struct lease_entry *existing = lease_db_find(ip);
+       struct lease_entry entry;
  
 +      if (existing && existing->af_family == AF_INET6 &&
 +          strcmp(existing->source_node, g_state->config.node_id) != 0)
@@ -394,7 +394,7 @@ be re-emitted to peers.
        if (existing)
          {
            expected_ts = existing->timestamp_ms;
-@@ -270,6 +362,8 @@
+@@ -251,6 +343,8 @@ static void handle_lease_event(struct ubus_context *ctx, struct ubus_event_handl
    if (strcmp(action, "add") == 0 || strcmp(action, "update") == 0 || strcmp(action, "old") == 0)
      {
        struct lease_entry entry;
@@ -403,7 +403,7 @@ be re-emitted to peers.
        uint8_t sync_action;
  
        memset(&entry, 0, sizeof(entry));
-@@ -283,8 +377,10 @@
+@@ -264,8 +358,10 @@ static void handle_lease_event(struct ubus_context *ctx, struct ubus_event_handl
        strncpy(entry.ip_str, ip, sizeof(entry.ip_str) - 1);
  
        /* MAC address */
@@ -415,7 +415,7 @@ be re-emitted to peers.
  
        /* Hostname */
        if (tb[3])
-@@ -326,6 +422,52 @@
+@@ -307,6 +403,52 @@ static void handle_lease_event(struct ubus_context *ctx, struct ubus_event_handl
        strncpy(entry.source_node, g_state->config.node_id, MAX_NODE_ID_LEN - 1);
        entry.timestamp_ms = get_timestamp_ms();
  
@@ -468,7 +468,7 @@ be re-emitted to peers.
        /* Add/update in local database */
        if (strcmp(action, "add") == 0)
          lease_db_add(&entry);
-@@ -409,8 +551,25 @@
+@@ -390,8 +532,25 @@ int ubus_handler_inject_lease(struct lease_entry *entry)
    blob_buf_init(&b, 0);
  
    blobmsg_add_string(&b, "ip", entry->ip_str);
@@ -495,7 +495,7 @@ be re-emitted to peers.
    /* Convert absolute timestamp to duration (dnsmasq add_lease expects seconds remaining) */
    now = time(NULL);
    duration = (entry->expires > now) ? (uint32_t)(entry->expires - now) : 0;
-@@ -442,18 +601,19 @@
+@@ -423,18 +582,19 @@ int ubus_handler_inject_lease(struct lease_entry *entry)
          blobmsg_add_string(&b, "client_id", clid_str);
      }
  
@@ -517,7 +517,7 @@ be re-emitted to peers.
    log_debug("Injected lease %s (%s) into dnsmasq",
              entry->ip_str, entry->hostname);
  
-@@ -481,12 +641,16 @@
+@@ -462,6 +622,8 @@ int ubus_handler_delete_lease(const char *ip)
    blob_buf_init(&b, 0);
    blobmsg_add_string(&b, "ip", ip);
  
@@ -526,15 +526,20 @@ be re-emitted to peers.
    /* Call dnsmasq.delete_lease */
    ret = ubus_invoke(g_state->ubus_ctx, id, "delete_lease", b.head, NULL, NULL, 3000);
    blob_buf_free(&b);
+@@ -469,18 +631,19 @@ int ubus_handler_delete_lease(const char *ip)
+   /* Already absent from dnsmasq: the requested state is reached */
+   if (ret == UBUS_STATUS_NOT_FOUND)
+     {
++      forget_suppressed_lease_event(ip, SUPPRESSED_ACTION_DELETE);
+       log_debug("Lease %s not in dnsmasq, nothing to delete", ip);
+       return 0;
+     }
  
    if (ret)
      {
 +      forget_suppressed_lease_event(ip, SUPPRESSED_ACTION_DELETE);
 +
-       if (ret == UBUS_STATUS_NOT_FOUND)
-         {
-           log_debug("Lease %s already absent from dnsmasq", ip);
-@@ -497,8 +661,6 @@
+       log_error("Failed to delete lease %s: %s", ip, ubus_strerror(ret));
        return -1;
      }
  
@@ -543,9 +548,9 @@ be re-emitted to peers.
    log_debug("Deleted lease %s from dnsmasq", ip);
  
    return 0;
---- a/tests/test_lease_db.c	2026-05-02 14:07:33.000000000 +0300
-+++ b/tests/test_lease_db.c	2026-05-09 13:21:07.450998756 +0300
-@@ -67,6 +67,24 @@
+--- a/tests/test_lease_db.c
++++ b/tests/test_lease_db.c
+@@ -67,6 +67,24 @@ static void make_lease(struct lease_entry *lease, const char *ip, const char *ma
      lease->expires = time(NULL) + 3600;  /* 1 hour from now */
  }
  
@@ -570,10 +575,11 @@ be re-emitted to peers.
  /* Callback for iteration test */
  static int iteration_count = 0;
  static void count_callback(struct lease_entry *entry, void *user_data)
-@@ -372,6 +390,83 @@
+@@ -371,6 +389,83 @@ void test_lease_db_update_mac_conflict(void)
+     }
  }
  
- /* ============================================
++/* ============================================
 + * Test: DHCPv6 DUID prefix must not be treated as MAC
 + * ============================================ */
 +void test_dhcpv6_similar_duid_prefixes_do_not_conflict(void)
@@ -650,11 +656,10 @@ be re-emitted to peers.
 +    }
 +}
 +
-+/* ============================================
+ /* ============================================
   * Test: lease_db_update - Non-existent creates new
   * ============================================ */
- void test_lease_db_update_creates_new(void)
-@@ -712,6 +807,8 @@
+@@ -712,6 +807,8 @@ int main(void)
      test_lease_db_update_basic();
      test_lease_db_update_conflict_newer_wins();
      test_lease_db_update_mac_conflict();
@@ -663,9 +668,9 @@ be re-emitted to peers.
      test_lease_db_update_creates_new();
      test_lease_db_delete();
      test_lease_db_cleanup();
---- a/tests/test_peer_sync.c	2026-05-02 14:07:33.000000000 +0300
-+++ b/tests/test_peer_sync.c	2026-05-09 13:19:52.864519639 +0300
-@@ -46,6 +46,32 @@
+--- a/tests/test_peer_sync.c
++++ b/tests/test_peer_sync.c
+@@ -46,6 +46,32 @@ struct lease_entry *lease_db_find(const char *ip __attribute__((unused)))
      return NULL;
  }
  

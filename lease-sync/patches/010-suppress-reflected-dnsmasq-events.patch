@@ -1,7 +1,7 @@
 From: OpenWrt HA build <local>
 Subject: [PATCH] lease-sync: suppress reflected dnsmasq lease events
 
-lease-sync applies peer and reconciliation changes to dnsmasq through the
+lease-sync applies peer changes to dnsmasq through the
 dnsmasq-ha ubus add_lease/delete_lease methods. dnsmasq can subsequently run
 its DHCP script for those same changes. The hotplug handler publishes the
 script event as a local dhcp.lease event, so lease-sync can rebroadcast its own
@@ -12,9 +12,6 @@ operations and consume the matching reflected hotplug event by IP and action
 class. This keeps peer leases visible in local dnsmasq/DNS, keeps active/active
 synchronization intact, and makes add_lease/delete_lease symmetrical from
 lease-sync's point of view.
-
-Also treat delete_lease of an already absent dnsmasq lease as success. DELETE is
-idempotent, and retrying an already-applied peer delete only adds noise.
 
 --- a/daemon/ubus-handler.c
 +++ b/daemon/ubus-handler.c
@@ -146,10 +143,10 @@ idempotent, and retrying an already-applied peer delete only adds noise.
 +  if (consume_suppressed_lease_event(action, ip))
 +    return;
 +
-   /* startup reconciliation FIX: Skip "old" events during startup reconciliation phase.
-    *
-    * Problem: When dnsmasq starts, it reads leases from dhcp.leases and emits
-@@ -335,6 +452,8 @@ int ubus_handler_inject_lease(struct lease_entry *entry)
+   /* Lease file replay: skip leases no peer reported, they may have been
+    * deleted while lease-sync was stopped
+    */
+@@ -316,6 +433,8 @@ int ubus_handler_inject_lease(struct lease_entry *entry)
        return -1;
      }
  
@@ -158,17 +155,7 @@ idempotent, and retrying an already-applied peer delete only adds noise.
    log_debug("Injected lease %s (%s) into dnsmasq",
              entry->ip_str, entry->hostname);
  
-@@ -368,10 +487,18 @@ int ubus_handler_delete_lease(const char *ip)
- 
-   if (ret)
-     {
-+      if (ret == UBUS_STATUS_NOT_FOUND)
-+        {
-+          log_debug("Lease %s already absent from dnsmasq", ip);
-+          return 0;
-+        }
-+
-       log_error("Failed to delete lease %s: %s", ip, ubus_strerror(ret));
+@@ -360,6 +479,8 @@ int ubus_handler_delete_lease(const char *ip)
        return -1;
      }
  

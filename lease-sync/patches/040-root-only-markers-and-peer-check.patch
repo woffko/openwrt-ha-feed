@@ -8,10 +8,9 @@ under /var/run/lease-sync (0700) and are opened with O_NOFOLLOW.
 Only a sync request was checked against the configured peers; ADD, UPDATE,
 DELETE and SYNC_RESPONSE from an unknown address are now dropped as well.
 
-diff -ruN lease-sync-patched/daemon/peer-sync.c ls-work/daemon/peer-sync.c
---- a/daemon/peer-sync.c	2026-10-22 17:55:30.208766172 +0300
-+++ b/daemon/peer-sync.c	2026-10-22 20:51:12.107341159 +0300
-@@ -743,6 +743,17 @@
+--- a/daemon/peer-sync.c
++++ b/daemon/peer-sync.c
+@@ -743,6 +743,17 @@ void peer_sync_handle_message(struct daemon_state *state)
          }
      }
  
@@ -29,9 +28,8 @@ diff -ruN lease-sync-patched/daemon/peer-sync.c ls-work/daemon/peer-sync.c
    state->total_sync_messages_received++;
  
    /* Handle different message types */
-diff -ruN lease-sync-patched/daemon/ubus-handler.c ls-work/daemon/ubus-handler.c
---- a/daemon/ubus-handler.c	2026-10-22 17:55:30.208985064 +0300
-+++ b/daemon/ubus-handler.c	2026-10-22 20:51:12.107044337 +0300
+--- a/daemon/ubus-handler.c
++++ b/daemon/ubus-handler.c
 @@ -27,6 +27,7 @@
  #include <errno.h>
  #include <ctype.h>
@@ -40,7 +38,7 @@ diff -ruN lease-sync-patched/daemon/ubus-handler.c ls-work/daemon/ubus-handler.c
  #include <libubox/blobmsg_json.h>
  #include <libubus.h>
  
-@@ -37,8 +38,10 @@
+@@ -37,8 +38,10 @@ extern struct daemon_state *g_state;
  
  #define SUPPRESSED_EVENT_RING_SIZE 64
  #define SUPPRESSED_EVENT_TTL_MS 10000
@@ -53,7 +51,7 @@ diff -ruN lease-sync-patched/daemon/ubus-handler.c ls-work/daemon/ubus-handler.c
  
  #define SUPPRESSED_ACTION_UPSERT 1
  #define SUPPRESSED_ACTION_DELETE 2
-@@ -84,19 +87,27 @@
+@@ -84,19 +87,27 @@ static void write_suppressed_event_marker(const char *ip, uint8_t action, uint64
  {
    char path[sizeof(SUPPRESSED_EVENT_DIR) + INET6_ADDRSTRLEN * 2 + 16];
    FILE *f;
