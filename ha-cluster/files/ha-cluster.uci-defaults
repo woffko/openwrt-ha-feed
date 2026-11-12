@@ -1,0 +1,23 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
+# Names the advanced section of /etc/config/ha-cluster. Idempotent.
+#
+# This is the step of the upstream 2.0.0 migration
+# (60_ha-cluster-sync-model) that applies to the 1.0 UCI model as well.
+
+CONFIG="${UCI_CONFIG_DIR:-/etc/config}/ha-cluster"
+[ -f "$CONFIG" ] || exit 0
+
+# The backend reads the advanced section by name, and 1.0.x shipped it
+# anonymous: the first anonymous one takes the name, unless a section
+# already has it
+if [ -z "$(uci -q get ha-cluster.advanced)" ]; then
+	section="$(uci -q show ha-cluster |
+		sed -n 's/^ha-cluster\.\(@advanced\[[0-9]*\]\)=advanced$/\1/p' |
+		head -n 1)"
+	[ -n "$section" ] && uci -q rename "ha-cluster.$section=advanced"
+fi
+
+uci -q commit ha-cluster
+exit 0
