@@ -7,7 +7,8 @@ lease-sync state cannot be written back into dnsmasq.
 
 --- a/src/ubus.c
 +++ b/src/ubus.c
-@@ -398,9 +398,9 @@
+@@ -391,9 +391,9 @@ static int ubus_handle_add_lease(struct ubus_context *ctx, struct ubus_object *o
+ 	}
  
        clid_len = parse_hex((char*)client_id, clid_bin, sizeof(clid_bin), NULL, NULL);
 -      if (clid_len <= 0)

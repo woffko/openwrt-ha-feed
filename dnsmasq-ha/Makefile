@@ -39,7 +39,7 @@ define Package/dnsmasq-ha
   CATEGORY:=Base system
   TITLE:=DNS and DHCP server (HA Enabled)
   URL:=http://www.thekelleys.org.uk/dnsmasq/
-  DEPENDS:=+libubus +libnettle +kmod-ipt-ipset +libnetfilter-conntrack +nftables-json
+  DEPENDS:=+libubus +@BUSYBOX_CONFIG_PIDOF +libnettle +kmod-ipt-ipset +libnetfilter-conntrack +nftables-json
   PROVIDES:=dnsmasq
   USERID:=dnsmasq=453:dnsmasq=453
 endef
