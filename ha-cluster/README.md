@@ -168,7 +168,7 @@ All configuration lives in `/etc/config/ha-cluster`.
 | `node_priority` | int | `100` | VRRP priority (1-255, higher wins MASTER) |
 | `vrrp_transport` | string | `multicast` | VRRP transport: `multicast` or `unicast`. When `unicast`, auto-derives addresses from peer config |
 | `sync_method` | string | `owsync` | Sync backend: `owsync` or `none` |
-| `sync_encryption` | bool | `1` | Encrypt owsync traffic (AES-256-GCM) |
+| `sync_encryption` | bool | `1` | Encrypt owsync and lease-sync traffic (AES-256-GCM). With `1`, a sync daemon is not started without a valid `encryption_key`; `0` is the explicit choice of plain mode |
 | `encryption_key` | string | | 256-bit hex key (use LuCI "Generate" button or `hexdump -n 32 -v -e '1/1 "%02x"' /dev/urandom`) |
 | `sync_port` | int | `4321` | owsync TCP port |
 | `sync_dir` | string | `/etc/config` | Directory to synchronize |
@@ -239,7 +239,8 @@ ha-cluster starts a sync daemon only when it has work and is installed:
 - `lease-sync` when `sync_leases` is on and there is such a peer.
 
 A daemon that is wanted but not installed is reported in the log. The
-encryption key is required as soon as one of them is wanted.
+encryption key is required as soon as one of them is wanted, unless
+`sync_encryption` is `0`.
 
 ### Exclusions (`config exclude`)
 
@@ -306,7 +307,11 @@ config script 'check_lan_dataplane'
 	option fall '3'
 ```
 
-### Advanced settings (`config advanced`)
+### Advanced settings (`config advanced 'advanced'`)
+
+The section must carry the name `advanced`: the backend reads it by name
+and ignores an anonymous one. A package upgrade names the anonymous
+section that earlier releases shipped.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
