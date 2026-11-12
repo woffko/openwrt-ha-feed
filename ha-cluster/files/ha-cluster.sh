@@ -661,7 +661,7 @@ ha_sync_encryption_mode() {
 	case "$key" in
 		"")
 			ha_log_error "sync_encryption is enabled but encryption_key is empty"
-			ha_log_error "Generate one with 'owsync genkey' and set it on both nodes, or set sync_encryption '0'"
+			ha_log_error "Set the same key on all nodes, generated in LuCI or with: hexdump -n 32 -v -e '1/1 \"%02x\"' /dev/urandom; or set sync_encryption '0'"
 			return 1
 			;;
 		*[!0-9a-fA-F]*)
