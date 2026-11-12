@@ -1158,7 +1158,51 @@ ha_validate_config() {
 		ha_sync_encryption_mode "$encryption_key" || errors=1
 	fi
 
+	# Warn only: /etc/config/dhcp belongs to the user
+	if ha_dhcp_authoritative_conflict; then
+		ha_log_warning "dnsmasq is authoritative while several nodes serve DHCP: they NAK each other's clients"
+		ha_log_warning "Set authoritative '0' in /etc/config/dhcp on every node"
+	fi
+
 	return $errors
+}
+
+_ha_dnsmasq_authoritative=0
+_ha_check_dnsmasq_authoritative() {
+	local authoritative
+
+	config_get_bool authoritative "$1" authoritative 0
+	[ "$authoritative" -eq 1 ] && _ha_dnsmasq_authoritative=1
+}
+
+# Usage: ha_dhcp_authoritative_conflict (ha-cluster config loaded)
+# A dnsmasq section is authoritative while several nodes serve DHCP, as
+# lease sync or the enabled dhcp service section listing files implies: an
+# authoritative dnsmasq NAKs every request carrying another node's
+# server-id.
+ha_dhcp_authoritative_conflict() {
+	local sync_method group_type group_enabled group_files
+
+	if ! ha_lease_sync_active; then
+		[ -x "$OWSYNC_BIN" ] || return 1
+		config_get sync_method config sync_method "owsync"
+		[ "$sync_method" = "owsync" ] || return 1
+		config_get group_type dhcp TYPE ""
+		[ "$group_type" = "service" ] || return 1
+		config_get_bool group_enabled dhcp enabled 1
+		config_get group_files dhcp config_files ""
+		[ "$group_enabled" -eq 1 ] && [ -n "$group_files" ] &&
+			ha_has_sync_peer || return 1
+	fi
+
+	# In a subshell: config_load keeps the options of the previous config,
+	# so /etc/config/dhcp would leak into same-named ha-cluster sections
+	(
+		_ha_dnsmasq_authoritative=0
+		config_load dhcp
+		config_foreach _ha_check_dnsmasq_authoritative dnsmasq
+		[ "$_ha_dnsmasq_authoritative" -eq 1 ]
+	)
 }
 
 # Check that each enabled VIP interface has force=1 in its dhcp section
