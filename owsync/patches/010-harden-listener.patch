@@ -1,30 +1,32 @@
 From: OpenWrt HA build <local>
-Subject: [PATCH] owsync: harden the listener against unauthenticated clients
+Subject: [PATCH] owsync: accept only the configured peers and cap frames before the handshake
 
 The sync port is reachable by every host that can route to the node.
-Before this change any client could occupy all worker slots by staying
-silent, make the server allocate up to MAX_MESSAGE_SIZE per connection
-before the AES-GCM tag was checked, and hand json_tokener_parse() a buffer
-without a NUL terminator.
+owsync 1.3.0 bounds what a connected client can do (socket timeouts,
+aggregate receive budget, explicit-length JSON parsing, mode masking,
+sync root boundary), but any host can still connect, hold a worker slot
+for the socket timeout and make the server read a MAX_MESSAGE_SIZE frame
+before the AES-GCM tag is checked.
 
 - accept only connections from the addresses of the configured peers
   (standalone "owsync server" without peers keeps accepting everyone);
-- socket send/receive timeouts of 30 seconds on every session;
-- frames are capped at 64 KiB until the peer's HELLO has been validated,
-  and empty frames are rejected;
-- receive and decrypt buffers get a NUL terminator;
-- a FileContent frame without path or data is malformed;
-- the sync root boundary check requires a "/" after the prefix;
-- fchmod() gets permission bits only, never setuid/setgid/sticky.
+- frames are capped at 64 KiB until the peer's HELLO has been validated;
+- a FileContent frame without path, without data or with data that is
+  not hex is malformed: written as received, it would replace the
+  destination with an empty file.
+
+The parts of the 1.2.0 version of this patch that 1.3.0 covers are
+dropped: the socket timeouts (300 s upstream, sized for the peer's scan
+of its tree, instead of 30 s), the NUL terminators (wire buffers are now
+parsed with their length), the empty frame check, the sync root boundary
+check and the fchmod() mask.
 
 The two-node exchange is unchanged: both peers are configured on each
-side, HELLO stays well below 64 KiB, and a healthy session finishes long
-before a 30 second idle timeout.
+side and HELLO stays well below 64 KiB.
 
-diff -ruN owsync-1.2.0/owsync-1.2.0/include/net.h owsync-work/include/net.h
---- a/include/net.h	2026-02-11 23:25:14.000000000 +0200
-+++ b/include/net.h	2026-10-22 20:51:11.263086231 +0300
-@@ -47,10 +47,21 @@
+--- a/include/net.h
++++ b/include/net.h
+@@ -47,10 +47,17 @@ typedef struct {
      } payload;
  } message_t;
  
@@ -34,10 +36,6 @@ diff -ruN owsync-1.2.0/owsync-1.2.0/include/net.h owsync-work/include/net.h
 + * spoke the protocol). */
 +#define OWSYNC_PREAUTH_MAX_MESSAGE (64 * 1024)
 +
-+/* Socket send/receive timeout for sync sessions, in seconds. A peer that
-+ * connects and goes silent must not hold a worker slot forever. */
-+#define OWSYNC_IO_TIMEOUT_SEC 30
-+
  /* TCP channel with optional encryption */
  typedef struct {
      int fd;                /* Socket file descriptor */
@@ -46,7 +44,7 @@ diff -ruN owsync-1.2.0/owsync-1.2.0/include/net.h owsync-work/include/net.h
  #ifdef ENABLE_ENCRYPTION
      security_context_t *security_ctx;  /* Encryption context (NULL if plain) */
  #endif
-@@ -66,6 +77,12 @@
+@@ -66,6 +73,12 @@ void channel_free(channel_t *channel);  /* Closes socket */
  int channel_send(channel_t *channel, message_t *msg);
  int channel_receive(channel_t *channel, message_t **out_msg);
  
@@ -59,31 +57,9 @@ diff -ruN owsync-1.2.0/owsync-1.2.0/include/net.h owsync-work/include/net.h
  /* Server mode: listen for incoming connections, spawn threads */
  int start_server(const char *host, const char *port, const char *key,
                   const char *root, const char *db_path, file_filter_t *filter,
-diff -ruN owsync-1.2.0/owsync-1.2.0/src/crypto.c owsync-work/src/crypto.c
---- a/src/crypto.c	2026-02-11 23:25:14.000000000 +0200
-+++ b/src/crypto.c	2026-10-22 20:51:11.263621272 +0300
-@@ -154,7 +154,8 @@
-     size_t encrypted_len = ciphertext_len - AES_NONCE_SIZE - 16;
-     const uint8_t *tag = ciphertext + ciphertext_len - 16;
- 
--    uint8_t *output = malloc(encrypted_len + EVP_MAX_BLOCK_LENGTH);
-+    /* One extra byte so the plaintext can be handed to string functions */
-+    uint8_t *output = malloc(encrypted_len + EVP_MAX_BLOCK_LENGTH + 1);
-     if (!output) {
-         return OWSYNC_ERROR_MEMORY;
-     }
-@@ -181,6 +182,7 @@
-         return OWSYNC_ERROR_CRYPTO;
-     }
-     total_len += len;
-+    output[total_len] = '\0';
- 
-     *plaintext = output;
-     *plaintext_len = total_len;
-diff -ruN owsync-1.2.0/owsync-1.2.0/src/daemon.c owsync-work/src/daemon.c
---- a/src/daemon.c	2026-02-11 23:25:14.000000000 +0200
-+++ b/src/daemon.c	2026-10-22 20:51:11.263702256 +0300
-@@ -279,6 +279,9 @@
+--- a/src/daemon.c
++++ b/src/daemon.c
+@@ -280,6 +280,9 @@ static void *server_thread(void *arg) {
  
      log_info("Starting listen server on %s:%s", ctx->host, ctx->port);
  
@@ -93,23 +69,15 @@ diff -ruN owsync-1.2.0/owsync-1.2.0/src/daemon.c owsync-work/src/daemon.c
      /* start_server runs until process termination */
      int result = start_server(ctx->host, ctx->port, ctx->key, ctx->root,
                                ctx->db_path, ctx->filter, ctx->clock_offset);
-diff -ruN owsync-1.2.0/owsync-1.2.0/src/net.c owsync-work/src/net.c
---- a/src/net.c	2026-02-11 23:25:14.000000000 +0200
-+++ b/src/net.c	2026-10-22 20:51:11.263378706 +0300
-@@ -17,6 +17,8 @@
- #include <libgen.h>
- #include <errno.h>
- #include <fcntl.h>
-+#include <sys/socket.h>
-+#include <sys/time.h>
- 
- #define MAX_CONNECTIONS 50  /* Limit concurrent connections to prevent resource exhaustion */
- static volatile int active_connections = 0;  /* Atomic counter for DoS protection */
-@@ -343,6 +345,12 @@
+--- a/src/net.c
++++ b/src/net.c
+@@ -515,6 +515,14 @@ static message_t *json_to_message(struct json_object *root) {
              msg->payload.file_content.data_len = data_len;
          }
  
-+        /* A file frame without a path or without data is malformed */
++        /* A file frame without a path, without data or with data that is
++         * not hex is malformed. Writing it would replace the file with an
++         * empty one. An empty file still decodes to a non-NULL buffer. */
 +        if (!msg->payload.file_content.path || !msg->payload.file_content.data) {
 +            message_free(msg);
 +            return NULL;
@@ -118,7 +86,7 @@ diff -ruN owsync-1.2.0/owsync-1.2.0/src/net.c owsync-work/src/net.c
      } else if (strcmp(type_str, "EndOfSync") == 0) {
          msg = message_new(MSG_END_OF_SYNC);
      }
-@@ -356,6 +364,7 @@
+@@ -528,6 +536,7 @@ channel_t *channel_new(int fd, bool is_encrypted, void *security_ctx) {
  
      channel->fd = fd;
      channel->is_encrypted = is_encrypted;
@@ -126,30 +94,23 @@ diff -ruN owsync-1.2.0/owsync-1.2.0/src/net.c owsync-work/src/net.c
  
  #ifdef ENABLE_ENCRYPTION
      channel->security_ctx = security_ctx;
-@@ -453,14 +462,17 @@
+@@ -629,9 +638,11 @@ int channel_receive(channel_t *channel, message_t **out_msg) {
+         log_error("Incoming message has zero length");
+         return OWSYNC_ERROR_PROTOCOL;
      }
- 
-     uint32_t len = ntohl(len_be);
 -    if (len > MAX_MESSAGE_SIZE) {
 -        log_error("Incoming message size %u exceeds MAX_MESSAGE_SIZE (%d)",
 -                  len, MAX_MESSAGE_SIZE);
-+    if (len == 0 || len > channel->max_message) {
-+        log_error("Incoming message size %u outside the accepted range (1..%u)",
++    /* max_message never exceeds MAX_MESSAGE_SIZE: it starts at the
++     * pre-handshake cap and is raised once the peer's HELLO was accepted */
++    if (len > channel->max_message) {
++        log_error("Incoming message size %u exceeds the %u bytes accepted at this stage",
 +                  len, channel->max_message);
          return OWSYNC_ERROR;
      }
  
--    uint8_t *buffer = malloc(len);
-+    /* One extra byte: json_tokener_parse() needs a NUL-terminated string,
-+     * and the wire frame carries none. */
-+    uint8_t *buffer = malloc((size_t)len + 1);
-     if (!buffer) return OWSYNC_ERROR_MEMORY;
-+    buffer[len] = '\0';
- 
-     ssize_t total_read = 0;
-     while (total_read < len) {
-@@ -589,6 +601,9 @@
-     log_debug("Handshake OK, hostname=%s", peer_hello->payload.hello.hostname);
+@@ -789,6 +800,9 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+               peer_hello->payload.hello.hostname ? peer_hello->payload.hello.hostname : "(unknown)");
      message_free(peer_hello);
  
 +    /* The peer passed the handshake: allow full-size file frames from now on */
@@ -158,31 +119,7 @@ diff -ruN owsync-1.2.0/owsync-1.2.0/src/net.c owsync-work/src/net.c
      /* Load DB and scan filesystem for current state */
      log_debug("Loading database from %s", db_path);
      database_t *db = database_new();
-@@ -806,7 +821,11 @@
-             char real_root[MAX_PATH_LEN];
-             bool safe = false;
-             if (realpath(dir, real_dir) && realpath(root, real_root)) {
--                if (strncmp(real_dir, real_root, strlen(real_root)) == 0) {
-+                size_t root_len = strlen(real_root);
-+                /* Prefix match plus a boundary: "/etc/config2" must not pass
-+                 * as being inside "/etc/config" */
-+                if (strncmp(real_dir, real_root, root_len) == 0 &&
-+                        (real_dir[root_len] == '\0' || real_dir[root_len] == '/')) {
-                     safe = true;
-                 }
-             }
-@@ -826,7 +845,9 @@
-             int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
-             if (fd >= 0) {
-                 write(fd, msg->payload.file_content.data, msg->payload.file_content.data_len);
--                fchmod(fd, msg->payload.file_content.mode);
-+                /* Permission bits only: a peer must never hand out setuid,
-+                 * setgid or sticky bits */
-+                fchmod(fd, msg->payload.file_content.mode & 0777);
-                 close(fd);
-                 if (rename(tmp_path, full_path) == 0) {
-                     log_info("Synced: %s", path);
-@@ -863,6 +884,110 @@
+@@ -1109,6 +1123,103 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
      return OWSYNC_OK;
  }
  
@@ -283,17 +220,10 @@ diff -ruN owsync-1.2.0/owsync-1.2.0/src/net.c owsync-work/src/net.c
 +    }
 +}
 +
-+/* A sync session is request/response: a silent peer must not block a slot */
-+static void set_io_timeouts(int fd) {
-+    struct timeval tv = { .tv_sec = OWSYNC_IO_TIMEOUT_SEC, .tv_usec = 0 };
-+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-+}
-+
  /* Thread entry point for handling incoming connections */
  static void *handle_connection(void *arg) {
      connection_args_t *args = (connection_args_t *)arg;
-@@ -1056,6 +1181,15 @@
+@@ -1308,6 +1419,14 @@ ipv4_fallback:
              continue;
          }
  
@@ -304,16 +234,7 @@ diff -ruN owsync-1.2.0/owsync-1.2.0/src/net.c owsync-work/src/net.c
 +            close(client_fd);
 +            continue;
 +        }
-+        set_io_timeouts(client_fd);
 +
          int count = __sync_add_and_fetch(&active_connections, 1);
          if (count > MAX_CONNECTIONS) {
              __sync_sub_and_fetch(&active_connections, 1);
-@@ -1160,6 +1294,7 @@
-         }
- 
-         if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
-+            set_io_timeouts(sockfd);
-             break;  /* Success */
-         }
- 
