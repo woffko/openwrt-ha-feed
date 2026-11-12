@@ -108,8 +108,9 @@ Repeat on each peer node with the appropriate priority and peer addresses.
 
 ## DHCP Prerequisites
 
-When using lease sync (`sync_leases='1'`), each VIP interface must have
-`force=1` in its DHCP configuration:
+When lease sync is active (`sync_leases='1'`, a peer to sync with and
+`lease-sync` installed), each VIP interface must have `force=1` in its
+DHCP configuration:
 
 ```sh
 uci set dhcp.lan.force='1'
@@ -123,7 +124,7 @@ inject leases into a node whose DHCP subsystem is not initialized. DNS
 resolution for local hostnames would fail on the BACKUP node.
 
 ha-cluster validates this at startup and refuses to start if `force=1` is
-missing on any VIP interface with lease sync enabled.
+missing on any VIP interface with lease sync active.
 
 Only set `force=1` on interfaces where you need HA DHCP. Other interfaces
 (management networks, etc.) retain normal dhcp_check protection.
@@ -204,7 +205,7 @@ same instance for atomic failover.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | bool | `0` | Enable this VIP |
+| `enabled` | bool | `1` | Enable this VIP |
 | `vrrp_instance` | string | | Name of `vrrp_instance` section |
 | `interface` | string | | Logical interface (e.g. `lan`), resolved to its device |
 | `address` | string | | Virtual IPv4 address |
@@ -229,7 +230,16 @@ Each service section defines a sync group for owsync.
 |--------|------|---------|-------------|
 | `enabled` | bool | `1` | Enable sync for this group |
 | `config_files` | list | | UCI config names or paths to sync |
-| `sync_leases` | bool | `0` | Enable lease-sync daemon (dhcp service only) |
+| `sync_leases` | bool | `0` | Enable lease-sync daemon (dhcp service only; does not depend on `enabled`) |
+
+ha-cluster starts a sync daemon only when it has work and is installed:
+
+- `owsync` when `sync_method` is `owsync`, an enabled service section
+  lists files, and at least one peer has an address and `sync_enabled`;
+- `lease-sync` when `sync_leases` is on and there is such a peer.
+
+A daemon that is wanted but not installed is reported in the log. The
+encryption key is required as soon as one of them is wanted.
 
 ### Exclusions (`config exclude`)
 
