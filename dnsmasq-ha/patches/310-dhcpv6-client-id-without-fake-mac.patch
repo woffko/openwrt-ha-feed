@@ -6,6 +6,9 @@ add_lease require MAC addresses only for IPv4. DHCPv6 lease injection now uses
 the real client-id/DUID plus IAID and no longer needs placeholder MAC values
 such as "00".
 
+The iaid attribute stays optional and defaults to 0: lease-sync leaves it
+out for an IAID of 0, and requiring it kept every such lease off the peer.
+
 --- a/src/helper.c
 +++ b/src/helper.c
 @@ -583,7 +583,7 @@ int create_helper(int event_fd, int err_fd, uid_t uid, gid_t gid, long max_fd)
@@ -125,13 +128,14 @@ such as "00".
        if (!(lease = lease_find_by_addr(addr.addr4)))
  	lease = lease4_allocate(addr.addr4);
      }
-@@ -380,6 +384,32 @@ static int ubus_handle_add_lease(struct ubus_context *ctx, struct ubus_object *o
+@@ -380,6 +384,33 @@ static int ubus_handle_add_lease(struct ubus_context *ctx, struct ubus_object *o
  	  return UBUS_STATUS_INVALID_ARGUMENT;
  	}
  
-+      if (!client_id || !*client_id || !tb[ADD_LEASE_IA_ID])
++      /* iaid may be left out: lease-sync does not send an IAID of 0 */
++      if (!client_id || !*client_id)
 +	{
-+	  my_syslog(LOG_ERR, _("UBus add_lease: client_id and iaid are required for DHCPv6 lease %s"), ipaddr);
++	  my_syslog(LOG_ERR, _("UBus add_lease: client_id is required for DHCPv6 lease %s"), ipaddr);
 +	  return UBUS_STATUS_INVALID_ARGUMENT;
 +	}
 +
@@ -158,7 +162,7 @@ such as "00".
        if ((lease = lease6_find_by_addr(&addr.addr6, 128, 0)))
  	{
  	  if (lease->iaid != ia_id)
-@@ -415,6 +445,18 @@ static int ubus_handle_add_lease(struct ubus_context *ctx, struct ubus_object *o
+@@ -415,6 +446,18 @@ static int ubus_handle_add_lease(struct ubus_context *ctx, struct ubus_object *o
        return UBUS_STATUS_UNKNOWN_ERROR;
      }
  
@@ -177,7 +181,7 @@ such as "00".
    lease_set_hwaddr(lease, hwaddr_bin, clid_len > 0 ? clid_bin : NULL,
  		   hw_len, hw_type, clid_len, now, 0);
  
-@@ -440,7 +482,7 @@ static int ubus_handle_add_lease(struct ubus_context *ctx, struct ubus_object *o
+@@ -440,7 +483,7 @@ static int ubus_handle_add_lease(struct ubus_context *ctx, struct ubus_object *o
    lease->flags &= ~(LEASE_NEW | LEASE_CHANGED | LEASE_AUX_CHANGED | LEASE_EXP_CHANGED);
  
    my_syslog(LOG_INFO, _("UBus add_lease: added %s %s %s"),
