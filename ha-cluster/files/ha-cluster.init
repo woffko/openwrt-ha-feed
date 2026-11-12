@@ -53,6 +53,8 @@ start_service() {
 	procd_set_param command /usr/sbin/keepalived
 	procd_append_param command -n  # don't daemonize
 	procd_append_param command -f "$KEEPALIVED_CONF"
+	procd_set_param file "$KEEPALIVED_CONF"
+	procd_set_param reload_signal HUP
 	procd_set_param respawn
 	procd_set_param stdout 1
 	procd_set_param stderr 1
@@ -133,15 +135,11 @@ reload_service() {
 	# Running + enabled → reconcile all instances via procd
 	# start_service() regenerates configs and re-defines procd instances.
 	# procd compares new vs running instances:
-	#   - keepalived: command line unchanged → procd does nothing
+	#   - keepalived: config file tracked → procd sends SIGHUP on change and
+	#     keepalived re-reads its config, keeping the VIPs
 	#   - owsync/lease-sync: config file tracked → procd restarts on change
 	#   - owsync/lease-sync: instance appeared/disappeared → procd starts/stops
 	start
-
-	# SIGHUP keepalived to reload its config file without dropping VIPs.
-	# procd doesn't restart keepalived (command line unchanged), so we
-	# signal it to re-read keepalived.conf in-place (no failover).
-	procd_send_signal ha-cluster keepalived SIGHUP
 }
 
 service_triggers() {
