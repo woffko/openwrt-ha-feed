@@ -29,11 +29,17 @@ hotplugobj=""
 oldIFS=$IFS
 IFS=$'\n'
 for var in $(env); do
-	if [ "${var}" != "${var#DNSMASQ_}" ]; then
-		# Replaced below by the DUID of argument 2
-		[ -n "$dhcpv6_client_id" ] && [ "${var%%=*}" = "DNSMASQ_CLIENT_ID" ] && continue
-		json_add_string "" "${var%%=*}=${var#*=}"
-	fi
+	# Only NAME=value lines. A client can put a newline in its vendor or
+	# user class, and the rest of that value would then be read as a
+	# variable of its own, such as DNSMASQ_IAID. dnsmasq cuts these values
+	# at their first "=", so such a line never has one.
+	case "$var" in
+		DNSMASQ_*=*) ;;
+		*) continue ;;
+	esac
+	# Replaced below by the DUID of argument 2
+	[ -n "$dhcpv6_client_id" ] && [ "${var%%=*}" = "DNSMASQ_CLIENT_ID" ] && continue
+	json_add_string "" "${var%%=*}=${var#*=}"
 done
 IFS=$oldIFS
 
