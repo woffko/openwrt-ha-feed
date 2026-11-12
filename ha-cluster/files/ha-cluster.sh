@@ -1347,6 +1347,11 @@ ha_get_dnsmasq_confdir() {
 	echo "${_ha_dnsmasq_confdir:-/tmp/dnsmasq.d}"
 }
 
+# The one place that restarts dnsmasq, so that a test can replace it
+ha_restart_dnsmasq() {
+	/etc/init.d/dnsmasq restart 2>/dev/null
+}
+
 # Writes the dnsmasq conf-dir overlay and restarts dnsmasq (at most once)
 ha_configure_dnsmasq() {
 	local lease_sync_active=0 needs_restart=0
@@ -1384,7 +1389,7 @@ ha_configure_dnsmasq() {
 	fi
 
 	[ "$needs_restart" -eq 1 ] && {
-		/etc/init.d/dnsmasq restart 2>/dev/null
+		ha_restart_dnsmasq
 		ha_log "dnsmasq restarted"
 	}
 }
@@ -1399,7 +1404,7 @@ ha_release_dnsmasq() {
 
 	ha_log "Removing dnsmasq HA overlay"
 	rm -f "$overlay_path"
-	/etc/init.d/dnsmasq restart 2>/dev/null
+	ha_restart_dnsmasq
 }
 
 # Remove IPv6 BACKUP guard state/rules when ha-cluster stops.

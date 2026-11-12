@@ -7,3 +7,4 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 sh "$SCRIPT_DIR/test-dataplane-check.sh"
 sh "$SCRIPT_DIR/test-ha-generator.sh"
+sh "$SCRIPT_DIR/test-ha-sync-gating.sh"
