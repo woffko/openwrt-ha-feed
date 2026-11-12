@@ -36,7 +36,9 @@ start_service() {
 	[ -L "$HA_CLUSTER_RUN_DIR" ] && rm -f "$HA_CLUSTER_RUN_DIR"
 	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR"
 	chmod 0700 "$HA_CLUSTER_RUN_DIR"
-	[ "$(stat -c '%u' "$HA_CLUSTER_RUN_DIR" 2>/dev/null)" = "0" ] || {
+	# -O: owned by the effective user, which is root here. Not stat(1): the
+	# default BusyBox of OpenWrt has no such applet.
+	[ -d "$HA_CLUSTER_RUN_DIR" ] && [ -O "$HA_CLUSTER_RUN_DIR" ] || {
 		ha_log_error "$HA_CLUSTER_RUN_DIR is not owned by root; refusing to start"
 		return 1
 	}
