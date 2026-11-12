@@ -1,0 +1,32 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: do not free the embedded state of an expired tombstone
+
+database_update_from_scan() removes a tombstone older than
+TOMBSTONE_TTL_MS (30 days) with file_state_free(&entry->state). The
+state is embedded in the db_entry_t, so that call ends in free() on a
+pointer into the middle of the entry, 8 bytes past its start on 64-bit
+targets, before the entry itself is freed. That is undefined behaviour,
+and musl's allocator traps on such a pointer. The database is not saved
+before the crash, so every respawn reaches the same tombstone and
+crashes again until procd gives up, and config sync stays down.
+
+It takes a synced file that was deleted 30 days earlier, on either
+node. Release the two strings of the embedded state instead, as
+database_free() does.
+
+Present in upstream v1.2.0 and v1.3.0.
+
+--- a/src/state.c
++++ b/src/state.c
+@@ -620,7 +620,10 @@ int database_update_from_scan(database_t *db, const char *root, file_filter_t *f
+                         db->buckets[i] = next;
+                     }
+                     free(entry->path);
+-                    file_state_free(&entry->state);
++                    /* state is embedded in the entry: release its strings
++                     * only, the entry itself is freed just below */
++                    free(entry->state.path);
++                    free(entry->state.hash);
+                     free(entry);
+                     db->entry_count--;
+                     *dirty = true;
