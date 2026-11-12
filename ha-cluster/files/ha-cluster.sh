@@ -17,6 +17,8 @@ HA_CLUSTER_RUN_DIR="${HA_CLUSTER_RUN_DIR:-/var/run/ha-cluster}"
 KEEPALIVED_CONF="${HA_CLUSTER_RUN_DIR}/keepalived.conf"
 OWSYNC_CONF="${HA_CLUSTER_RUN_DIR}/owsync.conf"
 LEASE_SYNC_CONF="${HA_CLUSTER_RUN_DIR}/lease-sync.conf"
+OWSYNC_BIN="${OWSYNC_BIN:-/usr/bin/owsync}"
+LEASE_SYNC_BIN="${LEASE_SYNC_BIN:-/usr/sbin/lease-sync}"
 HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
@@ -187,6 +189,70 @@ _ha_collect_peer_address() {
 	if [ -z "$_ha_peer_source_address" ] && [ -n "$source_address" ]; then
 		_ha_peer_source_address="$source_address"
 	fi
+}
+
+# Peers running ha-cluster (sync_enabled, the default) and having an address
+_ha_sync_peer_count=0
+_ha_count_sync_peer() {
+	local section="$1"
+	local address sync_enabled
+
+	config_get_bool sync_enabled "$section" sync_enabled 1
+	[ "$sync_enabled" -eq 0 ] && return 0
+
+	config_get address "$section" address ""
+	[ -n "$address" ] && _ha_sync_peer_count=$((_ha_sync_peer_count + 1))
+}
+
+# Usage: ha_has_sync_peer (ha-cluster config loaded)
+ha_has_sync_peer() {
+	_ha_sync_peer_count=0
+	config_foreach _ha_count_sync_peer peer
+	[ "$_ha_sync_peer_count" -gt 0 ]
+}
+
+_ha_include_count=0
+_ha_count_include() {
+	_ha_include_count=$((_ha_include_count + 1))
+}
+
+_ha_count_group_includes() {
+	local section="$1"
+	local enabled
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 0 ] && return 0
+
+	config_list_foreach "$section" config_files _ha_count_include
+}
+
+# Usage: ha_owsync_wanted (ha-cluster config loaded)
+# owsync is the sync method, an enabled service section lists files and
+# there is a peer to sync with.
+ha_owsync_wanted() {
+	local sync_method
+
+	config_get sync_method config sync_method "owsync"
+	[ "$sync_method" = "owsync" ] || return 1
+
+	_ha_include_count=0
+	config_foreach _ha_count_group_includes service
+	[ "$_ha_include_count" -gt 0 ] && ha_has_sync_peer
+}
+
+# Usage: ha_lease_sync_wanted (ha-cluster config loaded)
+# Lease sync is enabled and has a peer to sync with.
+ha_lease_sync_wanted() {
+	local lease_sync
+
+	config_get_bool lease_sync dhcp sync_leases 0
+	[ "$lease_sync" -eq 1 ] && ha_has_sync_peer
+}
+
+# Usage: ha_lease_sync_active (ha-cluster config loaded)
+# Gates the lease-sync config, the dhcp force check and the dnsmasq overlay.
+ha_lease_sync_active() {
+	ha_lease_sync_wanted && [ -x "$LEASE_SYNC_BIN" ]
 }
 
 # Generate keepalived configuration
@@ -611,15 +677,20 @@ ha_sync_encryption_mode() {
 }
 
 ha_generate_owsync_conf() {
-	local sync_method encryption_key sync_port sync_dir sync_interval owsync_log_level bind_address
+	local encryption_key sync_port sync_dir sync_interval owsync_log_level bind_address
 
 	config_load ha-cluster
-	config_get sync_method config sync_method "owsync"
 
-	[ "$sync_method" != "owsync" ] && {
+	if ! ha_owsync_wanted; then
+		ha_log_debug "Config sync: sync_method is not owsync, no enabled sync group or no peer to sync with"
 		rm -f "$OWSYNC_CONF"
 		return 0
-	}
+	fi
+	if [ ! -x "$OWSYNC_BIN" ]; then
+		ha_log_warning "Config sync enabled but owsync is not installed"
+		rm -f "$OWSYNC_CONF"
+		return 0
+	fi
 
 	config_get encryption_key config encryption_key ""
 	config_get sync_port config sync_port "4321"
@@ -744,14 +815,11 @@ ha_add_owsync_exclude_conf() {
 
 # Generate lease-sync configuration (flat file for managed mode)
 ha_generate_lease_sync_conf() {
-	local dhcp_service_enabled lease_sync_enabled lease_sync_port encryption_key
+	local lease_sync_port encryption_key
 	local sync_interval peer_timeout persist_interval log_level node_name bind_address
 
 	config_load ha-cluster
 
-	# Check if DHCP service has lease sync enabled
-	config_get_bool dhcp_service_enabled dhcp enabled 0
-	config_get_bool lease_sync_enabled dhcp sync_leases 0
 	config_get lease_sync_port advanced lease_sync_port "5378"
 	config_get sync_interval advanced lease_sync_interval "30"
 	config_get peer_timeout advanced lease_sync_peer_timeout "120"
@@ -761,11 +829,16 @@ ha_generate_lease_sync_conf() {
 	config_get bind_address config bind_address ""
 	node_name="$(cat /proc/sys/kernel/hostname)"
 
-	[ "$dhcp_service_enabled" -eq 0 ] || [ "$lease_sync_enabled" -eq 0 ] && {
-		ha_log_debug "DHCP lease sync disabled"
+	if ! ha_lease_sync_wanted; then
+		ha_log_debug "DHCP lease sync disabled or no peer to sync with"
 		rm -f "$LEASE_SYNC_CONF"
 		return 0
-	}
+	fi
+	if [ ! -x "$LEASE_SYNC_BIN" ]; then
+		ha_log_warning "DHCP lease sync enabled but lease-sync is not installed"
+		rm -f "$LEASE_SYNC_CONF"
+		return 0
+	fi
 
 	ha_sync_encryption_mode "$encryption_key" || {
 		rm -f "$LEASE_SYNC_CONF"
@@ -1066,23 +1139,22 @@ ha_validate_config() {
 		ha_log_warning "No peers configured - HA will not function"
 	}
 
-	# When lease sync is enabled, VIP interfaces need dhcp.*.force=1
+	# When lease sync is active, VIP interfaces need dhcp.*.force=1
 	# so that dnsmasq initializes DHCP (required for ubus add_lease).
 	# Without it, the BACKUP node cannot receive synced leases.
-	local lease_sync_enabled
-	config_get_bool lease_sync_enabled dhcp sync_leases 0
-	if [ "$lease_sync_enabled" -eq 1 ]; then
+	if ha_lease_sync_active; then
 		_ha_dhcp_force_checked=""
 		config_foreach _ha_check_dhcp_force vip
 	fi
 
 	# With sync_encryption enabled (the default) the key must be present and
 	# well-formed; otherwise owsync and lease-sync would start without any
-	# authentication of their peers.
-	local sync_method encryption_key
-	config_get sync_method config sync_method "owsync"
+	# authentication of their peers. Checked as soon as the configuration
+	# asks for a sync daemon, installed or not; a cluster with nothing to
+	# sync or no peer to sync with runs no such daemon and needs no key.
+	local encryption_key
 	config_get encryption_key config encryption_key ""
-	if [ "$sync_method" = "owsync" ] || [ "$lease_sync_enabled" -eq 1 ]; then
+	if ha_owsync_wanted || ha_lease_sync_wanted; then
 		ha_sync_encryption_mode "$encryption_key" || errors=1
 	fi
 
@@ -1235,16 +1307,16 @@ ha_get_dnsmasq_confdir() {
 
 # Writes the dnsmasq conf-dir overlay and restarts dnsmasq (at most once)
 ha_configure_dnsmasq() {
-	local lease_sync_enabled needs_restart=0
+	local lease_sync_active=0 needs_restart=0
 	local confdir overlay_path tmp_overlay
 
 	config_load ha-cluster
-	config_get_bool lease_sync_enabled dhcp sync_leases 0
+	ha_lease_sync_active && lease_sync_active=1
 
 	confdir="$(ha_get_dnsmasq_confdir)"
 	overlay_path="$confdir/$HA_DNSMASQ_OVERLAY_NAME"
 
-	if [ "$lease_sync_enabled" -eq 1 ]; then
+	if [ "$lease_sync_active" -eq 1 ]; then
 		mkdir -p "$confdir"
 		# Dot-prefixed so dnsmasq skips it if it (re)starts before the mv
 		tmp_overlay="$confdir/.$HA_DNSMASQ_OVERLAY_NAME.new"
@@ -1263,7 +1335,7 @@ ha_configure_dnsmasq() {
 			ha_log "Wrote dnsmasq HA overlay to $overlay_path"
 		fi
 	elif [ -f "$overlay_path" ]; then
-		# sync_leases disabled but stale overlay exists (reload or crash recovery)
+		# Left over from a run with lease sync active (reload or crash recovery)
 		rm -f "$overlay_path"
 		needs_restart=1
 		ha_log "Removed stale dnsmasq HA overlay"
