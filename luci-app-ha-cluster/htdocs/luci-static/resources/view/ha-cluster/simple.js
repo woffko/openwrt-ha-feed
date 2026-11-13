@@ -508,6 +508,9 @@ return view.extend({
 		var encryption_key_option = s.option(form.Value, 'encryption_key', _('Encryption Key'),
 			_('256-bit AES key (64 hexadecimal characters), used for both configuration and lease sync. Must be identical on all nodes.'));
 		encryption_key_option.depends('sync_encryption', '1');
+		// Hidden while the switch is off, not deleted: switching encryption
+		// back on must not ask for a new key on every node
+		encryption_key_option.retain = true;
 		encryption_key_option.password = true;
 		encryption_key_option.datatype = 'and(hexstring,rangelength(64,64))';
 		encryption_key_option.rmempty = true;
