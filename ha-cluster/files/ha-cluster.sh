@@ -1156,8 +1156,7 @@ _ha_check_dnsmasq_authoritative() {
 	[ "$authoritative" -eq 1 ] && _ha_dnsmasq_authoritative=1
 }
 
-# Usage: ha_dhcp_authoritative_conflict (ha-cluster config loaded, and
-# reloaded on return)
+# Usage: ha_dhcp_authoritative_conflict (ha-cluster config loaded)
 # A dnsmasq section is authoritative while several nodes serve DHCP, as
 # lease sync or the enabled dhcp sync group listing files implies: an
 # authoritative dnsmasq NAKs every request carrying another node's
@@ -1175,12 +1174,14 @@ ha_dhcp_authoritative_conflict() {
 			ha_has_sync_peer || return 1
 	fi
 
-	_ha_dnsmasq_authoritative=0
-	config_load dhcp
-	config_foreach _ha_check_dnsmasq_authoritative dnsmasq
-	config_load ha-cluster
-
-	[ "$_ha_dnsmasq_authoritative" -eq 1 ]
+	# In a subshell: config_load keeps the options of the previous config,
+	# so /etc/config/dhcp would leak into same-named ha-cluster sections
+	(
+		_ha_dnsmasq_authoritative=0
+		config_load dhcp
+		config_foreach _ha_check_dnsmasq_authoritative dnsmasq
+		[ "$_ha_dnsmasq_authoritative" -eq 1 ]
+	)
 }
 
 _ha_dhcp_force_checked=""
