@@ -120,10 +120,21 @@ They add to the list above when a node runs this fork's packages.
   node (`uci set dhcp.@dnsmasq[0].authoritative='0'; uci commit dhcp`),
   as [DHCP Prerequisites](#dhcp-prerequisites) explains. Until then
   ha-cluster logs a warning.
-- **IPv6 BACKUP guard.** The handler follows `<name>_v6` with multicast
-  VRRP and `<name>` with unicast VRRP, and takes over the state files an
-  earlier handler wrote. Custom hooks in `/etc/hotplug.d/keepalived/`
-  that match `<name>_v6` need the same change for unicast instances.
+- **IPv6 BACKUP guard.** For each section with an IPv6 VIP, a node that is
+  not MASTER drops its outgoing Router Advertisements and the incoming
+  DHCPv6 requests on the section's interface, so that clients neither
+  route through it nor get addresses from it. The state that counts is
+  that of `<name>_v6` with multicast VRRP and of `<name>` with unicast
+  VRRP; the guard is rebuilt after every start and reload. Custom hooks
+  in `/etc/hotplug.d/keepalived/` that match `<name>_v6` need the same
+  distinction for unicast instances.
+- **Router Advertisements of the MASTER.** The guard lets a MASTER send
+  Router Advertisements from one source address only, the virtual
+  link-local address of the section: option `virtual_link_local` of the
+  `vrrp_instance` section, else a link-local `address6` of one of its
+  VIPs, else `fe80::5`. Advertisements from any other source address are
+  dropped, so a section without that address on its interface advertises
+  nothing: give it a link-local VIP.
 - **Advanced section.** Settings in an unnamed `config advanced` section
   were ignored by the 1.0.x backend and take effect once the section is
   named: check that they are the same on every node, `lease_sync_port`

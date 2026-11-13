@@ -33,7 +33,9 @@ upgrading a node.
 - IPv6 BACKUP guard: a BACKUP node drops its Router Advertisements and
   incoming DHCPv6 requests, so that clients neither route through it nor
   get addresses from it. With unicast VRRP, which since 2.0.0 keeps both
-  families in one instance, the guard follows that instance.
+  families in one instance, the guard follows that instance. It is
+  rebuilt after every start and reload, since keepalived reports no state
+  for an instance that a reload keeps or removes.
 - The upgrade script puts the guard handler of the installed release
   back after a sysupgrade that kept `/etc/hotplug.d/keepalived/`.
 
