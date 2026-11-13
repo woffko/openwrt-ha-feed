@@ -1,0 +1,32 @@
+access ubus ha-cluster status: true
+access ubus ha-cluster generate_key: true
+access ubus network.interface dump: true
+access ubus luci-rpc getNetworkDevices: true
+access ubus luci-rpc getBoardJSON: true
+access ubus luci-rpc getWirelessDevices: true
+access ubus luci-rpc getHostHints: true
+access ubus file stat: true
+access ubus file list: true
+access ubus file read: true
+access ubus file write: true
+access ubus file remove: true
+access uci ha-cluster read: true
+access uci ha-cluster write: true
+access uci dhcp read: true
+access uci network read: true
+file stat /usr/bin/owsync: ok
+file stat /usr/sbin/lease-sync: ok
+file list /etc/hotplug.d/keepalived: ok
+file read /etc/hotplug.d/keepalived/01-ubus: ok
+file write /etc/hotplug.d/keepalived/99-char: ok
+file remove /etc/hotplug.d/keepalived/99-char: ok
+access ubus ha-cluster apply: false
+access ubus keepalived dump: false
+access ubus service list: false
+access uci keepalived read: false
+access uci owsync read: false
+access uci lease-sync read: false
+access uci wireless read: false
+access uci dhcp write: false
+file write /etc/config/ha-cluster: Permission denied
+file read /etc/shadow: Permission denied

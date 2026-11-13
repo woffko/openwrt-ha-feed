@@ -3,23 +3,25 @@
 		"description": "Grant access to HA Cluster configuration",
 		"read": {
 			"file": {
-				"/etc/hotplug.d/keepalived/*": [ "list", "read" ]
+				"/etc/hotplug.d/keepalived": [ "list" ],
+				"/etc/hotplug.d/keepalived/*": [ "read" ],
+				"/usr/bin/owsync": [ "list" ],
+				"/usr/sbin/lease-sync": [ "list" ]
 			},
 			"ubus": {
 				"file": [ "list", "read", "stat" ],
 				"ha-cluster": [ "status", "generate_key" ],
-				"keepalived": [ "dump" ],
-				"service": [ "list" ]
+				"luci-rpc": [ "getBoardJSON", "getHostHints", "getNetworkDevices", "getWirelessDevices" ],
+				"network.interface": [ "dump" ]
 			},
-			"uci": [ "ha-cluster", "keepalived", "owsync", "lease-sync", "dhcp", "network" ]
+			"uci": [ "ha-cluster", "dhcp", "network" ]
 		},
 		"write": {
 			"file": {
 				"/etc/hotplug.d/keepalived/*": [ "write" ]
 			},
 			"ubus": {
-				"file": [ "write" ],
-				"ha-cluster": [ "apply" ]
+				"file": [ "write", "remove" ]
 			},
 			"uci": [ "ha-cluster" ]
 		}

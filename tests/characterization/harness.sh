@@ -17,7 +17,9 @@
 # uci-defaults migration runs, twice.
 #
 # ACL cases define a checks function calling access and file_call, run
-# against a real ubusd/rpcd with a restricted login.
+# against a real ubusd/rpcd with a restricted login. The login holds the
+# app's ACL group and those matching luci-base*; a case may set ACL_BASE
+# to another pattern, such as luci-base alone.
 #
 # Hotplug cases set DHCP_ACTION, DHCP_MAC, DHCP_IP, DHCP_HOST (the
 # dnsmasq script arguments) and DHCP_ENV (newline-separated DNSMASQ_*
@@ -179,9 +181,9 @@ case "$mode" in
 			config login
 				option username 'char'
 				option password '$(/usr/sbin/uhttpd -m char)'
-				list read 'luci-base*'
+				list read '${ACL_BASE:-luci-base*}'
 				list read 'luci-app-ha-cluster'
-				list write 'luci-base*'
+				list write '${ACL_BASE:-luci-base*}'
 				list write 'luci-app-ha-cluster'
 		EOF
 		/sbin/ubusd &
