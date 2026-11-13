@@ -499,10 +499,29 @@ return view.extend({
 		s = m.section(form.NamedSection, 'config', 'global', _('Synchronization'),
 			_('Keeps configuration files and DHCP leases identical on the cluster nodes. These settings must be the same on every node.'));
 
-		// The backend refuses to run a sync daemon without a valid key
-		// unless this switch is off: plaintext is a choice, not a fallback
+		// The backend refuses to start without a valid key as soon as a sync
+		// daemon has work, unless this switch is off: plaintext is a choice,
+		// not a fallback. Same rule here, on the saved configuration.
+		var syncHasWork = uci.sections('ha-cluster', 'peer').some(function(peer) {
+			return !getBool(peer.vrrp_only, false) && !!peer.address;
+		}) && (getBool(uci.get('ha-cluster', 'config', 'lease_sync'), false) ||
+			uci.sections('ha-cluster', 'sync_group').some(function(group) {
+				return getBool(group.enabled, true) && L.toArray(group.config_files).length > 0;
+			}));
+		if (getBool(uci.get('ha-cluster', 'config', 'enabled'), false) && syncHasWork &&
+		    getBool(uci.get('ha-cluster', 'config', 'sync_encryption'), true) &&
+		    !/^[0-9a-fA-F]{64}$/.test(uci.get('ha-cluster', 'config', 'encryption_key') || '')) {
+			o = s.option(form.DummyValue, '_key_missing');
+			o.renderWidget = function() {
+				return E('div', { 'class': 'alert-message warning', 'style': 'flex: 1' }, [
+					E('h4', {}, _('No valid encryption key')),
+					E('p', {}, _('There is a peer to sync with and encryption is on, but no valid key is set: the cluster does not start, keepalived included. Generate a key and set the same one on every node, or switch Encrypt Sync Traffic off.'))
+				]);
+			};
+		}
+
 		o = s.option(form.Flag, 'sync_encryption', _('Encrypt Sync Traffic'),
-			_('AES-256-GCM for configuration and lease sync. While this is on, sync does not start without a valid key. Switch it off only on a link protected otherwise, such as a VPN.'));
+			_('AES-256-GCM for configuration and lease sync. While this is on and there is a peer to sync with, the cluster does not start without a valid key. Switch it off only on a link protected otherwise, such as a VPN.'));
 		boolFlag(o, true);
 
 		var encryption_key_option = s.option(form.Value, 'encryption_key', _('Encryption Key'),
