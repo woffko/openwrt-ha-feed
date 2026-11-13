@@ -44,7 +44,9 @@ config_get_bool() {
 	config_get resolved_bool "$2" "$3" "${4:-0}"
 	case "$resolved_bool" in
 		1|on|true|yes|enabled) resolved_bool=1 ;;
-		*) resolved_bool=0 ;;
+		0|off|false|no|disabled) resolved_bool=0 ;;
+		# As OpenWrt's config_get_bool: any other value is the default
+		*) resolved_bool="${4:-0}" ;;
 	esac
 	eval "$destination='$resolved_bool'"
 }

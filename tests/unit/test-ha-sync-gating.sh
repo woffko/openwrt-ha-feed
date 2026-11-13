@@ -50,7 +50,9 @@ config_get_bool() {
 	config_get resolved_bool "$2" "$3" "${4:-0}"
 	case "$resolved_bool" in
 		1|on|true|yes|enabled) resolved_bool=1 ;;
-		*) resolved_bool=0 ;;
+		0|off|false|no|disabled) resolved_bool=0 ;;
+		# As OpenWrt's config_get_bool: any other value is the default
+		*) resolved_bool="${4:-0}" ;;
 	esac
 	eval "$destination='$resolved_bool'"
 }
@@ -310,6 +312,8 @@ generate
 expect 'owsync.conf is plain' grep -Fxq 'plain_mode=1' "$RUN_DIR/owsync.conf"
 expect 'lease-sync.conf is plain' grep -Fxq 'security_mode=plain' "$RUN_DIR/lease-sync.conf"
 refute 'plain owsync.conf has no key line' grep -Fq 'encryption_key=' "$RUN_DIR/owsync.conf"
+write_config key= encryption=maybe
+refute 'a value of sync_encryption that is no boolean does not mean plain mode' ha_validate_config
 echo 'ok - plain mode needs sync_encryption 0'
 
 # ------------------------------------------------------------------

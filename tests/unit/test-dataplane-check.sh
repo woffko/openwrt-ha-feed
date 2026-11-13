@@ -77,13 +77,15 @@ case " ${TEST_REACHABLE_TARGETS:-} " in
 esac
 exit 1
 EOF
-chmod +x "$TEST_ROOT/bin/ip" "$TEST_ROOT/bin/ping"
+# The same stand-in under a second name, so that the log tells which probe ran
+sed 's|^echo "\$target"|echo "ping6 $target"|' "$TEST_ROOT/bin/ping" > "$TEST_ROOT/bin/ping6"
+chmod +x "$TEST_ROOT/bin/ip" "$TEST_ROOT/bin/ping" "$TEST_ROOT/bin/ping6"
 
 export HA_FUNCTIONS_LIB="$TEST_ROOT/functions.sh"
 export HA_SYS_CLASS_NET="$SYS_CLASS_NET"
 export HA_IP_BIN="$TEST_ROOT/bin/ip"
 export HA_PING_BIN="$TEST_ROOT/bin/ping"
-export HA_PING6_BIN="$TEST_ROOT/bin/ping"
+export HA_PING6_BIN="$TEST_ROOT/bin/ping6"
 export TEST_PING_LOG="$PING_LOG"
 
 reset_case() {
@@ -180,6 +182,12 @@ reset_case
 TEST_TARGETS='2001:db8::10'
 TEST_REACHABLE_TARGETS='2001:db8::10'
 export TEST_TARGETS TEST_REACHABLE_TARGETS
-assert_status 0 'IPv6 targets use the IPv6-capable probe'
+assert_status 0 'IPv6 targets are probed'
+grep -qx 'ping6 2001:db8::10' "$PING_LOG" || {
+	echo 'not ok - the IPv6 target was not probed with the IPv6 probe' >&2
+	cat "$PING_LOG" >&2
+	exit 1
+}
+echo 'ok - IPv6 targets use the IPv6-capable probe'
 
 echo 'All dataplane checker tests passed.'

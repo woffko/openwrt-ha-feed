@@ -6,9 +6,16 @@
 # OpenWrt rootfs with the HA packages installed, for example
 # build_dir/target-*/root-* of an OpenWrt build or an unsquashed rootfs
 # image. No root is needed. As in scenario 24, a case gets a throwaway
-# system (here /etc, /tmp, /usr/bin and /usr/sbin; the rest is read-only),
-# no network, and the scripts of the working tree; its output is compared
-# with tests/characterization/expected.
+# system (here /etc, /tmp, /usr/bin, /usr/sbin and /usr/lib/ha-cluster; the
+# rest is read-only) and no network, and its output is compared with
+# tests/characterization/expected.
+#
+# From the working tree: what scenario 24 binds (the ha-cluster library,
+# init script, shipped config and upgrade script, the rpcd handler and its
+# ACL, dnsmasq's dhcp-script, lease-sync's hotplug script, init script and
+# shipped config), plus this fork's dataplane checker and IPv6 BACKUP guard
+# handler. Everything else, daemons and the other init scripts included, is
+# the rootfs's.
 #
 # Usage: CHAR_ROOTFS=<rootfs dir> run-characterization-rootless.sh [<mode>...]
 #   modes: backend rpcd acl migration hotplug lease-sync (default: all)
@@ -18,9 +25,10 @@
 #     for services of packages the node image does not have (for example
 #     keepalived-inotify, of keepalived-sync): the cases list /etc/rc.d.
 #
-# The rootfs is only read. Its init scripts and binaries are the ones of the
-# build it comes from: rebuild it when the packages change, as for the node
-# image of the container bench.
+# The rootfs is only read: rebuild it when the packages change, as for the
+# node image of the container bench. /usr/bin and /usr/sbin are hard links
+# to its files where the file system allows: a case may remove a file there,
+# not change one in place.
 
 set -u
 
@@ -53,8 +61,16 @@ run_case() {
 	local case_name="$2"
 	local entry
 
-	rm -rf "$WORK/etc" "$WORK/tmp" "$WORK/usr-bin" "$WORK/usr-sbin"
+	rm -rf "$WORK/etc" "$WORK/tmp" "$WORK/usr-bin" "$WORK/usr-sbin" "$WORK/ha-lib"
 	cp -a "$ROOTFS/etc" "$WORK/etc"
+	# What the package installs besides the files bound below
+	cp -a "$ROOTFS/usr/lib/ha-cluster" "$WORK/ha-lib"
+	cp "$FEED_DIR/ha-cluster/files/check-dataplane.sh" "$WORK/ha-lib/check-dataplane"
+	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/ha-lib/ipv6-backup-guard"
+	mkdir -p "$WORK/etc/hotplug.d/keepalived"
+	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
+	chmod 0755 "$WORK/ha-lib/check-dataplane" "$WORK/ha-lib/ipv6-backup-guard" \
+		"$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
 	mkdir -p "$WORK/tmp/run" "$WORK/tmp/lock"
 	for entry in $CHAR_HIDE_INITD; do
 		rm -f "$WORK/etc/init.d/$entry" "$WORK/etc/rc.d/"[SK][0-9][0-9]"$entry"
@@ -86,6 +102,7 @@ run_case() {
 		--bind "$WORK/tmp" /tmp \
 		--bind "$WORK/usr-bin" /usr/bin \
 		--bind "$WORK/usr-sbin" /usr/sbin \
+		--bind "$WORK/ha-lib" /usr/lib/ha-cluster \
 		--symlink tmp /var \
 		--ro-bind "$FEED_DIR/ha-cluster/files/ha-cluster.sh" /usr/lib/ha-cluster/ha-cluster.sh \
 		--ro-bind "$FEED_DIR/ha-cluster/files/ha-cluster.init" /etc/init.d/ha-cluster \
