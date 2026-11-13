@@ -26,10 +26,11 @@ ARG OPENWRT_VERSION=25.12.0
 # Target/subtarget as used in the OpenWrt download tree (target/subtarget).
 # Examples: x86/64, mediatek/filogic, ath79/generic, ramips/mt7621
 ARG OPENWRT_TARGET=x86/64
-# Feed source. Defaults to the public repository so the image is self-contained.
-# Override with a fork/branch, or bind-mount a local checkout at /feed and pass
-# HA_FEED_SRC="src-link ha_feed /feed".
-ARG HA_FEED_SRC="src-git ha_feed https://github.com/pgaufillet/openwrt-ha-feed.git"
+# Feed source. Defaults to this fork's public repository, at its default
+# branch, so the image is self-contained. Override with a branch
+# ("src-git ha_feed <url>;<branch>"), or bind-mount a local checkout at /feed
+# and pass HA_FEED_SRC="src-link ha_feed /feed".
+ARG HA_FEED_SRC="src-git ha_feed https://github.com/woffko/openwrt-ha-feed.git"
 
 # --- Host build dependencies -------------------------------------------------
 # Package list follows the OpenWrt "build system setup" docs (Debian), plus

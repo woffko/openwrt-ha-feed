@@ -124,10 +124,17 @@ to deploy and consume the signed feed.
 
 ## Building from a local checkout
 
-By default the image fetches the feed from the public GitHub repository, so it
-reproduces the released packages independently. To build your local working
-copy instead (including uncommitted changes), bind-mount it and point the feed
-at it:
+By default the image fetches the feed from this fork's public GitHub
+repository, at its default branch. To build another branch, pass it with the
+URL:
+
+```bash
+docker build -t ha-feed-build \
+  --build-arg HA_FEED_SRC="src-git ha_feed https://github.com/woffko/openwrt-ha-feed.git;<branch>" docker/
+```
+
+To build your local working copy instead (including uncommitted changes),
+bind-mount it and point the feed at it:
 
 ```bash
 docker build -t ha-feed-build-local \
