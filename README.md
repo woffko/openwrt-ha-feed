@@ -15,11 +15,11 @@ A high-availability solution for OpenWrt routers, providing automatic failover, 
 
 | Package | Description |
 |---------|-------------|
-| `ha-cluster` | Core orchestration - manages keepalived, owsync, and lease-sync |
-| `luci-app-ha-cluster` | Web interface for configuration and monitoring |
-| `owsync` | Lightweight encrypted file synchronization daemon |
-| `lease-sync` | Real-time DHCP lease replication daemon |
-| `dnsmasq-ha` | dnsmasq with ubus lease management patches |
+| [`ha-cluster`](ha-cluster/README.md) | Core orchestration - manages keepalived, owsync, and lease-sync |
+| [`luci-app-ha-cluster`](luci-app-ha-cluster/README.md) | Web interface for configuration and monitoring |
+| [`owsync`](https://github.com/pgaufillet/owsync) | Lightweight encrypted file synchronization daemon |
+| [`lease-sync`](https://github.com/pgaufillet/lease-sync) | Real-time DHCP lease replication daemon |
+| [`dnsmasq-ha`](dnsmasq-ha/README.md) | dnsmasq with ubus lease management patches |
 
 ## Requirements
 
@@ -37,26 +37,197 @@ This branch is intended to make the firmware build reproducible while PR #2 and 
 
 ### Add the Feed
 
-```bash
-# Add feed to /etc/openwrt_distfeeds.conf or feeds.conf
-echo "src-git hacluster https://github.com/pgaufillet/openwrt-ha-feed.git" >> feeds.conf
+In an OpenWrt buildroot or SDK, add the feed branch matching your OpenWrt
+release to `feeds.conf`:
 
-# Update and install
-./scripts/feeds update hacluster
-./scripts/feeds install -a -p hacluster
+```bash
+# feeds.conf replaces feeds.conf.default: start from a copy
+[ -f feeds.conf ] || cp feeds.conf.default feeds.conf
+# OpenWrt 25.12
+echo "src-git ha_feed https://github.com/pgaufillet/openwrt-ha-feed.git;openwrt-25.12" >> feeds.conf
+
+./scripts/feeds update ha_feed
+./scripts/feeds install -a -p ha_feed
 ```
+
+Feed branches follow OpenWrt's: `master` follows OpenWrt `main`, and each
+supported OpenWrt release branch has a feed branch of the same name
+(`openwrt-25.12`). Changes land on `master`, then are cherry-picked to the
+release branches. On each branch, dnsmasq-ha follows the dnsmasq package
+of the matching OpenWrt branch.
+
+### Disable a Legacy keepalived
+
+When the keepalived package is installed or upgraded, its post-install
+script starts the standalone keepalived service from
+`/etc/config/keepalived`, before ha-cluster takes keepalived over. A VRRP
+instance left in that file by an earlier setup can then become MASTER
+alongside the cluster. On a router that ran keepalived before, stop it and
+set its configuration aside before installing:
+
+```bash
+/etc/init.d/keepalived stop
+/etc/init.d/keepalived disable
+mv /etc/config/keepalived /etc/config/keepalived.legacy
+```
+
+The standalone service does not start when `/etc/config/keepalived` is
+missing or has `option enabled '0'` in its `globals` section (the package
+default). ha-cluster generates its own keepalived configuration and does
+not read this file.
 
 ### Install Packages
 
-```bash
-# Install the complete HA solution
-apk update
-apk add ha-cluster luci-app-ha-cluster
+No public package repository is published: build the packages and serve
+them from your own repository (see
+[Building and Hosting Your Own Package Repository](#building-and-hosting-your-own-package-repository)),
+then install them with
+[`scripts/install-ha-cluster.sh`](scripts/install-ha-cluster.sh) (see
+[Configure Routers to Use the Feed](#4-configure-routers-to-use-the-feed)).
+A plain `apk add` is not safe: lease-sync depends on dnsmasq-ha, which
+replaces the stock dnsmasq serving the router's own DNS. The manual steps
+are in [ha-cluster's installation notes](ha-cluster/README.md#installation).
 
-# Or install individual components
-apk add owsync        # Config sync only
-apk add lease-sync    # DHCP sync only
+## Upgrading
+
+ha-cluster and luci-app-ha-cluster 2.0.0 change the schema of
+`/etc/config/ha-cluster`; the existing file is migrated on install (see
+below). Upgrade both packages together (e.g. `apk upgrade`): the 2.0.0
+web interface does not work with a 1.x ha-cluster, nor the reverse.
+Upgrade all nodes in the same maintenance window, BACKUP nodes first:
+the upgrade restarts keepalived once, so upgrading the MASTER causes a
+single switchover. The file is not synced between nodes: check the
+migrated file on each one.
+
+The full list of behaviour changes, and the ones that need action, is in
+[ha-cluster's upgrade notes](ha-cluster/README.md#upgrading). Among them:
+
+- A configuration from the `v1.0.0` tag, with `vrid` and `priority` on
+  each VIP, is not converted: recreate its VIPs after upgrading.
+- With unicast peers, a VRRP instance whose peers and VIPs are all IPv6
+  now runs as `<name>` with its VRID instead of `<name>_v6` with
+  VRID+128. Nodes on different versions do not see each other for that
+  instance, and hotplug scripts matching `<name>_v6` must be updated.
+- A `vip` without an `enabled` option is now enabled and validated; set
+  `enabled '0'` before upgrading to keep it off.
+- lease-sync follows `lease_sync` alone: set `lease_sync '0'` to keep it
+  off.
+
+### Sync options renamed
+
+The sync options of `/etc/config/ha-cluster` were renamed after what they
+do. When ha-cluster 2.0.0 is installed, a `uci-defaults` script migrates
+the existing file once:
+
+| Before | After |
+|--------|-------|
+| `config service '<name>'` | `config sync_group '<name>'` |
+| `option sync_leases` in the `dhcp` group | `option lease_sync` in `config global 'config'` (an existing `lease_sync` is kept) |
+| `option sync_leases` in any other group | removed (it was never read) |
+| `option sync_method` other than `owsync` (e.g. `none`) | every sync group gets `enabled '0'`, and `sync_method` is removed |
+| peer `option sync_enabled '0'` | peer `option vrrp_only '1'` |
+| peer `option sync_enabled '1'` | removed (default) |
+
+- When an option is changed, `uci commit` rewrites the file and drops its
+  comments. A file that only needs its sections renamed keeps them.
+- The migration leaves an already migrated file unchanged.
+- A 1.0.x `config advanced` section without a name is named `advanced`,
+  so that ha-cluster reads its settings (only the first one, if several).
+- Scripts that set the old options must be updated: ha-cluster refuses to
+  start with a `sync_method` other than `owsync`, and ignores
+  `sync_leases` and `sync_enabled`.
+- `ubus call owsync status` now reports `enabled` from the standalone
+  owsync configuration (`/etc/config/owsync`) only; an owsync instance
+  run by ha-cluster shows in its `status` field.
+
+### Standalone keepalived
+
+Upgrading the keepalived package runs `/etc/init.d/keepalived start` even
+while ha-cluster keeps that service disabled. Before upgrading, make sure
+`/etc/config/keepalived` is missing or disabled, as described in
+[Disable a Legacy keepalived](#disable-a-legacy-keepalived).
+
+### Attended Sysupgrade
+
+The attended sysupgrade server (LuCI Attended Sysupgrade, `owut`) builds
+the new image from the packages installed on the router, and only knows
+the official ones. With the feed's packages installed, the build fails
+with:
+
 ```
+Impossible package selection: missing (dnsmasq-ha, ha-cluster, lease-sync, luci-app-ha-cluster, owsync)
+```
+
+Swap them out first, one node at a time, while the other node keeps the
+VIPs:
+
+1. Back up the router (`sysupgrade -b /tmp/backup.tar.gz`, then copy the
+   file off the router).
+2. sysupgrade only keeps the configuration of installed packages. Keep
+   the files of the packages about to be removed, and the feed's signing
+   key (the lines can stay for the next attended sysupgrade):
+
+   ```bash
+   cat >> /etc/sysupgrade.conf <<'EOF'
+   /etc/config/ha-cluster
+   /etc/config/owsync
+   /etc/config/lease-sync
+   /etc/owsync/
+   /etc/lease-sync/
+   /etc/apk/keys/ha_feed_apk.pem
+   EOF
+   ```
+
+3. Stop ha-cluster: the peer takes over the VIPs.
+
+   ```bash
+   /etc/init.d/ha-cluster stop
+   /etc/init.d/ha-cluster disable
+   ```
+
+4. While DNS still works, download the stock `dnsmasq` into an empty
+   directory:
+
+   ```bash
+   mkdir -p /tmp/dnsmasq-stock && cd /tmp/dnsmasq-stock
+   ```
+
+   ```bash
+   apk fetch dnsmasq
+   ```
+
+   If the router relies on the extra features of `dnsmasq-full` (nftset,
+   DNSSEC), fetch it instead, with the libraries that are removed along
+   with `dnsmasq-ha` (OpenWrt 25.12 package names):
+
+   ```bash
+   apk fetch dnsmasq-full libnettle8 libgmp10 libnetfilter-conntrack3 kmod-nf-conntrack-netlink
+   ```
+
+5. Remove the feed's packages and install the downloaded ones (DNS is
+   unavailable between the two commands). Official packages are signed
+   through the repository index, not individually, so a local file needs
+   `--allow-untrusted`:
+
+   ```bash
+   apk del luci-app-ha-cluster ha-cluster lease-sync owsync dnsmasq-ha
+   apk add --allow-untrusted /tmp/dnsmasq-stock/*.apk
+   ```
+
+   `apk del` may print `Command failed: ubus call service delete
+   { "name": "ha-cluster" } (Not found)`: ha-cluster is already stopped.
+   Modified configuration files, such as `/etc/config/dhcp`, stay in
+   place; apk writes the package's version next to them as `*.apk-new`.
+6. Run the attended sysupgrade.
+7. After the reboot, reinstall from the feed with
+   [`scripts/install-ha-cluster.sh`](scripts/install-ha-cluster.sh) (see
+   [Configure Routers to Use the Feed](#4-configure-routers-to-use-the-feed)).
+   ha-cluster starts again from the kept `/etc/config/ha-cluster`. The
+   new image starts the standalone keepalived if `/etc/config/keepalived`
+   enables it: see
+   [Disable a Legacy keepalived](#disable-a-legacy-keepalived).
+8. Once the node is back in the cluster, upgrade the other one the same
+   way.
 
 ## Quick Start
 
@@ -64,10 +235,9 @@ apk add lease-sync    # DHCP sync only
 
 **On both routers:**
 
-1. Install packages:
+1. Install the packages (see [Install Packages](#install-packages)):
    ```bash
-   apk update
-   apk add ha-cluster luci-app-ha-cluster
+   sh install-ha-cluster.sh
    ```
 
 2. Open LuCI: **Services → High Availability → Quick Setup**
@@ -150,7 +320,7 @@ Start the cluster:
 - **Key Management**: Keys stored in config files, never exposed on command line
 - **Network**: Designed for trusted LAN segments; use VPN for untrusted networks
 
-## Known Limitations (v1.0)
+## Known Limitations
 
 ### IPv6 Support
 
@@ -166,7 +336,7 @@ Start the cluster:
 
 **Why:** lease-sync integrates with dnsmasq, not odhcpd. Since default OpenWrt uses SLAAC (stateless), most users are unaffected.
 
-**Recommended Workaround - Disable odhcpd:** The simplest and most reliable approach for v1.0:
+**Recommended Workaround - Disable odhcpd:** The simplest and most reliable approach:
 
 ```bash
 # Disable odhcpd, let dnsmasq handle all DHCP/RA
@@ -236,7 +406,34 @@ logread | grep -E "(ha-cluster|keepalived|owsync|lease-sync)"
 
 ## Development
 
-### Setting Up the Build Environment
+### Building with Docker (quickest)
+
+If you just want ready-to-install packages without setting up a build host, a
+containerised build environment based on the official OpenWrt SDK is provided
+in [`docker/`](docker/README.md):
+
+```bash
+# Build the image and compile all packages for x86-64
+docker build -t ha-feed-build docker/
+docker run --rm -v "$PWD/output:/output" ha-feed-build
+
+# For another architecture and/or OpenWrt release, e.g. MediaTek Filogic
+# (aarch64) on 25.12.1. Use the bare version number, without a "v" prefix.
+docker build -t ha-feed-build-filogic \
+  --build-arg OPENWRT_TARGET=mediatek/filogic \
+  --build-arg OPENWRT_VERSION=25.12.1 \
+  docker/
+docker run --rm -v "$PWD/output:/output" ha-feed-build-filogic
+```
+
+The built `.apk` packages land in `./output/<arch>/ha_feed/`. The default
+is x86-64 on OpenWrt 25.12.0; the matching SDK for any release/target is
+resolved and checksum-verified automatically. See
+[`docker/README.md`](docker/README.md) for version and target selection
+(including which release to build against for multi-device compatibility),
+index signing, and building from a local checkout.
+
+### Setting Up the Build Environment (full buildroot)
 
 A setup script is provided to clone and configure an OpenWrt buildroot for compiling the feed packages:
 
@@ -253,96 +450,76 @@ make package/dnsmasq-ha/compile V=s
 make package/luci-app-ha-cluster/compile V=s
 ```
 
-Built `.apk` files are output to `bin/packages/*/ha_feed/`.
+Built packages are output to `bin/packages/*/ha_feed/`.
 
 See `scripts/setup-openwrt-buildroot.sh --help` for options (custom OpenWrt version, config file, etc.).
 
 ### Building and Hosting Your Own Package Repository
 
-If you want to serve pre-built packages to your routers without compiling on the router itself, you can create a signed apk feed hosted on any HTTP server on your LAN (NAS, Raspberry Pi, etc.).
+If you want to serve pre-built packages to your routers without compiling on the router itself, you can create a signed apk repository hosted on any HTTP server on your LAN (NAS, Raspberry Pi, etc.). This applies to OpenWrt 25.12 and later; one repository serves all routers of the same architecture and release branch.
 
-#### 1. Build the Packages
+#### 1. Generate a Signing Key
 
-Follow the build environment setup above, then compile all packages:
+apk repositories are signed with an ECDSA (prime256v1) key, generated the same way as the OpenWrt build key. Do this once and keep the private key safe (`keys/` is git-ignored):
 
 ```bash
-cd ../openwrt
-make package/ha-cluster/compile
-make package/owsync/compile
-make package/lease-sync/compile
-make package/dnsmasq-ha/compile
-make package/luci-app-ha-cluster/compile
+mkdir -p keys
+openssl ecparam -name prime256v1 -genkey -noout -out keys/ha_feed_apk.sec
+openssl ec -in keys/ha_feed_apk.sec -pubout -out keys/ha_feed_apk.pem
 ```
 
-Built `.apk` files are in `bin/packages/<arch>/ha_feed/` (e.g., `bin/packages/aarch64_cortex-a53/ha_feed/`).
+#### 2. Build the Packages and Sign the Index
 
-#### 2. Generate a Signing Key
+The Docker build is the recommended way: it compiles the packages and generates the signed index (`packages.adb`) in one run when the private key is mounted and `SIGN_KEY` is set (see [`docker/README.md`](docker/README.md#signing-a-package-index), including which release to build against). For example, for MediaTek Filogic routers:
 
 ```bash
-# usign is built as part of the OpenWrt toolchain
-USIGN=staging_dir/host/bin/usign
-
-# Generate a keypair (do this once, keep the private key safe)
-$USIGN -G -p keys/ha_feed.pub -s keys/ha_feed.sec
+docker build -t ha-feed-build-filogic \
+  --build-arg OPENWRT_TARGET=mediatek/filogic docker/
+docker run --rm \
+  -v "$PWD/output:/output" \
+  -v "$PWD/keys/ha_feed_apk.sec:/keys/ha_feed_apk.sec:ro" \
+  -e SIGN_KEY=/keys/ha_feed_apk.sec \
+  ha-feed-build-filogic
 ```
 
-#### 3. Generate and Sign the Package Index
+The repository is `output/<arch>/ha_feed/` (e.g. `output/aarch64_cortex-a53/ha_feed/`): the `*.apk` packages and `packages.adb`. Build all five packages in one run, so that the index lists all of them.
 
-The OpenWrt buildroot has a built-in target that generates the package index (`Packages`, `Packages.gz`, `Packages.sig`, `index.json`) and signs it. Pass `BUILD_KEY` to use your feed signing key instead of the default build key:
+From a full buildroot, `make package/index` generates and signs the index (`apk mkndx --sign`) with the buildroot's own key; pass `BUILD_KEY_APK_SEC=/path/to/keys/ha_feed_apk.sec` to sign with the feed key instead.
+
+#### 3. Deploy to a Web Server
+
+Copy the packages and the index to any directory served by an HTTP server:
 
 ```bash
-make package/index BUILD_KEY=/path/to/keys/ha_feed.sec
+FEED_DIR=output/<arch>/ha_feed
+scp $FEED_DIR/*.apk $FEED_DIR/packages.adb myserver:/var/www/openwrt/ha_feed/
 ```
 
-#### 4. Deploy to a Web Server
+#### 4. Configure Routers to Use the Feed
 
-Copy the `.apk` files and index files to any directory served by an HTTP server:
-
-```bash
-FEED_DIR=bin/packages/<arch>/ha_feed
-scp $FEED_DIR/*.apk $FEED_DIR/Packages $FEED_DIR/Packages.gz $FEED_DIR/Packages.sig $FEED_DIR/index.json myserver:/var/www/openwrt/ha_feed/
-```
-
-#### 5. Configure Routers to Use the Feed
-
-On each router:
+On each router, install the public key under `/etc/apk/keys/` (copy your `keys/ha_feed_apk.pem` from step 1 there, e.g. with `scp`), then add the index URL to the custom feeds list:
 
 ```bash
-# Add the feed
-echo "src/gz ha_feed http://myserver/openwrt/ha_feed" > /etc/apk/customfeeds.conf
-
-# Install the signing public key
-# The key fingerprint is the filename under /etc/apk/keys/
-FINGERPRINT=$(usign -F -p /path/to/ha_feed.pub)
-cp /path/to/ha_feed.pub /etc/apk/keys/$FINGERPRINT
-
-# Update and install
+# Public key copied to /etc/apk/keys/ha_feed_apk.pem beforehand
+echo "http://myserver/openwrt/ha_feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
 apk update
-apk add ha-cluster luci-app-ha-cluster
 ```
 
-#### 6. Updating the Feed
+`apk update` must report no `UNTRUSTED signature` warning for the repository.
 
-After rebuilding packages, repeat steps 3 and 4 to regenerate the index and redeploy. For example, to rebuild only `ha-cluster` and `luci-app-ha-cluster`:
+`dnsmasq-ha` replaces the stock `dnsmasq`, which serves the router's own DNS: once `dnsmasq` is removed, the router can no longer resolve the repository host. For the first installation, copy [`scripts/install-ha-cluster.sh`](scripts/install-ha-cluster.sh) to the router and run it: it installs the dependencies and downloads the feed packages first, then swaps `dnsmasq` for `dnsmasq-ha` offline. On a router that ran keepalived before, first [disable the legacy keepalived](#disable-a-legacy-keepalived).
 
 ```bash
-make package/ha-cluster/compile V=s
-make package/luci-app-ha-cluster/compile V=s
-make package/index BUILD_KEY=/path/to/keys/ha_feed.sec
-scp bin/packages/<arch>/ha_feed/* myserver:/var/www/openwrt/ha_feed/
+sh install-ha-cluster.sh
 ```
 
-On routers, run `apk update` to pick up the new versions.
+#### 5. Updating the Feed
 
-**Note:** `dnsmasq-ha` replaces the stock `dnsmasq` package. On first install, you may need to remove `dnsmasq` manually before installing `dnsmasq-ha`:
+After a change, repeat steps 2 and 3, then on each router:
 
 ```bash
-# Save dnsmasq config, remove stock, install HA version
-cp /etc/config/dhcp /tmp/dhcp.bak
-apk del dnsmasq
-apk add dnsmasq-ha
-cp /tmp/dhcp.bak /etc/config/dhcp
-/etc/init.d/dnsmasq restart
+apk update
+apk upgrade
 ```
 
 ## Maintainer

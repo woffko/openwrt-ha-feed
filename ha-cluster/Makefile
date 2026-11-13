@@ -4,8 +4,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
-PKG_VERSION:=1.0.0
-PKG_RELEASE:=14
+PKG_VERSION:=2.0.0
+PKG_RELEASE:=3
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -61,8 +61,7 @@ define Package/ha-cluster/install
 	$(INSTALL_BIN) ./files/ipv6-backup-guard.hotplug $(1)/etc/hotplug.d/keepalived/20-ipv6-backup-guard
 
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
-	$(INSTALL_BIN) ./files/ha-cluster.uci-defaults $(1)/etc/uci-defaults/60_ha-cluster-upgrade
-
+	$(INSTALL_BIN) ./files/ha-cluster.uci-defaults $(1)/etc/uci-defaults/60_ha-cluster-sync-model
 endef
 
 define Package/ha-cluster/prerm

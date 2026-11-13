@@ -31,23 +31,87 @@ apk add libnettle libnetfilter-conntrack nftables-json
 apk add keepalived
 apk add libopenssl3
 
-# 3. Swap dnsmasq for dnsmasq-ha and install remaining packages
+# 3. Download the feed packages (while DNS works)
+mkdir -p /tmp/ha-pkgs && cd /tmp/ha-pkgs
+apk fetch dnsmasq-ha ha-cluster owsync lease-sync luci-app-ha-cluster
+
+# 4. Swap dnsmasq for dnsmasq-ha, then install the rest, from local files
 apk del dnsmasq              # or: apk del dnsmasq-full
-apk add dnsmasq-ha ha-cluster owsync lease-sync luci-app-ha-cluster
+apk add --allow-untrusted /tmp/ha-pkgs/dnsmasq-ha-*.apk
+apk add --allow-untrusted /tmp/ha-pkgs/*.apk
 ```
 
 **Why the explicit swap?** dnsmasq-ha replaces stock dnsmasq. Removing
 dnsmasq kills DNS resolution, so ALL dependencies must be pre-installed
-before the swap.
+and the feed packages downloaded before the swap. Feed packages are signed
+through the repository index, not individually, so a local file needs
+`--allow-untrusted`.
+
+## Upgrading
+
+Upgrading from 1.0.x to 2.0.0 migrates `/etc/config/ha-cluster` in place
+before ha-cluster regenerates its configuration:
+
+- `service` sections become `sync_group` sections
+- the `dhcp` group's `sync_leases` becomes the global `lease_sync`, and
+  `sync_leases` is removed from every group
+- a `sync_method` other than `owsync` disables every sync group and is
+  removed
+- peer `sync_enabled '0'` becomes `vrrp_only '1'`
+- an unnamed `config advanced` section, as shipped in 1.0.x, is named
+  `advanced` so that its settings are read: only the first one if
+  several, and none if a section is already named `advanced`
+- `lease_sync_persist_interval` is removed
+
+The migration expects VRRP settings in `vrrp_instance` sections. A
+config from the `v1.0.0` feed tag, where each `vip` carries its own
+`vrid` and `priority`, is not converted and gets no VRRP instance:
+recreate its VIPs (for example in LuCI) after upgrading.
+
+apk installs the new default config next to an edited one as
+`/etc/config/ha-cluster.apk-new`: it is for reference only, the migrated
+file stays in use.
+
+The upgrade restarts keepalived once (its procd instance parameters
+change): upgrade the BACKUP nodes first, so that upgrading the MASTER
+causes a single switchover.
+
+Behaviour changes:
+
+- A `vip` without an `enabled` option is now enabled, as LuCI shows it;
+  1.0.x skipped it. It is also validated like the other VIPs (a failed
+  check, such as a missing `force` on its DHCP interface, stops
+  ha-cluster): set `enabled '0'` before upgrading to keep it off.
+- lease-sync follows `lease_sync` alone: a disabled `dhcp` sync group no
+  longer stops it. Set `lease_sync '0'` to keep it off.
+- owsync no longer runs without work (see
+  [Which daemons run](#which-daemons-run)).
+- With unicast peers, a VRRP instance whose peers and VIPs are all IPv6
+  now runs as `<name>` with its VRID, no longer as `<name>_v6` with
+  VRID+128. Nodes on different versions do not see each other for that
+  instance: upgrade all nodes together, and update hotplug scripts
+  matching `<name>_v6`.
+- With IPv6 unicast peers and only IPv4 VIPs, the instance now
+  advertises no address (`no_virtual_ipaddress`, VIPs in
+  `virtual_ipaddress_excluded`): a `vrrp_only` peer that is not
+  keepalived may not accept it.
+- An authoritative dnsmasq now draws a warning when leases or the DHCP
+  config are synced (see [DHCP Prerequisites](#dhcp-prerequisites)).
+
+The upgrade starts `/etc/init.d/ha-cluster` even if it was disabled with
+`/etc/init.d/ha-cluster disable` (standard OpenWrt packaging). The
+switch that the upgrade respects is ha-cluster's own `enabled` option.
 
 ## Dependencies
 
-- `keepalived` - VRRP failover
-- `owsync` - Bidirectional config file synchronization
-- `lease-sync` - Real-time DHCP lease replication via dnsmasq ubus
-- `dnsmasq-ha` - dnsmasq with ubus lease methods
+- `keepalived` - VRRP failover (required)
 
-Optional: `luci-app-ha-cluster` for web interface.
+Used when installed:
+
+- `owsync` - Bidirectional config file synchronization
+- `lease-sync` and `dnsmasq-ha` (dnsmasq with ubus lease methods) -
+  Real-time DHCP lease replication
+- `luci-app-ha-cluster` - Web interface
 
 ## How It Works
 
@@ -67,6 +131,37 @@ stops.
 
 Configuration changes are applied on reload (`reload_config`, or LuCI's
 Save & Apply).
+
+### Which daemons run
+
+keepalived always runs while ha-cluster is enabled. The sync daemons run
+only when they are installed, at least one peer with an address is not
+`vrrp_only`, and:
+
+- owsync: at least one enabled sync group lists files
+- lease-sync: `lease_sync='1'`
+
+A sync daemon that has work but is not installed is logged as a warning;
+the cluster still starts.
+
+As soon as one of them has work, a valid `encryption_key` is required:
+without it ha-cluster refuses to start. Plain mode is an explicit choice,
+`sync_encryption='0'`, never a fallback.
+
+### Settings that must match on all nodes
+
+`/etc/config/ha-cluster` is never synced (it is excluded by default), so
+these settings must be set identically on every node:
+
+- `encryption_key`, `vrrp_transport`, `lease_sync`, `sync_port`,
+  `sync_dir`
+- the sync groups and exclusions
+- `lease_sync_port` (advanced)
+- for each VRRP instance: `vrid`, `advert_int`, `auth_type`, `auth_pass`,
+  and its VIPs
+
+Node-specific: `node_priority` and instance `priority`, the peers, their
+`source_address`, and `bind_address`.
 
 ## Quick Start
 
@@ -108,9 +203,8 @@ Repeat on each peer node with the appropriate priority and peer addresses.
 
 ## DHCP Prerequisites
 
-When lease sync is active (`sync_leases='1'`, a peer to sync with and
-`lease-sync` installed), each VIP interface must have `force=1` in its
-DHCP configuration:
+When using lease sync (`lease_sync='1'`), each VIP interface must have
+`force=1` in its DHCP configuration:
 
 ```sh
 uci set dhcp.lan.force='1'
@@ -141,9 +235,8 @@ uci set dhcp.@dnsmasq[0].authoritative='0'
 uci commit dhcp
 ```
 
-ha-cluster logs a warning at start and reload when dnsmasq is
-authoritative while several nodes serve DHCP, but never changes
-`/etc/config/dhcp`.
+ha-cluster warns (in the log and in LuCI) when dnsmasq is authoritative
+while several nodes serve DHCP, but never changes `/etc/config/dhcp`.
 
 Keep a single enabled `dnsmasq` section on each node: lease-sync only
 reaches the instance registered on ubus as `dnsmasq` (the others register
@@ -166,10 +259,11 @@ All configuration lives in `/etc/config/ha-cluster`.
 |--------|------|---------|-------------|
 | `enabled` | bool | `0` | Enable/disable ha-cluster |
 | `node_priority` | int | `100` | VRRP priority (1-255, higher wins MASTER) |
-| `vrrp_transport` | string | `multicast` | VRRP transport: `multicast` or `unicast`. When `unicast`, auto-derives addresses from peer config |
-| `sync_method` | string | `owsync` | Sync backend: `owsync` or `none` |
+| `vrrp_transport` | string | `multicast` | VRRP transport: `multicast` or `unicast`. When `unicast`, instances without `unicast_peer` derive their addresses from the peers |
+| `sync_method` | string | `owsync` | File sync backend; `owsync` is the only one, ha-cluster refuses to start with any other value |
 | `sync_encryption` | bool | `1` | Encrypt owsync and lease-sync traffic (AES-256-GCM). With `1`, a sync daemon is not started without a valid `encryption_key`; `0` is the explicit choice of plain mode |
-| `encryption_key` | string | | 256-bit hex key (use LuCI "Generate" button or `hexdump -n 32 -v -e '1/1 "%02x"' /dev/urandom`) |
+| `encryption_key` | string | | 256-bit hex key (64 hexadecimal characters); use LuCI "Generate" button or `hexdump -n 32 -v -e '1/1 "%02x"' /dev/urandom` |
+| `lease_sync` | bool | `0` | DHCP lease sync (lease-sync and dnsmasq-ha); the shipped config sets it to `1` |
 | `sync_port` | int | `4321` | owsync TCP port |
 | `sync_dir` | string | `/etc/config` | Directory to synchronize |
 | `bind_address` | string | | Local IP for sync traffic (use real IP, not VIP) |
@@ -179,8 +273,20 @@ All configuration lives in `/etc/config/ha-cluster`.
 Each section defines a VRRP instance. All VIPs referencing the same instance
 fail over atomically as a group (one advertisement, one failover event).
 
-When any VIP in the group has `address6` set, a second VRRP instance is
-created automatically using VRID+128 for all IPv6 VIPs.
+With multicast VRRP, when any VIP in the group has `address6` set, a
+second VRRP instance is created automatically using VRID+128 for all IPv6
+VIPs. With unicast peers (`vrrp_transport` `unicast` or a `unicast_peer`
+list), a single instance is created in the address family of
+`unicast_src_ip`, or else of the first peer: the VIPs of the other family
+fail over with it without being advertised, and peers of the other family
+are ignored with a warning. A `unicast_src_ip` matching the family of no
+peer is ignored with an error, and the first peer sets the family.
+
+With `vrrp_transport` `unicast`, an instance without its own `unicast_peer`
+list advertises to every peer `address` and, unless it sets
+`unicast_src_ip`, from the first peer `source_address`. This derivation
+fits only instances on the peers' network: an instance on another
+interface sets both `unicast_peer` and `unicast_src_ip`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -210,7 +316,7 @@ same instance for atomic failover.
 | `interface` | string | | Logical interface (e.g. `lan`), resolved to its device |
 | `address` | string | | Virtual IPv4 address |
 | `netmask` | string | `255.255.255.0` | IPv4 netmask |
-| `address6` | string | | Virtual IPv6 address (optional, uses VRID+128) |
+| `address6` | string | | Virtual IPv6 address (optional, uses VRID+128 with multicast) |
 | `prefix6` | int | `64` | IPv6 prefix length |
 
 ### Peers (`config peer`)
@@ -219,28 +325,17 @@ same instance for atomic failover.
 |--------|------|---------|-------------|
 | `name` | string | | Peer identifier |
 | `address` | string | | Peer IP address |
-| `source_address` | string | | Local IP to use when contacting this peer (also used as `unicast_src_ip` for auto-derivation) |
-| `sync_enabled` | bool | `1` | Enable owsync/lease-sync for this peer. Set to `0` for non-OpenWrt peers (VRRP-only) |
+| `source_address` | string | | Local IP to use when contacting this peer (the first one set is also the auto-derived `unicast_src_ip`) |
+| `vrrp_only` | bool | `0` | Router not running ha-cluster (e.g. not OpenWrt): VRRP peer only, never synced |
 
-### Services (`config service '<name>'`)
+### Sync groups (`config sync_group '<name>'`)
 
-Each service section defines a sync group for owsync.
+Each section lists files synced by owsync.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool | `1` | Enable sync for this group |
 | `config_files` | list | | UCI config names or paths to sync |
-| `sync_leases` | bool | `0` | Enable lease-sync daemon (dhcp service only; does not depend on `enabled`) |
-
-ha-cluster starts a sync daemon only when it has work and is installed:
-
-- `owsync` when `sync_method` is `owsync`, an enabled service section
-  lists files, and at least one peer has an address and `sync_enabled`;
-- `lease-sync` when `sync_leases` is on and there is such a peer.
-
-A daemon that is wanted but not installed is reported in the log. The
-encryption key is required as soon as one of them is wanted, unless
-`sync_encryption` is `0`.
 
 ### Exclusions (`config exclude`)
 
@@ -337,7 +432,7 @@ numeric prefix above 50 (e.g. `60-vpn-failover`).
 Available environment variables:
 - `ACTION` — `MASTER`, `BACKUP` or `FAULT`
 - `TYPE` — `INSTANCE`
-- `NAME` — instance name (e.g. `main`, or `main_v6` for its IPv6 instance)
+- `NAME` — instance name (e.g. `main`, or `main_v6` for its multicast IPv6 instance)
 
 ## Files
 

@@ -54,7 +54,6 @@ return view.extend({
 		var filepath = hooksPath + '/' + filename;
 
 		return L.resolveDefault(fs.read(filepath), '').then(L.bind(function(content) {
-			// Use template if content is empty or just whitespace
 			var displayContent = (content && content.trim()) ? content : hookTemplate;
 
 			ui.showModal(_('Edit Hook: %s').format(filename), [
@@ -125,7 +124,6 @@ return view.extend({
 			return;
 		}
 
-		// Validate filename (alphanumeric, dash, underscore)
 		if (!/^[a-zA-Z0-9_-]+$/.test(filename)) {
 			ui.addNotification(null, E('p', _('Hook name must contain only letters, numbers, dashes, and underscores.')));
 			return;
@@ -180,10 +178,31 @@ return view.extend({
 			return L.resource('icons/%s.svg').format(type);
 		};
 
+		// UCI boolean as read by config_get_bool
+		var getBool = function(value, dflt) {
+			if (['1', 'on', 'true', 'yes', 'enabled'].indexOf(value) !== -1)
+				return true;
+			if (['0', 'off', 'false', 'no', 'disabled'].indexOf(value) !== -1)
+				return false;
+			return dflt;
+		};
+
+		// Flag read as config_get_bool reads it, written when its meaning changes
+		var boolFlag = function(o, dflt) {
+			o.rmempty = false;
+			o.cfgvalue = function(section_id) {
+				return getBool(uci.get('ha-cluster', section_id, this.option), dflt) ? '1' : '0';
+			};
+			o.write = function(section_id, value) {
+				if (this.cfgvalue(section_id) !== value)
+					uci.set('ha-cluster', section_id, this.option, value);
+			};
+			return o;
+		};
+
 		m = new form.Map('ha-cluster', _('High Availability - Advanced VRRP'),
 			_('Advanced VRRP instance tuning. VIPs and instance assignment are in General.'));
 
-		// === Global Settings ===
 		s = m.section(form.TypedSection, 'advanced', _('Global Settings'),
 			_('Keepalived global options and email notifications.'));
 		s.anonymous = true;
@@ -193,7 +212,6 @@ return view.extend({
 			_('Set to 0 to disable auto-priority (recommended).'));
 		o.datatype = 'uinteger';
 		o.placeholder = '0';
-		o.default = '0';
 
 		o = s.option(form.ListValue, 'log_level', _('HA Cluster Log Level'),
 			_('Verbosity of ha-cluster shell scripts logging.'));
@@ -205,7 +223,7 @@ return view.extend({
 
 		o = s.option(form.Flag, 'enable_notifications', _('Enable Email Notifications'),
 			_('Send email on state changes. Requires SMTP server.'));
-		o.default = '0';
+		boolFlag(o, false);
 
 		o = s.option(form.DynamicList, 'notification_email', _('Recipient Emails'));
 		o.depends('enable_notifications', '1');
@@ -219,7 +237,6 @@ return view.extend({
 		o.depends('enable_notifications', '1');
 		o.placeholder = '192.168.1.100';
 
-		// === VRRP Instances ===
 		s = m.section(form.GridSection, 'vrrp_instance', _('VRRP Instances'),
 			_('The General page creates a single "main" instance for atomic failover of all VIPs. Add extra instances here for independent failover groups.'));
 		s.anonymous = false;
@@ -253,7 +270,6 @@ return view.extend({
 		};
 		o.modalonly = false;
 
-		// === General Tab ===
 		o = s.taboption('general', form.Value, 'vrid', _('VRID'),
 			_('Virtual Router ID (1-127). Must match on all cluster nodes. 128-255 reserved for auto-generated IPv6 instances.'));
 		o.datatype = 'range(1,127)';
@@ -294,12 +310,10 @@ return view.extend({
 			return ifname;
 		};
 
-		// === Timing Tab ===
 		o = s.taboption('timing', form.Value, 'advert_int', _('Advertisement Interval'),
 			_('VRRP advertisement frequency (seconds). Lower = faster failover. Default: 1.'));
 		o.datatype = 'float';
 		o.placeholder = '1.0';
-		o.default = '1';
 		o.modalonly = true;
 
 		o = s.taboption('timing', form.Value, 'priority', _('Priority'),
@@ -311,7 +325,7 @@ return view.extend({
 
 		o = s.taboption('timing', form.Flag, 'nopreempt', _('Keep Current MASTER (disable preemption)'),
 			_('Current MASTER stays MASTER even if higher-priority router returns.'));
-		o.default = '1';
+		boolFlag(o, true);
 		o.modalonly = true;
 
 		o = s.taboption('timing', form.Value, 'preempt_delay', _('Preempt Delay'),
@@ -328,7 +342,6 @@ return view.extend({
 		o.optional = true;
 		o.modalonly = true;
 
-		// === Authentication Tab ===
 		o = s.taboption('auth', form.ListValue, 'auth_type', _('Authentication Type'),
 			_('PASS: basic (max 8 chars, cleartext). AH: cryptographic (requires kmod-ipsec).'));
 		o.value('none', _('None'));
@@ -352,7 +365,6 @@ return view.extend({
 		o.depends('auth_type', 'pass');
 		o.modalonly = true;
 
-		// === Tracking Tab ===
 		o = s.taboption('tracking', form.DynamicList, 'track_interface', _('Track Interfaces'),
 			_('Failover when tracked interface goes DOWN. Common: track WAN for internet failover.'));
 		netDevs.forEach(function(dev) {
@@ -373,8 +385,6 @@ return view.extend({
 		o.placeholder = _('Select script');
 		o.modalonly = true;
 
-		// === Unicast Tab ===
-		// Compute auto-derived unicast values from peer config
 		var peers = uci.sections('ha-cluster', 'peer');
 		var transport = uci.get('ha-cluster', 'config', 'vrrp_transport') || 'multicast';
 		var autoSrcIp = '';
@@ -388,8 +398,8 @@ return view.extend({
 
 		o = s.taboption('unicast', form.Value, 'unicast_src_ip', _('Unicast Source IP'),
 			(transport === 'unicast' && autoSrcIp)
-				? _('Per-instance override. When empty, auto-derived from peer config: %s').format(autoSrcIp)
-				: _('This router\'s IP for unicast VRRP. Leave empty for multicast (default).'));
+				? _('Per-instance override. When this and Unicast Peer IPs are empty, auto-derived from peer config: %s. The derived value fits only an instance on the peers\' network; on another network, set this and Unicast Peer IPs.').format(autoSrcIp)
+				: _('This router\'s address for unicast VRRP, in the family of a unicast peer. When empty, keepalived uses an address of the interface.'));
 		o.datatype = 'ipaddr';
 		o.placeholder = (transport === 'unicast' && autoSrcIp)
 			? _('Auto: %s').format(autoSrcIp)
@@ -399,13 +409,12 @@ return view.extend({
 
 		o = s.taboption('unicast', form.DynamicList, 'unicast_peer', _('Unicast Peer IPs'),
 			(transport === 'unicast' && autoPeerAddrs.length > 0)
-				? _('Per-instance override. When empty, auto-derived from peer config: %s').format(autoPeerAddrs.join(', '))
-				: _('Peer router IPs. Required when using unicast mode. Both src_ip and peer must be set.'));
+				? _('Per-instance override. When empty, auto-derived from peer config: %s. The derived list fits only an instance on the peers\' network; on another network, set this and Unicast Source IP.').format(autoPeerAddrs.join(', '))
+				: _('Addresses of the other routers for unicast VRRP. Any entry makes this group unicast; only the peers in the family of the source IP, or else of the first peer, are used.'));
 		o.datatype = 'ipaddr';
 		o.placeholder = _('e.g., 192.168.1.2');
 		o.modalonly = true;
 
-		// === Health Checks (VRRP Scripts) ===
 		s = m.section(form.GridSection, 'script', _('Health Checks (VRRP Scripts)'),
 			_('Command checks may be referenced manually. Managed checks are attached to every selected VRRP instance automatically, including generated IPv6 instances.'));
 		s.anonymous = false;
@@ -548,7 +557,6 @@ return view.extend({
 			_('Seconds between checks.'));
 		o.datatype = 'uinteger';
 		o.placeholder = '5';
-		o.default = '5';
 		o.modalonly = true;
 
 		o = s.option(form.Value, 'timeout', _('Timeout'),
@@ -586,9 +594,7 @@ return view.extend({
 		o.optional = true;
 		o.modalonly = true;
 
-		// Render form.Map, then append hooks section
 		return m.render().then(L.bind(function(mapEl) {
-			// Build hooks section with grid
 			var hooksTable = E('table', { 'class': 'table cbi-section-table' }, [
 				E('tr', { 'class': 'tr table-titles' }, [
 					E('th', { 'class': 'th' }, _('Name')),

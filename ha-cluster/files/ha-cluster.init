@@ -1,10 +1,9 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025-2026 Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
-# /etc/init.d/ha-cluster
-# High Availability Cluster Management
 
-START=25  # After network (20), before standalone owsync (99) and lease-sync (90)
+# After dnsmasq (19) and network (20)
+START=25
 STOP=91
 
 USE_PROCD=1
@@ -19,7 +18,6 @@ start_service() {
 	config_load ha-cluster
 	config_get_bool enabled config enabled 0
 
-	# Initialize log level from UCI
 	ha_log_init
 
 	[ "$enabled" -eq 0 ] && {
@@ -43,13 +41,11 @@ start_service() {
 		return 1
 	}
 
-	# Generate configs and start all services
 	ha_apply_config || {
 		ha_log_error "Failed to apply configuration"
 		return 1
 	}
 
-	# Start keepalived daemon
 	ha_log_info "Starting keepalived daemon"
 	procd_open_instance keepalived
 	procd_set_param command /usr/sbin/keepalived
@@ -62,7 +58,6 @@ start_service() {
 	procd_set_param stderr 1
 	procd_close_instance
 
-	# Start owsync daemon (if config file was generated)
 	if [ -f "$OWSYNC_CONF" ]; then
 		ha_log_info "Starting owsync daemon"
 		procd_open_instance owsync
@@ -75,7 +70,6 @@ start_service() {
 		procd_close_instance
 	fi
 
-	# Start lease-sync daemon (if config exists)
 	if [ -f "$LEASE_SYNC_CONF" ]; then
 		ha_log_info "Starting lease-sync daemon"
 		procd_open_instance lease-sync
@@ -110,14 +104,12 @@ service_stopped() {
 		i=$((i + 1))
 	done
 
-	# Remove dnsmasq HA overlay and restart dnsmasq
 	ha_release_dnsmasq
 
-	# Remove IPv6 BACKUP guard nft rules, now that keepalived can no longer
-	# report a state that would put them back
+	# Remove the IPv6 BACKUP guard nft rules, now that keepalived can no
+	# longer report a state that would put them back
 	ha_release_ipv6_guard
 
-	# Release service management back to standalone init scripts
 	ha_manage_services "release"
 }
 
@@ -127,12 +119,10 @@ reload_service() {
 	config_load ha-cluster
 	config_get_bool enabled config enabled 0
 
-	# Initialize log level from UCI
 	ha_log_init
 
 	ha_log_info "Reloading HA cluster configuration"
 
-	# Not running → start or nothing
 	if ! procd_running ha-cluster; then
 		if [ "$enabled" -eq 1 ]; then
 			ha_log_info "Service not running, performing full start"
@@ -141,20 +131,16 @@ reload_service() {
 		return 0
 	fi
 
-	# Running + disabled → stop
 	if [ "$enabled" -eq 0 ]; then
 		ha_log_info "HA cluster disabled, stopping"
 		stop
 		return 0
 	fi
 
-	# Running + enabled → reconcile all instances via procd
-	# start_service() regenerates configs and re-defines procd instances.
-	# procd compares new vs running instances:
-	#   - keepalived: config file tracked → procd sends SIGHUP on change and
-	#     keepalived re-reads its config, keeping the VIPs
-	#   - owsync/lease-sync: config file tracked → procd restarts on change
-	#   - owsync/lease-sync: instance appeared/disappeared → procd starts/stops
+	# Regenerate configs and let procd reconcile the instances: owsync and
+	# lease-sync restart on config file change or start/stop as their config
+	# appears/disappears; keepalived gets SIGHUP on config file change and
+	# re-reads its config, keeping the VIPs.
 	start
 }
 

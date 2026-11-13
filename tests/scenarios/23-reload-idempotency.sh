@@ -1,0 +1,357 @@
+#!/bin/sh
+# 23-reload-idempotency.sh - Test T23: Reload Idempotency and Managed-Service State
+#
+# Regression guards for the reconciliation path taken on every
+# "/etc/init.d/ha-cluster reload":
+#
+#   - keepalived.conf is created 0600 like the owsync/lease-sync configs
+#     (it can hold the VRRP auth_pass in cleartext).
+#   - A reload with an unchanged dnsmasq overlay does NOT restart dnsmasq,
+#     so DNS/DHCP is not dropped needlessly.
+#   - The overlay's temp file is never visible to dnsmasq's conf-dir scan.
+#   - The saved standalone-service state survives a reload, so release (on
+#     stop) can still restore the services to their pre-takeover state.
+#   - Options set in the named "advanced" section are honoured in the
+#     generated daemon configs (the section must be addressable by name).
+#   - A stop does not replay the leases to the peer: dnsmasq, restarted
+#     to drop the overlay, reports every lease again, which lease-sync
+#     would broadcast as fresh UPDATEs if it still ran.
+#
+# Only NODE1 is churned; NODE2 keeps the VIP during the destructive cases.
+#
+# Copyright (C) 2025-2026 Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TEST_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Load test framework
+. "$TEST_DIR/lib/common.sh"
+. "$TEST_DIR/lib/assertions.sh"
+. "$TEST_DIR/lib/cluster-utils.sh"
+
+# ============================================
+# Configuration
+# ============================================
+
+KEEPALIVED_CONF="/tmp/ha-cluster/keepalived.conf"
+OWSYNC_CONF="/tmp/ha-cluster/owsync.conf"
+LEASE_SYNC_CONF="/tmp/ha-cluster/lease-sync.conf"
+STATE_FILE="/etc/ha-cluster/service_states"
+CLIENT1="ha-client1"
+
+# ============================================
+# Test Cases
+# ============================================
+
+# Symbolic permission string of a file on a node (busybox has no stat(1)).
+# Prints e.g. "-rw-------" from the first ls -l field.
+_node_perm() {
+    exec_node "$1" ls -l "$2" 2>/dev/null | awk 'NR==1 {print substr($1,1,10)}'
+}
+
+# keepalived.conf may contain the VRRP auth_pass, so it must be 0600 like
+# the other generated daemon configs.
+test_keepalived_conf_mode_0600() {
+    subheader "keepalived.conf is created with mode 0600"
+    local rc=0
+
+    assert_eq "-rw-------" "$(_node_perm "$NODE1" "$KEEPALIVED_CONF")" \
+        "keepalived.conf mode is 0600 on $NODE1" || rc=1
+
+    # Baseline: the other two configs were already 0600.
+    assert_eq "-rw-------" "$(_node_perm "$NODE1" "$OWSYNC_CONF")" \
+        "owsync.conf mode is 0600 on $NODE1" || rc=1
+    assert_eq "-rw-------" "$(_node_perm "$NODE1" "$LEASE_SYNC_CONF")" \
+        "lease-sync.conf mode is 0600 on $NODE1" || rc=1
+
+    return $rc
+}
+
+# A reload that does not change the dnsmasq overlay must not restart dnsmasq.
+test_reload_keeps_dnsmasq_running() {
+    subheader "Reload with unchanged overlay does not restart dnsmasq"
+    local rc=0
+
+    # busybox pgrep -x matches the full command line, not the comm, so use a
+    # plain match and take the parent (lowest) pid; dnsmasq forks a helper.
+    local pid_before pid_after
+    pid_before=$(exec_node "$NODE1" sh -c 'pgrep dnsmasq | sort -n | head -n1' 2>/dev/null)
+
+    if [ -z "$pid_before" ]; then
+        fail "dnsmasq not running on $NODE1 before reload"
+        return 1
+    fi
+    info "dnsmasq pid before reload: $pid_before"
+
+    exec_node "$NODE1" /etc/init.d/ha-cluster reload >/dev/null 2>&1
+    wait_for_cluster_healthy 30
+
+    pid_after=$(exec_node "$NODE1" sh -c 'pgrep dnsmasq | sort -n | head -n1' 2>/dev/null)
+    info "dnsmasq pid after reload: $pid_after"
+
+    assert_eq "$pid_before" "$pid_after" \
+        "dnsmasq keeps the same pid across an unchanged reload" || rc=1
+
+    # The overlay itself must still be in place after the reload.
+    local overlay
+    overlay=$(exec_node "$NODE1" sh -c \
+        'cat "$(find /tmp -name ha-cluster.conf 2>/dev/null | head -n1)" 2>/dev/null')
+    assert_contains "$overlay" "script-on-renewal" \
+        "dnsmasq HA overlay is still present after reload" || rc=1
+
+    return $rc
+}
+
+# dnsmasq loads every non-dot file in its conf-dir, so the overlay's
+# temporary file must never be visible to it, even transiently.
+test_overlay_tmp_hidden_from_dnsmasq() {
+    subheader "Overlay temp file is invisible to dnsmasq's conf-dir scan"
+    local rc=0
+
+    # Snapshot the conf-dir from inside the write window: cmp runs between
+    # writing the temp file and the final mv/rm.
+    local visible_during visible_after
+    visible_during=$(exec_node "$NODE1" sh -c '
+        . /usr/lib/ha-cluster/ha-cluster.sh
+        cmp() { ls -A "$confdir" > /tmp/t23-confdir.snap; command cmp "$@"; }
+        ha_configure_dnsmasq
+        grep -v "^\." /tmp/t23-confdir.snap; rm -f /tmp/t23-confdir.snap' 2>/dev/null)
+    visible_after=$(exec_node "$NODE1" sh -c \
+        '. /usr/lib/ha-cluster/ha-cluster.sh; ls "$(ha_get_dnsmasq_confdir)"' 2>/dev/null)
+
+    assert_contains "$visible_during" "ha-cluster.conf" \
+        "conf-dir snapshot was taken inside the write window" || rc=1
+    assert_eq "$visible_after" "$visible_during" \
+        "no extra file visible to dnsmasq while the overlay is written" || rc=1
+
+    # The fix relies on dnsmasq skipping dotfiles; check the shipped binary.
+    local rc_dot rc_plain
+    exec_node "$NODE1" sh -c 'rm -rf /tmp/t23-cd; mkdir /tmp/t23-cd;
+        echo "not-a-dnsmasq-option" > /tmp/t23-cd/.probe.new' >/dev/null 2>&1
+    exec_node "$NODE1" dnsmasq --test --conf-file=/dev/null \
+        --conf-dir=/tmp/t23-cd >/dev/null 2>&1
+    rc_dot=$?
+    exec_node "$NODE1" mv /tmp/t23-cd/.probe.new /tmp/t23-cd/probe.new >/dev/null 2>&1
+    exec_node "$NODE1" dnsmasq --test --conf-file=/dev/null \
+        --conf-dir=/tmp/t23-cd >/dev/null 2>&1
+    rc_plain=$?
+    exec_node "$NODE1" rm -rf /tmp/t23-cd >/dev/null 2>&1
+
+    assert_eq "0" "$rc_dot" "dnsmasq ignores a dot-prefixed file in conf-dir" || rc=1
+    assert_ne "0" "$rc_plain" "dnsmasq parses a non-dot file in conf-dir" || rc=1
+
+    return $rc
+}
+
+# Epoch timestamp of the first syslog line (logread -t) matching a pattern
+# Usage: log_since "node" "$t0" | _log_ts "pattern"
+_log_ts() {
+    grep "$1" | head -n1 | sed -n 's/^[^[]*\[\([0-9.]*\)\].*/\1/p'
+}
+
+# Releasing dnsmasq on stop restarts it, and it reports each lease of its
+# lease file again as "old". lease-sync must be gone by then, or it
+# broadcasts them to the peer as UPDATEs with fresh timestamps.
+test_stop_does_not_replay_leases() {
+    subheader "Stop does not replay leases to the peer"
+    local rc=0
+
+    if ! client_running "$CLIENT1"; then
+        skip "Stop replay test" "$CLIENT1 container not running"
+        return 0
+    fi
+
+    local ip
+    ip=$(dhcp_request "$CLIENT1")
+    if [ -z "$ip" ]; then
+        fail "$CLIENT1 failed to obtain a DHCP lease"
+        return 1
+    fi
+    if ! wait_for_lease "$NODE1" "$ip" "$SYNC_TIMEOUT" ||
+       ! wait_for_lease "$NODE2" "$ip" "$SYNC_TIMEOUT"; then
+        fail "Lease $ip not replicated on both nodes"
+        return 1
+    fi
+    info "Lease $ip present on $NODE1 and $NODE2"
+
+    # The stopping node's identity in the peer's log (the daemon keeps it
+    # in its state dir), and the pid of ha-cluster's lease-sync instance
+    local node_id ls_pid t0
+    node_id=$(exec_node "$NODE1" cat /var/lib/lease-sync/node_id 2>/dev/null)
+    ls_pid=$(exec_node "$NODE1" sh -c 'ubus call service list "{\"name\":\"ha-cluster\"}" |
+        jsonfilter -e "@[\"ha-cluster\"].instances[\"lease-sync\"].pid"' 2>/dev/null)
+    if [ -z "$node_id" ] || [ -z "$ls_pid" ]; then
+        fail "lease-sync not running on $NODE1 (node_id=${node_id:-none})"
+        return 1
+    fi
+    info "$NODE1 lease-sync: node_id=$node_id pid=$ls_pid"
+
+    # Let the DHCP exchange's own events settle before opening the window
+    sleep 3
+    t0=$(exec_node "$NODE2" date +%s)
+
+    exec_node "$NODE1" /etc/init.d/ha-cluster stop >/dev/null 2>&1
+
+    # Precondition: the restarted dnsmasq did report the lease again
+    local i=0 replayed=""
+    while [ $i -lt 10 ]; do
+        replayed=$(log_since "$NODE1" "$t0" |
+            grep "lease-sync-hotplug: update event for $ip published")
+        [ -n "$replayed" ] && break
+        sleep 1
+        i=$((i + 1))
+    done
+    assert_ne "" "$replayed" \
+        "dnsmasq on $NODE1 reported $ip again after the stop" || rc=1
+
+    # Leave time for any broadcast to reach the peer
+    sleep 3
+
+    # Whether a replay escapes depends on how fast procd delivers the
+    # events, so check the order itself: the daemon exits before dnsmasq
+    # restarts.
+    local exit_ts start_ts
+    exit_ts=$(log_since "$NODE1" "$t0" | _log_ts "lease-sync\[$ls_pid\]: lease-sync daemon terminated")
+    start_ts=$(log_since "$NODE1" "$t0" | _log_ts "dnsmasq\[[0-9]*\]: started")
+    info "lease-sync exit: ${exit_ts:-none}, dnsmasq start: ${start_ts:-none}"
+    if [ -n "$exit_ts" ] && [ -n "$start_ts" ] &&
+       awk -v e="$exit_ts" -v s="$start_ts" 'BEGIN { exit !(e < s) }'; then
+        pass "$NODE1 lease-sync exited before dnsmasq restarted"
+    else
+        fail "$NODE1 lease-sync exited before dnsmasq restarted"
+        rc=1
+    fi
+
+    local processed received
+    processed=$(log_since "$NODE1" "$t0" |
+        grep "lease-sync\[$ls_pid\]: Processed local lease: .* - old")
+    received=$(log_since "$NODE2" "$t0" |
+        grep "lease-sync\[[0-9]*\]: Received UPDATE for .* from $node_id\$")
+
+    assert_eq "" "$processed" \
+        "$NODE1 lease-sync (pid $ls_pid) broadcast no replayed lease" || rc=1
+    assert_eq "" "$received" \
+        "$NODE2 received no UPDATE from $NODE1 caused by the stop" || rc=1
+
+    exec_node "$NODE1" /etc/init.d/ha-cluster start >/dev/null 2>&1
+    wait_for_cluster_healthy 30
+
+    dhcp_release "$CLIENT1"
+    clear_node_leases || warn "Leases not cleared on both nodes"
+
+    return $rc
+}
+
+# The pre-takeover state snapshot must not be overwritten by a reload,
+# otherwise release could no longer restore the standalone services.
+test_service_state_survives_reload() {
+    subheader "Saved service state survives a reload"
+    local rc=0
+
+    # Start from a clean, released baseline.
+    exec_node "$NODE1" /etc/init.d/ha-cluster stop >/dev/null 2>&1
+    wait_for_service_stopped "$NODE1" "keepalived" 10 >/dev/null 2>&1
+
+    # Enable a standalone service so take_over records a non-trivial state.
+    exec_node "$NODE1" /etc/init.d/keepalived enable >/dev/null 2>&1
+
+    # Take over: state file should now record keepalived as previously enabled.
+    exec_node "$NODE1" /etc/init.d/ha-cluster start >/dev/null 2>&1
+    wait_for_cluster_healthy 30
+
+    local state_before
+    state_before=$(get_file_content "$NODE1" "$STATE_FILE")
+    assert_contains "$state_before" "keepalived=1" \
+        "take_over records keepalived as previously enabled" || rc=1
+
+    # Reload must not re-capture (which would record keepalived=0 now that
+    # take_over already disabled the standalone service).
+    exec_node "$NODE1" /etc/init.d/ha-cluster reload >/dev/null 2>&1
+    wait_for_cluster_healthy 30
+
+    local state_after
+    state_after=$(get_file_content "$NODE1" "$STATE_FILE")
+    assert_contains "$state_after" "keepalived=1" \
+        "reload preserves the saved keepalived=1 state" || rc=1
+    assert_eq "$state_before" "$state_after" \
+        "state file is unchanged by reload" || rc=1
+
+    return $rc
+}
+
+# Options placed in the named "advanced" section must reach the generated
+# daemon configs; an anonymous section would silently fall back to defaults.
+test_advanced_section_honoured() {
+    subheader "Named advanced section options are honoured"
+
+    # Use a distinctive, node-local value (lease-sync peer timeout).
+    exec_node "$NODE1" uci -q delete ha-cluster.advanced >/dev/null 2>&1
+    exec_node "$NODE1" uci set ha-cluster.advanced='advanced' >/dev/null 2>&1
+    exec_node "$NODE1" uci set ha-cluster.advanced.lease_sync_peer_timeout='77' >/dev/null 2>&1
+    exec_node "$NODE1" uci commit ha-cluster >/dev/null 2>&1
+
+    exec_node "$NODE1" /etc/init.d/ha-cluster restart >/dev/null 2>&1
+    wait_for_cluster_healthy 30
+
+    local conf
+    conf=$(get_file_content "$NODE1" "$LEASE_SYNC_CONF")
+    assert_contains "$conf" "peer_timeout=77" \
+        "advanced.lease_sync_peer_timeout reaches lease-sync.conf"
+}
+
+# ============================================
+# Cleanup
+# ============================================
+
+cleanup() {
+    subheader "Cleanup"
+
+    # Remove the advanced override added by the last test.
+    exec_node "$NODE1" uci -q delete ha-cluster.advanced >/dev/null 2>&1
+    exec_node "$NODE1" uci commit ha-cluster >/dev/null 2>&1
+
+    # Restore the baseline: standalone keepalived disabled, no stale state,
+    # ha-cluster running and managing everything.
+    exec_node "$NODE1" /etc/init.d/ha-cluster stop >/dev/null 2>&1
+    exec_node "$NODE1" /etc/init.d/keepalived disable >/dev/null 2>&1
+    exec_node "$NODE1" rm -f "$STATE_FILE" >/dev/null 2>&1
+    exec_node "$NODE1" /etc/init.d/ha-cluster start >/dev/null 2>&1
+
+    wait_for_cluster_healthy 45
+    pass "Cleanup complete"
+}
+
+# ============================================
+# Main
+# ============================================
+
+main() {
+    header "T23: Reload Idempotency and Managed-Service State"
+    info "Guards keepalived.conf perms, dnsmasq reload stability,"
+    info "service-state preservation, and advanced-section handling"
+
+    local result=0
+
+    # Non-destructive check first.
+    test_keepalived_conf_mode_0600 || result=1
+    test_overlay_tmp_hidden_from_dnsmasq || result=1
+
+    # Reload/restart cases (each restores cluster health).
+    test_reload_keeps_dnsmasq_running || result=1
+    test_stop_does_not_replay_leases || result=1
+    test_service_state_survives_reload || result=1
+    test_advanced_section_honoured || result=1
+
+    cleanup
+
+    return $result
+}
+
+main
+exit $?

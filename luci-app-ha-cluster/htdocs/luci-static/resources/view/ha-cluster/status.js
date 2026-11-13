@@ -25,6 +25,7 @@ return view.extend({
 	load: function() {
 		return Promise.all([
 			this.loadData(),
+			L.resolveDefault(fs.stat('/usr/bin/owsync'), null),
 			L.resolveDefault(fs.stat('/usr/sbin/lease-sync'), null)
 		]);
 	},
@@ -72,31 +73,45 @@ return view.extend({
 		}
 	},
 
-	renderServiceRow: function(name, serviceInfo) {
+	// Missing package that the configuration asks for
+	isMissing: function(serviceInfo, installed) {
+		return !installed && !!(serviceInfo && serviceInfo.wanted);
+	},
+
+	renderServiceRow: function(name, serviceInfo, installed) {
 		var isRunning = (serviceInfo && serviceInfo.running) || false;
 		var isRequired = (serviceInfo && serviceInfo.required) || false;
 		var pid = (serviceInfo && serviceInfo.pid) || '-';
 		var uptime = (serviceInfo && this.formatUptime(serviceInfo.uptime)) || '-';
 
-		// Determine status badge using LuCI standard classes
 		var statusBadge;
 		if (isRunning) {
 			statusBadge = E('span', { 'class': 'label success' }, _('Running'));
 		} else if (isRequired) {
 			statusBadge = E('span', { 'class': 'label important' }, _('Stopped'));
+		} else if (this.isMissing(serviceInfo, installed)) {
+			statusBadge = E('span', { 'class': 'label' }, _('Not installed'));
 		} else {
 			statusBadge = E('span', { 'class': 'label' }, _('Disabled'));
 		}
 
 		return E('tr', { 'class': 'tr' }, [
-			E('td', { 'class': 'td left' }, name),
-			E('td', { 'class': 'td left' }, statusBadge),
-			E('td', { 'class': 'td left' }, String(pid)),
-			E('td', { 'class': 'td left' }, uptime)
+			E('td', { 'class': 'td left', 'data-title': _('Service') }, name),
+			E('td', { 'class': 'td left', 'data-title': _('Status') }, statusBadge),
+			E('td', { 'class': 'td left', 'data-title': _('PID') }, String(pid)),
+			E('td', { 'class': 'td left', 'data-title': _('Uptime') }, uptime)
 		]);
 	},
 
-	renderStatus: function(data, leaseSyncInstalled) {
+	formatLastSync: function(serviceInfo, installed, timestamp) {
+		if (serviceInfo && serviceInfo.required)
+			return this.formatRelativeTime(timestamp);
+		if (this.isMissing(serviceInfo, installed))
+			return _('Not installed');
+		return _('Disabled');
+	},
+
+	renderStatus: function(data, owsyncInstalled, leaseSyncInstalled) {
 		var status = data || {};
 		var services = status.services || {};
 
@@ -105,7 +120,6 @@ return view.extend({
 		var peers = status.peers || [];
 		var syncStatus = status.sync || {};
 
-		// Determine cluster state label class
 		var stateClass;
 		switch (clusterState) {
 			case 'HEALTHY':
@@ -121,7 +135,6 @@ return view.extend({
 				stateClass = 'label';
 		}
 
-		// Determine node role label class
 		var roleClass;
 		switch (nodeRole) {
 			case 'MASTER':
@@ -140,16 +153,13 @@ return view.extend({
 				roleClass = 'label';
 		}
 
-		// Build per-instance role rows (shown when multiple instances exist)
 		var instances = status.instances || {};
 		var instanceNames = Object.keys(instances);
 
 		return [
 			E('h3', {}, _('Cluster Status')),
 
-			// Two separate tables side-by-side for clear visual separation
 			E('div', { 'class': 'cbi-section', 'style': 'display: flex; gap: 2em;' }, [
-				// Table 1: Cluster Overview
 				E('div', { 'class': 'cbi-section-node', 'style': 'flex: 1;' }, [
 					E('table', { 'class': 'table' }, [
 						E('tr', { 'class': 'tr table-titles' }, [
@@ -185,7 +195,6 @@ return view.extend({
 						]);
 					}) : []))
 				]),
-				// Table 2: Last Synchronization
 				E('div', { 'class': 'cbi-section-node', 'style': 'flex: 1;' }, [
 					E('table', { 'class': 'table' }, [
 						E('tr', { 'class': 'tr table-titles' }, [
@@ -193,18 +202,18 @@ return view.extend({
 						]),
 						E('tr', { 'class': 'tr' }, [
 							E('td', { 'class': 'td left' }, _('Config Sync')),
-							E('td', { 'class': 'td left' }, this.formatRelativeTime(syncStatus.config_last_sync))
-						])
-					].concat(leaseSyncInstalled ? [
+							E('td', { 'class': 'td left' },
+								this.formatLastSync(services.owsync, owsyncInstalled, syncStatus.config_last_sync))
+						]),
 						E('tr', { 'class': 'tr' }, [
 							E('td', { 'class': 'td left' }, _('Lease Sync')),
-							E('td', { 'class': 'td left' }, this.formatRelativeTime(syncStatus.lease_last_sync))
+							E('td', { 'class': 'td left' },
+								this.formatLastSync(services['lease-sync'], leaseSyncInstalled, syncStatus.lease_last_sync))
 						])
-					] : []))
+					])
 				])
 			]),
 
-			// Service Status
 			E('h3', {}, _('Service Status')),
 			E('div', { 'class': 'cbi-section cbi-section-node' }, [
 				E('table', { 'class': 'table' }, [
@@ -214,14 +223,12 @@ return view.extend({
 						E('th', { 'class': 'th' }, _('PID')),
 						E('th', { 'class': 'th' }, _('Uptime'))
 					]),
-					this.renderServiceRow('keepalived', services.keepalived),
-					this.renderServiceRow('owsync', services.owsync)
-				].concat(leaseSyncInstalled ? [
-					this.renderServiceRow('lease-sync', services['lease-sync'])
-				] : []))
+					this.renderServiceRow('keepalived', services.keepalived, true),
+					this.renderServiceRow('owsync', services.owsync, owsyncInstalled),
+					this.renderServiceRow('lease-sync', services['lease-sync'], leaseSyncInstalled)
+				])
 			]),
 
-			// Peer Status
 			E('h3', {}, _('Peer Status')),
 			E('div', { 'class': 'cbi-section cbi-section-node' }, [
 				peers.length > 0 ?
@@ -234,14 +241,16 @@ return view.extend({
 						])
 					].concat(peers.map(function(peer) {
 						return E('tr', { 'class': 'tr' }, [
-							E('td', { 'class': 'td left' }, peer.name || '-'),
-							E('td', { 'class': 'td left' }, peer.address || '-'),
-							E('td', { 'class': 'td left' },
+							E('td', { 'class': 'td left', 'data-title': _('Peer Name') }, peer.vrrp_only
+								? [ peer.name || '-', ' ', E('span', { 'class': 'label' }, _('VRRP only')) ]
+								: peer.name || '-'),
+							E('td', { 'class': 'td left', 'data-title': _('Address') }, peer.address || '-'),
+							E('td', { 'class': 'td left', 'data-title': _('State') },
 								E('span', {
 									'class': peer.online ? 'label success' : 'label important'
 								}, peer.online ? _('Online') : _('Offline'))
 							),
-							E('td', { 'class': 'td left' }, peer.last_seen || '-')
+							E('td', { 'class': 'td left', 'data-title': _('Last Seen') }, peer.last_seen || '-')
 						]);
 					}))) :
 					E('div', { 'class': 'alert-message warning' }, _('No peers configured'))
@@ -251,7 +260,8 @@ return view.extend({
 
 	render: function(data) {
 		var statusData = data[0];
-		var leaseSyncInstalled = data[1] != null;
+		var owsyncInstalled = data[1] != null;
+		var leaseSyncInstalled = data[2] != null;
 
 		var view = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('High Availability Status')),
@@ -261,14 +271,13 @@ return view.extend({
 
 		var content = E('div', { 'id': 'ha_status_content' });
 		view.appendChild(content);
-		dom.content(content, this.renderStatus(statusData, leaseSyncInstalled));
+		dom.content(content, this.renderStatus(statusData, owsyncInstalled, leaseSyncInstalled));
 
-		// Set up auto-refresh polling
 		poll.add(L.bind(function() {
 			return this.loadData().then(L.bind(function(data) {
 				var statusContent = document.getElementById('ha_status_content');
 				if (statusContent) {
-					dom.content(statusContent, this.renderStatus(data, leaseSyncInstalled));
+					dom.content(statusContent, this.renderStatus(data, owsyncInstalled, leaseSyncInstalled));
 				}
 			}, this));
 		}, this), 5);

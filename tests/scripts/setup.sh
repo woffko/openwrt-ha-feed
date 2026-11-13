@@ -145,25 +145,19 @@ ensure_packages() {
     echo "Packages Not Found"
     echo "========================================="
     echo ""
-    echo "No pre-built packages found. You have two options:"
+    echo "No pre-built packages found."
     echo ""
-    echo "1. Build packages using OpenWrt SDK:"
-    echo "   cd /home/pgaufillet/git/ha-cluster/openwrt"
-    echo "   make package/ha-cluster/compile V=s"
-    echo "   make package/owsync/compile V=s"
-    echo "   make package/lease-sync/compile V=s"
-    echo "   make package/dnsmasq-ha/compile V=s"
-    echo "   make package/luci-app-ha-cluster/compile V=s"
+    echo "1. Build them with the Docker SDK for x86/64 (see docker/README.md)."
     echo ""
-    echo "2. Copy pre-built packages to:"
+    echo "2. Copy the .apk files to:"
     echo "   $pkg_dir/"
     echo ""
     echo "Required packages:"
-    echo "   - dnsmasq-ha_*.apk"
-    echo "   - lease-sync_*.apk"
-    echo "   - owsync_*.apk"
-    echo "   - ha-cluster_*.apk"
-    echo "   - luci-app-ha-cluster_*.apk"
+    echo "   - dnsmasq-ha-*.apk"
+    echo "   - lease-sync-*.apk"
+    echo "   - owsync-*.apk"
+    echo "   - ha-cluster-*.apk"
+    echo "   - luci-app-ha-cluster-*.apk"
     echo ""
     exit 1
 }
@@ -367,7 +361,7 @@ configure_node_from_env() {
         uci set ha-cluster.config=config
         uci set ha-cluster.config.enabled='1'
         uci set ha-cluster.config.encryption_key='$TEST_KEY'
-        uci set ha-cluster.config.sync_method='owsync'
+        uci set ha-cluster.config.lease_sync='1'
 
         # VRRP instance config
         uci set ha-cluster.main=vrrp_instance
@@ -404,14 +398,13 @@ configure_node_from_env() {
             uci set ha-cluster.peer2.address='$peer_ip_2'
         fi
 
-        # Service config
-        uci set ha-cluster.dhcp=service
+        # Sync group config
+        uci set ha-cluster.dhcp=sync_group
         uci set ha-cluster.dhcp.enabled='1'
-        uci set ha-cluster.dhcp.sync_leases='1'
         uci add_list ha-cluster.dhcp.config_files='dhcp'
 
-        # Test service for config sync tests
-        uci set ha-cluster.test=service
+        # Test sync group for config sync tests
+        uci set ha-cluster.test=sync_group
         uci set ha-cluster.test.enabled='1'
         uci add_list ha-cluster.test.config_files='test_sync'
         uci add_list ha-cluster.test.config_files='test_sync2'

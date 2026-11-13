@@ -1,0 +1,4 @@
+staged:
+set guest vrrp_instance
+set guest vrid 20
+set guest interface lan

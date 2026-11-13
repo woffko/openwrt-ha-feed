@@ -117,6 +117,11 @@ tests/
 │   ├── 19-ipv6-stress.sh           # T19: IPv6 stress test (1000+ leases)
 │   └── 20-no-lease-sync.sh        # T20: Operation without lease-sync
 │
+├── luci/
+│   ├── luci-test.js                # T25 Playwright driver
+│   ├── fixtures/                   # UCI configs rendered by T25
+│   └── expected/                   # T25 expected outputs
+│
 ├── lib/
 │   ├── common.sh                   # Core test utilities
 │   ├── assertions.sh               # Test assertions
@@ -131,7 +136,7 @@ tests/
 ├── images/                         # OpenWrt rootfs (gitignored)
 ├── data/                           # Runtime state (gitignored)
 ├── logs/                           # Test logs (gitignored)
-├── package.json                    # Node.js deps (Playwright for screenshots)
+├── package.json                    # Node.js deps (Playwright for T25 and screenshots)
 └── node_modules/                   # npm dependencies (gitignored)
 ```
 
@@ -185,7 +190,7 @@ The container goes through 5 distinct stages to reach a "running OpenWrt" state:
 │ ─────────────────────────────────────────                                   │
 │ • FROM scratch + OpenWrt rootfs tarball                                     │
 │ • apk add: keepalived, HA packages                                     │
-│ • Disable DNSSEC, procd jail                                                │
+│ • Disable DNSSEC; mount /dev/urandom in the dnsmasq jail                    │
 │ • Copy entrypoint.sh into image                                             │
 │ Output: ha-cluster-node:latest image                                        │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -357,7 +362,7 @@ Without this configuration, fw4's default `policy drop` blocks inter-container t
 | T02 | VRRP Election | Correct MASTER/BACKUP assignment |
 | T03 | VIP Failover | VIP migrates on MASTER failure |
 | T04 | Config Sync | owsync replicates UCI changes |
-| T05 | Lease Sync | lease-sync replicates DHCP leases |
+| T05 | Lease Sync | lease-sync replicates DHCP leases and their release; a release then immediate re-lease keeps the new lease; with dnsmasq jailed, lease events carry the dnsmasq lease fields |
 
 ### Priority 2 - Reliability & Robustness (T06-T10)
 
@@ -407,6 +412,187 @@ Without this configuration, fw4's default `policy drop` blocks inter-container t
   { "ipv6": true, "fixed-cidr-v6": "fd00::/8" }
   ```
 - Podman users: The setup script automatically detects and works around podman/netavark IPv6 assignment issues. No manual intervention required.
+
+### Characterization (T24)
+
+| ID | Scenario | Validates |
+|----|----------|-----------|
+| T24 | Characterization | Backend, rpcd `status`, LuCI ACL, UCI migration, DHCP hotplug and standalone lease-sync config output unchanged over a matrix of configurations |
+
+T24 runs each case of `characterization/{backend,rpcd,acl,migration,hotplug,lease-sync}/cases/`
+in a throwaway `ha-cluster-node` container (no network), against the
+working-tree `ha-cluster.sh`, init script, migration, rpcd handler,
+dnsmasq `dhcp-script.sh`, and lease-sync's hotplug script, standalone
+init script and shipped UCI file, with
+`logger`, `pgrep`, `ubus` and `ping` stubbed. It compares the result
+(effective UCI, procd instances, log lines, generated configs, dnsmasq
+overlay, saved service state and rc.d links, rpcd JSON) with
+`characterization/expected/`. Only the node image is needed, not a
+running cluster; the host needs `python3`. The bind mounts carry no
+SELinux label option: on an SELinux host, relabel the feed checkout or
+run T24 with SELinux permissive.
+
+A case file is sourced with `set -e` before the start: it changes UCI,
+creates or removes files, and sets the stub inputs (`FAKE_RUNNING`,
+`FAKE_ONLINE`, `FAKE_KEEPALIVED`). `STEP2=reload|stop`, with an optional
+`step2` function, observes a second step after the start. Backend and
+rpcd cases describe the configuration before a package upgrade: the
+`uci-defaults` migration runs on it before the start.
+
+The `migration` cases write `/etc/config/ha-cluster` verbatim (old
+spellings, comments, anonymous sections) and record the file after the
+migration and after a second run, which must leave it unchanged.
+
+The `acl` cases start the real `ubusd` and `rpcd` with the working-tree
+LuCI ACL and log in as a user holding only the `luci-base*` and
+`luci-app-ha-cluster` groups (root holds every group, so the LuCI tests
+cannot see a missing grant). A case defines a `checks` function:
+`access <scope> <object> <function>` asks the session (the ubus scope is
+enforced by uhttpd before any call), `file_call <method> <path>` makes
+the call itself (the file scope is enforced by rpcd).
+
+The `hotplug` cases give the dnsmasq script arguments (`DHCP_ACTION`,
+`DHCP_MAC`, `DHCP_IP`, `DHCP_HOST`) and its `DNSMASQ_*` environment
+(`DHCP_ENV`, one assignment per line). `dhcp-script.sh` runs with that
+environment only; the case records the variables it forwards to
+`hotplug.d/dhcp`, then the `dhcp.lease` event that lease-sync's hotplug
+script sends when run with them.
+
+The `lease-sync` cases change `/etc/config/lease-sync` and start the
+working-tree standalone lease-sync init script: they record its procd
+instance, log lines, and the generated `/etc/lease-sync/config` with its
+mode. A case whose `psk_key` reaches the log fails.
+
+An intended behaviour change is recorded by regenerating the expected
+files and committing their diff with the change:
+```bash
+CHAR_UPDATE=1 sh scenarios/24-characterization.sh
+```
+
+### LuCI Characterization (T25)
+
+| ID | Scenario | Validates |
+|----|----------|-----------|
+| T25 | LuCI Characterization | LuCI pages, staged UCI changes and layout unchanged; Status page matches rpcd; no console errors |
+
+T25 drives the LuCI pages of `ha-node1` with Playwright
+(`luci/luci-test.js`) and compares with `luci/expected/`:
+
+- `snapshot`: every page and edit modal rendered for each
+  `luci/fixtures/*.uci` config. Fixtures use the old option names; the
+  working-tree `uci-defaults` migration runs on them first.
+- `missing`: pages rendered with the `lease-sync` or `owsync` binary
+  removed, then with both removed and without the Software page
+  (`luci-app-package-manager`'s menu entry moved away): the install
+  hints link to it only when it exists.
+- `action`: UCI changes staged by scripted edits. Pages are saved, never
+  applied, so the running daemons are untouched.
+- `hint`: the sync sections of the General page and the Status page with
+  dnsmasq made authoritative: the hint sits under the DHCP config sync
+  when that applies, else under lease sync, and never on Status.
+- `layout`: overflow, overlap, alignment (labels, fields, help text,
+  table columns, row actions, headings), contrast of colours set by the
+  app, unlabeled cells in narrow layout, broken images, stored values
+  shown altered; at 1280 and 375 px, light and dark.
+
+It also checks that the Status page shows what `ubus call ha-cluster
+status` returns and that no page logs a console error. The node config is
+restored at the end. Screenshots of every page and modal are left in
+`logs/luci/screenshots` for review.
+
+The host needs Node.js and Playwright:
+```bash
+npm ci && npx playwright install chromium
+```
+
+`LUCI_MIGRATION` overrides the migration script; empty skips it (to run
+against a node image older than the migration). Expected files are
+regenerated as for T24:
+```bash
+CHAR_UPDATE=1 sh scenarios/25-luci.sh
+```
+
+### Package Upgrade (T26)
+
+| ID | Scenario | Validates |
+|----|----------|-----------|
+| T26 | Package Upgrade | `apk` upgrade from the packages before the sync model change migrates and keeps the config, restarts the daemons by the new rules, keeps the boot state, and is idempotent |
+
+T26 builds `ha-cluster-node-old` from `Containerfile.node` with the old
+`ha-cluster` and `luci-app-ha-cluster` packages in place of the new ones,
+then, for each configuration, starts a throwaway node (procd, no network,
+veth pairs for `lan` and `backend`), writes an old-model
+`/etc/config/ha-cluster` (a T24 `migration` case, or the file shipped by
+the old package), starts the cluster and runs `apk add` with the new
+packages from `packages/`. It checks that:
+
+- `apk` ran the new post-upgrade script, which consumed the
+  `uci-defaults` migration (`default_postinst` in `/lib/functions.sh`
+  sources the package's `/etc/uci-defaults` files when not installing to
+  an image root), kept ha-cluster enabled and started it once (one
+  `Starting HA cluster` syslog line: procd keeps unchanged instances
+  running, so their PIDs cannot tell a second start);
+- the config equals the T24 expected output of the same case, with no
+  old-model section or option left. An unedited shipped file is replaced
+  by the new one (T24 case `10`); an edited one is kept and migrated, and
+  `apk` leaves the new shipped file next to it as `ha-cluster.apk-new`;
+- the ha-cluster procd instances, daemons and generated configs follow
+  the new rules, keepalived holds the VIP, and a restart regenerates the
+  same configs and restarts keepalived. procd restarts owsync and
+  lease-sync on a config change, and sends keepalived SIGHUP; it
+  restarts keepalived when its instance parameters change. When the
+  generated `keepalived.conf` changed, keepalived must have started or
+  logged `Reloading` after the config was generated, so that it runs the
+  new one;
+- adding the same packages again runs nothing, and `apk fix --reinstall
+  ha-cluster` (which restores the migration file and runs post-upgrade)
+  changes neither the config, the daemons nor the boot state, starts
+  ha-cluster once, and neither restarts nor reloads keepalived. OpenWrt's
+  `apk` cannot index the package files, so the test puts the installed
+  one in `/etc/apk/cache` under the name `apk fix` looks for.
+
+A last case uses the T24 `13-production-node` config with ha-cluster and
+the standalone lease-sync disabled and ha-cluster stopped: the upgrade and
+a reinstall of ha-cluster and lease-sync keep both disabled and the
+configs unchanged. `default_postinst` starts a package's init scripts on
+an upgrade whatever their boot state, so this case reports the starts
+without checking them.
+
+The old packages are built from the last commit before the model change
+with the Docker SDK flow (about 30 minutes), from the feed root, into
+`packages/old/` (ignored by git):
+```bash
+git worktree add --detach /tmp/feed-old 4b618c7
+mkdir -p /tmp/feed-old-out
+docker run --rm --userns=keep-id -v /tmp/feed-old:/feed:ro \
+    -v /tmp/feed-old-out:/output ha-feed-build-local \
+    ha-cluster luci-app-ha-cluster
+mkdir -p tests/packages/old
+cp /tmp/feed-old-out/*/ha_feed/ha-cluster-[0-9]*.apk \
+    /tmp/feed-old-out/*/ha_feed/luci-app-ha-cluster-[0-9]*.apk tests/packages/old/
+git worktree remove /tmp/feed-old
+```
+(`ha-feed-build-local` is the local-checkout image of
+`docker/README.md`.) T26 fails if they are missing. Logs, configs and
+syslogs per case are left in `logs/upgrade/`.
+
+### Standalone lease-sync (T27)
+
+| ID | Scenario | Validates |
+|----|----------|-----------|
+| T27 | Standalone lease-sync | The lease-sync package's own init script, without ha-cluster, starts an encrypted daemon that stays up and replicates a lease; handing the port back from ha-cluster's daemon on stop never leaves two daemons on it |
+
+T27 stops ha-cluster on both nodes and enables the standalone lease-sync
+in `/etc/config/lease-sync` (peer, `security_mode`, `psk_key`). It checks
+that the daemon keeps the same pid over a window longer than procd's
+respawn delay, that the generated config holds the key and is readable by
+root only, that the key never reaches the syslog, and that a lease served
+by one node reaches the other. It then starts ha-cluster, which takes the
+standalone service over, and stops it on one node while sampling the
+holders of UDP 5378: ha-cluster's daemon must exit before ha-cluster
+restores the standalone service and before the standalone daemon
+initializes its socket, and no sample may show two holders. The
+cleanup restores `/etc/config/lease-sync` and restarts ha-cluster.
 
 ## Usage
 

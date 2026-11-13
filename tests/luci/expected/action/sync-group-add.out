@@ -1,0 +1,4 @@
+staged:
+set wireguard sync_group
+list-add wireguard config_files wireguard
+list-add wireguard config_files /etc/wireguard

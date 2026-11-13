@@ -89,13 +89,11 @@ test_owsync_running() {
             pass "owsync running on $node"
         else
             # Check if owsync is even supposed to be running
-            local sync_method
-            sync_method=$(uci_get "$node" "ha-cluster.config.sync_method" 2>/dev/null || echo "owsync")
-            if [ "$sync_method" = "owsync" ]; then
-                fail "owsync not running on $node (sync_method=$sync_method)"
+            if [ -n "$(get_enabled_sync_groups "$node")" ]; then
+                fail "owsync not running on $node (sync group enabled)"
                 return 1
             else
-                skip "owsync not expected (sync_method=$sync_method)" "by design"
+                skip "owsync not expected (no sync group enabled)" "by design"
             fi
         fi
     done
@@ -109,13 +107,13 @@ test_lease_sync_running() {
             pass "lease-sync running on $node"
         else
             # Check if lease sync is enabled
-            local sync_leases
-            sync_leases=$(uci_get "$node" "ha-cluster.dhcp.sync_leases" 2>/dev/null || echo "0")
-            if [ "$sync_leases" = "1" ]; then
-                fail "lease-sync not running on $node (sync_leases=$sync_leases)"
+            local lease_sync
+            lease_sync=$(uci_get "$node" "ha-cluster.config.lease_sync" 2>/dev/null || echo "0")
+            if [ "$lease_sync" = "1" ]; then
+                fail "lease-sync not running on $node (lease_sync=$lease_sync)"
                 return 1
             else
-                skip "lease-sync not expected (sync_leases=$sync_leases)" "disabled"
+                skip "lease-sync not expected (lease_sync=$lease_sync)" "disabled"
             fi
         fi
     done
@@ -123,6 +121,8 @@ test_lease_sync_running() {
 
 test_owsync_rpcd_status() {
     subheader "Owsync Rpcd Status Interface"
+
+    local rc=0
 
     for node in "$NODE1" "$NODE2"; do
         # Check if owsync rpcd handler is available
@@ -169,6 +169,7 @@ test_owsync_rpcd_status() {
             pass "owsync status reports enabled=$enabled_val on $node (standalone config)"
         else
             fail "owsync status enabled=$enabled_val on $node (expected $expected_enabled from owsync.general.enabled)"
+            rc=1
         fi
 
         syncdir_val=$(exec_node "$node" sh -c "ubus call owsync status 2>/dev/null | jsonfilter -e '@.config.sync_dir'")
@@ -176,6 +177,7 @@ test_owsync_rpcd_status() {
             pass "owsync status sync_dir=$syncdir_val on $node"
         else
             fail "owsync status sync_dir is empty on $node (UCI fallback broken?)"
+            rc=1
         fi
 
         peercount_val=$(exec_node "$node" sh -c "ubus call owsync status 2>/dev/null | jsonfilter -e '@.config.peer_count'")
@@ -183,6 +185,7 @@ test_owsync_rpcd_status() {
             pass "owsync status peer_count=$peercount_val on $node (integer, >=1)"
         else
             fail "owsync status peer_count='$peercount_val' on $node (expected a plain integer >=1)"
+            rc=1
         fi
 
         dbpath_val=$(exec_node "$node" sh -c "ubus call owsync status 2>/dev/null | jsonfilter -e '@.database.path'")
@@ -190,8 +193,11 @@ test_owsync_rpcd_status() {
             pass "owsync status db path=$dbpath_val on $node"
         else
             fail "owsync status db path=$dbpath_val on $node (expected /etc/owsync/owsync.db)"
+            rc=1
         fi
     done
+
+    return $rc
 }
 
 test_dnsmasq_ha_overlay() {
@@ -283,14 +289,13 @@ main() {
     test_ha_cluster_enabled || return 1
     test_keepalived_running || return 1
 
-    # Non-fatal: owsync may not run if sync_method is not 'owsync' or config sync is disabled
-    run_nonfatal test_owsync_running "optional service - depends on sync_method config"
+    # Non-fatal: owsync may not run if no sync group is enabled
+    run_nonfatal test_owsync_running "optional service - depends on sync groups"
 
-    # Non-fatal: owsync rpcd status interface (monitoring only)
-    run_nonfatal test_owsync_rpcd_status "optional - rpcd handler may not be installed"
+    test_owsync_rpcd_status || return 1
 
-    # Non-fatal: lease-sync may not run if sync_leases is disabled in ha-cluster config
-    run_nonfatal test_lease_sync_running "optional service - depends on sync_leases config"
+    # Non-fatal: lease-sync may not run if lease_sync is disabled in ha-cluster config
+    run_nonfatal test_lease_sync_running "optional service - depends on lease_sync config"
 
     test_dnsmasq_ha_overlay || return 1
     test_nodes_connectivity || return 1

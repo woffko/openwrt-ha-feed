@@ -745,6 +745,29 @@ wait_for_lease_removal_all() {
     return 1
 }
 
+# Delete every lease from both nodes, then let the delete retries expire.
+# Deletes on one node propagate to the peer, which echoes them back; the
+# echo fails and is retried for 15s, deleting any new lease for the same
+# address in that window.
+# Usage: clear_node_leases || fail "Could not clear leases"
+clear_node_leases() {
+    local node ip i
+    for node in "$NODE1" "$NODE2"; do
+        for ip in $(exec_node "$node" awk '{print $3}' /tmp/dhcp.leases 2>/dev/null); do
+            delete_lease "$node" "$ip" >/dev/null 2>&1 || true
+        done
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            if [ "$(get_lease_count "$NODE1")" = "0" ] &&
+               [ "$(get_lease_count "$NODE2")" = "0" ]; then
+                sleep 17
+                return 0
+            fi
+            sleep 1
+        done
+    done
+    return 1
+}
+
 # ============================================
 # UCI Helpers
 # ============================================
@@ -776,6 +799,21 @@ uci_commit() {
     else
         exec_node "$node" uci commit
     fi
+}
+
+# List the enabled sync groups of a node (no enabled option = enabled)
+# Usage: groups=$(get_enabled_sync_groups "node1")
+get_enabled_sync_groups() {
+    local node="$1"
+    exec_node "$node" sh -c '
+        . /lib/functions.sh
+        print_enabled() {
+            local enabled
+            config_get_bool enabled "$1" enabled 1
+            [ "$enabled" -eq 1 ] && echo "$1"
+        }
+        config_load ha-cluster
+        config_foreach print_enabled sync_group' 2>/dev/null
 }
 
 # ============================================
@@ -1130,10 +1168,10 @@ dhcp_request() {
     exec_client "$client" rm -f "/var/lib/dhcpcd/${interface}.lease" /var/lib/dhcpcd/duid 2>/dev/null || true
     sleep 1
 
-    # Request new lease with short timeout
+    # Request new lease; the timeout covers the server ping check and ARP probing
     # Use -4 for IPv4 only (avoids IPv6 read-only filesystem errors in containers)
     # Use -1 for one attempt, -t for timeout
-    exec_client "$client" dhcpcd -4 -1 -t 10 "$interface" 2>/dev/null
+    exec_client "$client" dhcpcd -4 -1 -t 20 "$interface" 2>/dev/null
 
     # Wait for IP to be assigned
     sleep 2

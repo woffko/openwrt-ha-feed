@@ -4,14 +4,44 @@
 
 . /lib/functions.sh
 . /usr/share/libubox/jshn.sh
+. /usr/lib/ha-cluster/ha-cluster.sh
 
-# Written by the ha-cluster backend
-OWSYNC_CONF="/var/run/ha-cluster/owsync.conf"
-LEASE_SYNC_CONF="/var/run/ha-cluster/lease-sync.conf"
+# Usage: keepalived_roles <keepalived dump JSON>
+# Prints one name:STATE line per instance. Called in a subshell, which
+# keeps the jshn state clean.
+keepalived_roles() {
+	local instances instance inst_name vrrp_state inst_role
+
+	json_load "$1" 2>/dev/null || return 1
+	json_select status 2>/dev/null || return 1
+	json_get_keys instances
+
+	for instance in $instances; do
+		json_select "$instance" || continue
+		inst_name=""
+		vrrp_state=""
+		if json_select data 2>/dev/null; then
+			json_get_var inst_name iname
+			json_get_var vrrp_state state
+			json_select ..
+		fi
+		json_select ..
+		[ -n "$inst_name" ] || continue
+
+		# VRRP_STATE_* values from keepalived's vrrp.h
+		case "$vrrp_state" in
+			1) inst_role="BACKUP" ;;
+			2) inst_role="MASTER" ;;
+			3) inst_role="FAULT" ;;
+			*) inst_role="UNKNOWN" ;;
+		esac
+
+		echo "$inst_name:$inst_role"
+	done
+}
 
 case "$1" in
 	list)
-		# List available methods and their parameters
 		json_init
 		json_add_object "generate_key"
 		json_close_object
@@ -24,7 +54,6 @@ case "$1" in
 	call)
 		case "$2" in
 			generate_key)
-				# Generate secure 256-bit encryption key
 				key=$(hexdump -n 32 -v -e '1/1 "%02x"' /dev/urandom 2>/dev/null)
 
 				if [ -z "$key" ] || [ ${#key} -ne 64 ]; then
@@ -42,9 +71,6 @@ case "$1" in
 				;;
 
 			status)
-				# Get comprehensive cluster status
-
-				# Initialize variables
 				node_role="UNKNOWN"
 				cluster_state="STOPPED"
 				services_ok=1
@@ -53,50 +79,26 @@ case "$1" in
 				instance_roles=""
 				owsync_required=0
 				lease_sync_required=0
+				owsync_wanted=0
+				lease_sync_wanted=0
 
-				# Check if ha-cluster is enabled
 				ha_enabled=$(get_bool "$(uci -q get ha-cluster.config.enabled)" 0)
 
 				if [ "$ha_enabled" != "1" ]; then
 					cluster_state="STOPPED"
 				else
-					# Get keepalived status via ubus
 					keepalived_data=$(ubus call keepalived dump 2>/dev/null)
 
 					if [ -n "$keepalived_data" ]; then
-						# Parse per-instance VRRP state (in subshell to avoid state pollution)
-						# Output format: instance_name:STATE per line
-						instance_roles=$(
-							. /usr/share/libubox/jshn.sh
-							json_load "$keepalived_data" 2>/dev/null || exit 1
-							json_select status 2>/dev/null || exit 1
-							json_get_keys instances
+						instance_roles=$(keepalived_roles "$keepalived_data")
 
-							for instance in $instances; do
-								json_select "$instance" || continue
-								inst_name=""
-								vrrp_state=""
-								if json_select data 2>/dev/null; then
-									json_get_var inst_name iname
-									json_get_var vrrp_state state
-									json_select ..
-								fi
-								json_select ..
-								[ -n "$inst_name" ] || continue
+						# The dump reads keepalived's stats file without waiting for
+						# it to be written and now and then finds none: retry once
+						if [ -z "$instance_roles" ]; then
+							keepalived_data=$(ubus call keepalived dump 2>/dev/null)
+							instance_roles=$(keepalived_roles "$keepalived_data")
+						fi
 
-								# VRRP_STATE_* values from keepalived's vrrp.h
-								case "$vrrp_state" in
-									1) inst_role="BACKUP" ;;
-									2) inst_role="MASTER" ;;
-									3) inst_role="FAULT" ;;
-									*) inst_role="UNKNOWN" ;;
-								esac
-
-								echo "$inst_name:$inst_role"
-							done
-						)
-
-						# Compute aggregate role from per-instance roles
 						has_fault=0
 						has_master=0
 						has_backup=0
@@ -127,13 +129,15 @@ case "$1" in
 						services_ok=0
 					fi
 
-					# Ensure node_role is always set (fallback if parsing failed)
-					node_role="${node_role:-UNKNOWN}"
-
 					# The backend writes a daemon config only when procd has to
 					# run that daemon
 					[ -f "$OWSYNC_CONF" ] && owsync_required=1
 					[ -f "$LEASE_SYNC_CONF" ] && lease_sync_required=1
+
+					# Would run if installed
+					config_load ha-cluster
+					ha_owsync_wanted && owsync_wanted=1
+					ha_lease_sync_wanted && lease_sync_wanted=1
 
 					if ! pgrep "keepalived" >/dev/null 2>&1; then
 						services_ok=0
@@ -146,35 +150,29 @@ case "$1" in
 					fi
 				fi
 
-				# Get sync statistics (MVP: timestamps only)
 				config_last_sync=0
 				lease_last_sync=0
 
-				# BusyBox doesn't support stat -c, use date -r instead
+				# OpenWrt's BusyBox has no stat(1)
 				owsync_db=""
 				[ -f "$OWSYNC_CONF" ] && owsync_db=$(sed -n 's/^database=//p' "$OWSYNC_CONF" | tail -n 1)
 				if [ -n "$owsync_db" ] && [ -f "$owsync_db" ]; then
 					config_last_sync=$(date -r "$owsync_db" +%s 2>/dev/null || echo 0)
 				fi
 
-				# Check dnsmasq lease file for last sync timestamp
-				# Get leasefile location from UCI (default: /tmp/dhcp.leases)
 				leasefile=$(uci -q get dhcp.@dnsmasq[0].leasefile)
 				leasefile=${leasefile:-/tmp/dhcp.leases}
 				if [ -f "$leasefile" ]; then
 					lease_last_sync=$(date -r "$leasefile" +%s 2>/dev/null || echo 0)
 				fi
 
-				# Build peer list and check connectivity in a single pass
 				json_init
 				json_add_string role "$node_role"
 
-				# Add per-instance roles
 				json_add_object instances
 				for entry in $instance_roles; do
 					inst_name="${entry%%:*}"
 					inst_role="${entry##*:}"
-					# Validate values
 					case "$inst_role" in
 						MASTER|BACKUP|FAULT|UNKNOWN) ;;
 						*) inst_role="UNKNOWN" ;;
@@ -206,13 +204,13 @@ case "$1" in
 						json_add_string name "${peer_name:-$peer_section}"
 						json_add_string address "$peer_addr"
 						json_add_boolean online "$peer_online"
+						json_add_boolean vrrp_only "$(get_bool "$(uci -q get "ha-cluster.$peer_section.vrrp_only")" 0)"
 						json_add_string last_seen "$last_seen"
 						json_close_object
 					fi
 				done
 				json_close_array
 
-				# Calculate cluster health (after single-pass peer ping)
 				if [ "$ha_enabled" != "1" ]; then
 					cluster_state="STOPPED"
 				elif [ "$services_ok" -eq 0 ]; then
@@ -225,10 +223,8 @@ case "$1" in
 				json_add_string state "$cluster_state"
 
 
-				# Add service status for frontend display with required flag
 				json_add_object services
 
-				# keepalived - always required
 				json_add_object "keepalived"
 				json_add_boolean required 1
 				svc_pid=$(pgrep -o "keepalived" 2>/dev/null)
@@ -256,6 +252,7 @@ case "$1" in
 				else
 					json_add_boolean required 0
 				fi
+				json_add_boolean wanted "$owsync_wanted"
 				svc_pid=$(pgrep -o "owsync" 2>/dev/null)
 				if [ -n "$svc_pid" ]; then
 					json_add_boolean running 1
@@ -281,6 +278,7 @@ case "$1" in
 				else
 					json_add_boolean required 0
 				fi
+				json_add_boolean wanted "$lease_sync_wanted"
 				svc_pid=$(pgrep -o "lease-sync" 2>/dev/null)
 				if [ -n "$svc_pid" ]; then
 					json_add_boolean running 1
@@ -311,7 +309,6 @@ case "$1" in
 				;;
 
 			apply)
-				# Reload ha-cluster service
 				if /etc/init.d/ha-cluster reload >/dev/null 2>&1; then
 					json_init
 					json_add_boolean success 1

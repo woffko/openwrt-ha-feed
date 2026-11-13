@@ -1,7 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025-2026 Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
-# /usr/lib/ha-cluster/ha-cluster.sh
 # Library functions for HA cluster management
 
 HA_CLUSTER_ROOT="${IPKG_INSTROOT:-}"
@@ -9,8 +8,7 @@ HA_CLUSTER_ROOT="${IPKG_INSTROOT:-}"
 . "${HA_CLUSTER_ROOT}/lib/config/uci.sh"
 
 HA_CLUSTER_CONFIG="/etc/config/ha-cluster"
-# Generated configs are placed in a dedicated directory to avoid conflicts
-# with standalone service init scripts (which use /tmp/*.conf). The directory
+# Separate from the standalone init scripts' /tmp/*.conf. The directory
 # lives under /var/run, which only root can populate, so no other local user
 # can pre-create it or plant files before the service starts.
 HA_CLUSTER_RUN_DIR="${HA_CLUSTER_RUN_DIR:-/var/run/ha-cluster}"
@@ -24,54 +22,41 @@ HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
 HA_IPV6_GUARD_STATE_DIR="${HA_CLUSTER_RUN_DIR}/ipv6-backup-guard"
 
-# Log level constants (matches syslog priorities)
 HA_LOG_LEVEL_ERROR=0
 HA_LOG_LEVEL_WARNING=1
 HA_LOG_LEVEL_INFO=2
 HA_LOG_LEVEL_DEBUG=3
 
-# Current log level (default: INFO)
 HA_LOG_LEVEL="${HA_LOG_LEVEL:-2}"
 
-# Initialize log level from UCI (call once at start)
 ha_log_init() {
 	config_load ha-cluster
 	config_get HA_LOG_LEVEL advanced log_level "2"
 }
 
-# Log error (always logged)
 ha_log_error() {
 	logger -t ha-cluster -p daemon.err "$@"
 }
 
-# Log warning (level >= 1)
 ha_log_warning() {
 	[ "$HA_LOG_LEVEL" -ge "$HA_LOG_LEVEL_WARNING" ] && \
 		logger -t ha-cluster -p daemon.warning "$@"
 }
 
-# Log info (level >= 2)
 ha_log_info() {
 	[ "$HA_LOG_LEVEL" -ge "$HA_LOG_LEVEL_INFO" ] && \
 		logger -t ha-cluster -p daemon.info "$@"
 }
 
-# Log debug (level >= 3)
 ha_log_debug() {
 	[ "$HA_LOG_LEVEL" -ge "$HA_LOG_LEVEL_DEBUG" ] && \
 		logger -t ha-cluster -p daemon.debug "$@"
 }
 
-# Convenience wrapper (maps to info level)
 ha_log() {
 	ha_log_info "$@"
 }
 
-# ============================================
-# Helper Functions to Reduce Code Duplication
-# ============================================
-
-# Generic list collector for config_list_foreach
 # Usage: _ha_list_result=""; config_list_foreach section option _ha_list_collect; myvar="$_ha_list_result"
 _ha_list_result=""
 _ha_list_collect() {
@@ -106,9 +91,8 @@ _ha_collect_managed_script() {
 	return 0
 }
 
-# Conditional append to config file
 # Usage: ha_conf_append "$file" "key" "$value" ["indent"]
-# Only appends if value is non-empty
+# No-op if value is empty.
 ha_conf_append() {
 	local file="$1"
 	local key="$2"
@@ -117,13 +101,11 @@ ha_conf_append() {
 	[ -n "$value" ] && echo "${indent}${key} ${value}" >> "$file"
 }
 
-# Convert netmask to CIDR prefix length
 # Usage: netmask_to_cidr "255.255.255.0" -> "24"
 netmask_to_cidr() {
 	local netmask="$1"
 	local cidr=0
 
-	# Convert each octet
 	for octet in $(echo "$netmask" | tr '.' ' '); do
 		case "$octet" in
 			255) cidr=$((cidr + 8)) ;;
@@ -142,27 +124,23 @@ netmask_to_cidr() {
 	echo "$cidr"
 }
 
-# Validate IPv6 address format (basic check)
-# Defense-in-depth: LuCI validates on input, keepalived validates on load
-# Usage: is_valid_ipv6 "fd00::1" -> returns 0 (valid) or 1 (invalid)
+# Usage: is_valid_ipv6 "fd00::1"
+# Coarse syntax check only; LuCI validates on input, keepalived on load.
 is_valid_ipv6() {
 	local addr="$1"
-	# Must contain at least one colon
 	case "$addr" in
 		*:*) ;;
 		*) return 1 ;;
 	esac
-	# Length check: 2 (::) to 39 (full form)
+	# "::" to fully expanded form
 	local len=${#addr}
 	[ "$len" -lt 2 ] || [ "$len" -gt 39 ] && return 1
-	# Only hex digits and colons allowed
 	case "$addr" in
 		*[!0-9a-fA-F:]*) return 1 ;;
 	esac
 	return 0
 }
 
-# Get global config value
 ha_get_config() {
 	local var="$1"
 	local default="$2"
@@ -171,9 +149,8 @@ ha_get_config() {
 	echo "$value"
 }
 
-# Collect peer addresses for unicast auto-derivation
-# Sets: _ha_peer_addresses (all peer address values)
-#        _ha_peer_source_address (first non-empty source_address found)
+# Sets: _ha_peer_addresses (all peer addresses)
+#       _ha_peer_source_address (first non-empty source_address)
 _ha_peer_addresses=""
 _ha_peer_source_address=""
 _ha_collect_peer_address() {
@@ -191,14 +168,14 @@ _ha_collect_peer_address() {
 	fi
 }
 
-# Peers running ha-cluster (sync_enabled, the default) and having an address
+# Peers running ha-cluster (not VRRP-only) and having an address
 _ha_sync_peer_count=0
 _ha_count_sync_peer() {
 	local section="$1"
-	local address sync_enabled
+	local address vrrp_only
 
-	config_get_bool sync_enabled "$section" sync_enabled 1
-	[ "$sync_enabled" -eq 0 ] && return 0
+	config_get_bool vrrp_only "$section" vrrp_only 0
+	[ "$vrrp_only" -eq 1 ] && return 0
 
 	config_get address "$section" address ""
 	[ -n "$address" ] && _ha_sync_peer_count=$((_ha_sync_peer_count + 1))
@@ -227,16 +204,10 @@ _ha_count_group_includes() {
 }
 
 # Usage: ha_owsync_wanted (ha-cluster config loaded)
-# owsync is the sync method, an enabled service section lists files and
-# there is a peer to sync with.
+# An enabled sync group lists files and there is a peer to sync with.
 ha_owsync_wanted() {
-	local sync_method
-
-	config_get sync_method config sync_method "owsync"
-	[ "$sync_method" = "owsync" ] || return 1
-
 	_ha_include_count=0
-	config_foreach _ha_count_group_includes service
+	config_foreach _ha_count_group_includes sync_group
 	[ "$_ha_include_count" -gt 0 ] && ha_has_sync_peer
 }
 
@@ -245,7 +216,7 @@ ha_owsync_wanted() {
 ha_lease_sync_wanted() {
 	local lease_sync
 
-	config_get_bool lease_sync dhcp sync_leases 0
+	config_get_bool lease_sync config lease_sync 0
 	[ "$lease_sync" -eq 1 ] && ha_has_sync_peer
 }
 
@@ -255,7 +226,6 @@ ha_lease_sync_active() {
 	ha_lease_sync_wanted && [ -x "$LEASE_SYNC_BIN" ]
 }
 
-# Generate keepalived configuration
 ha_generate_keepalived_conf() {
 	local node_name node_priority enable_notifications notification_email_from smtp_server
 	local max_auto_priority
@@ -270,7 +240,6 @@ ha_generate_keepalived_conf() {
 	config_get notification_email_from advanced notification_email_from ""
 	config_get smtp_server advanced smtp_server ""
 
-	# Collect peer addresses for unicast auto-derivation
 	_ha_peer_addresses=""
 	_ha_peer_source_address=""
 	config_foreach _ha_collect_peer_address peer
@@ -316,17 +285,13 @@ EOF
 	echo "}" >> "$KEEPALIVED_CONF"
 	echo "" >> "$KEEPALIVED_CONF"
 
-	# Generate VRRP scripts (health checks)
 	config_foreach ha_generate_vrrp_script script
-
-	# Generate VRRP instances (grouped by vrrp_instance section)
 	config_foreach ha_generate_vrrp_group vrrp_instance
 
 	ha_log "Keepalived configuration generated at $KEEPALIVED_CONF"
 	return 0
 }
 
-# Generate a VRRP script block
 ha_generate_vrrp_script() {
 	local section="$1"
 	local check_type script interval timeout weight rise fall user
@@ -362,7 +327,7 @@ EOF
 	echo "" >> "$KEEPALIVED_CONF"
 }
 
-# Write common VRRP instance options (shared between IPv4 and IPv6 instances)
+# Options shared by the IPv4 and IPv6 instances.
 # Uses parent-scope variables: nopreempt, preempt_delay, garp_master_delay,
 # track_ifaces, track_scripts, auth_type, auth_pass, unicast_peers, unicast_src_ip
 _ha_write_vrrp_instance_options() {
@@ -376,7 +341,6 @@ _ha_write_vrrp_instance_options() {
 
 	ha_conf_append "$KEEPALIVED_CONF" "garp_master_delay" "$garp_master_delay"
 
-	# Track interfaces
 	if [ -n "$track_ifaces" ]; then
 		echo "    track_interface {" >> "$KEEPALIVED_CONF"
 		for iface in $track_ifaces; do
@@ -392,7 +356,6 @@ _ha_write_vrrp_instance_options() {
 		echo "    }" >> "$KEEPALIVED_CONF"
 	fi
 
-	# Track scripts
 	if [ -n "$track_scripts" ]; then
 		echo "    track_script {" >> "$KEEPALIVED_CONF"
 		for script_name in $track_scripts; do
@@ -401,7 +364,6 @@ _ha_write_vrrp_instance_options() {
 		echo "    }" >> "$KEEPALIVED_CONF"
 	fi
 
-	# Authentication
 	if [ "$auth_type" != "none" ] && [ -n "$auth_pass" ]; then
 		cat >> "$KEEPALIVED_CONF" <<EOF
     authentication {
@@ -411,7 +373,6 @@ _ha_write_vrrp_instance_options() {
 EOF
 	fi
 
-	# Unicast peers
 	if [ -n "$unicast_peers" ]; then
 		if [ -n "$unicast_src_ip" ]; then
 			ha_conf_append "$KEEPALIVED_CONF" "unicast_src_ip" "$unicast_src_ip"
@@ -424,8 +385,8 @@ EOF
 	fi
 }
 
-# Callback to collect VIPs belonging to a specific vrrp_instance
-# Sets: _ha_vip_v4_addrs, _ha_vip_v6_addrs (space-separated "addr dev iface" entries)
+# Collects the enabled VIPs of $_ha_current_instance.
+# Sets: _ha_vip_v4_addrs, _ha_vip_v6_addrs (newline-separated "addr dev iface" entries)
 _ha_collect_vip_for_instance() {
 	local vip_section="$1"
 	local vip_enabled vip_instance vip_interface vip_interface_logical
@@ -456,7 +417,6 @@ _ha_collect_vip_for_instance() {
 		ha_log_debug "VIP $vip_section: using interface '$vip_iface_resolved' as-is"
 	fi
 
-	# Collect IPv4 address
 	if [ -n "$vip_address" ]; then
 		local cidr
 		cidr=$(netmask_to_cidr "$vip_netmask") || {
@@ -467,7 +427,6 @@ _ha_collect_vip_for_instance() {
 "
 	fi
 
-	# Collect IPv6 address
 	if [ -n "$vip_address6" ]; then
 		is_valid_ipv6 "$vip_address6" || { ha_log_error "VIP $vip_section: invalid IPv6 address (got: $vip_address6)"; return 1; }
 		case "$vip_prefix6" in
@@ -479,17 +438,70 @@ _ha_collect_vip_for_instance() {
 	fi
 }
 
-# Generate a VRRP group from a vrrp_instance section
-# Collects all enabled VIPs referencing this instance and generates
-# one keepalived vrrp_instance with all IPv4 addresses, plus a second
-# vrrp_instance (VRID+128) if any VIP has IPv6.
+# Usage: _ha_ip_family "addr" -> "4" or "6"
+_ha_ip_family() {
+	case "$1" in
+		*:*) echo 6 ;;
+		*) echo 4 ;;
+	esac
+}
+
+# Usage: _ha_write_vrrp_instance name vrid vips [evips]
+# Uses parent-scope variables of ha_generate_vrrp_group.
+_ha_write_vrrp_instance() {
+	local name="$1"
+	local inst_vrid="$2"
+	local vips="$3"
+	local evips="$4"
+
+	cat >> "$KEEPALIVED_CONF" <<EOF
+vrrp_instance ${name} {
+    state BACKUP
+    interface $interface
+    virtual_router_id $inst_vrid
+    priority $priority
+    advert_int $advert_int
+EOF
+
+	_ha_write_vrrp_instance_options "$name"
+
+	if [ -n "$vips" ]; then
+		echo "    virtual_ipaddress {" >> "$KEEPALIVED_CONF"
+		printf '%s' "$vips" >> "$KEEPALIVED_CONF"
+		echo "    }" >> "$KEEPALIVED_CONF"
+	else
+		# Only excluded VIPs: fatal for VRRPv3 (IPv6) without it
+		echo "    no_virtual_ipaddress" >> "$KEEPALIVED_CONF"
+	fi
+	if [ -n "$evips" ]; then
+		echo "    virtual_ipaddress_excluded {" >> "$KEEPALIVED_CONF"
+		printf '%s' "$evips" >> "$KEEPALIVED_CONF"
+		echo "    }" >> "$KEEPALIVED_CONF"
+	fi
+
+	cat >> "$KEEPALIVED_CONF" <<EOF
+
+    # Notify scripts for state changes
+    notify_master "/bin/busybox env -i ACTION=MASTER TYPE=INSTANCE NAME=${name} /sbin/hotplug-call keepalived"
+    notify_backup "/bin/busybox env -i ACTION=BACKUP TYPE=INSTANCE NAME=${name} /sbin/hotplug-call keepalived"
+    notify_fault "/bin/busybox env -i ACTION=FAULT TYPE=INSTANCE NAME=${name} /sbin/hotplug-call keepalived"
+}
+
+EOF
+}
+
+# A VRRP instance advertises a single address family. Multicast: one
+# keepalived vrrp_instance per UCI vrrp_instance for its IPv4 VIPs, plus a
+# second one (VRID+128) for its IPv6 VIPs. Unicast: a single instance in
+# the family of its unicast addresses, with the VIPs of the other family
+# as excluded (not advertised) addresses.
 ha_generate_vrrp_group() {
 	local section="$1"
 	local interface interface_logical vrid priority nopreempt track_interface
 	local advert_int preempt_delay garp_master_delay auth_type auth_pass unicast_src_ip
-	local track_ifaces="" track_scripts="" unicast_peers=""
+	local track_ifaces="" track_scripts="" unicast_peers="" unicast_family=""
+	local peer first_peer family_peers
 
-	# Get instance-level options
 	config_get interface_logical "$section" interface
 	config_get vrid "$section" vrid
 	config_get priority "$section" priority "$(ha_get_config node_priority 100)"
@@ -514,7 +526,7 @@ ha_generate_vrrp_group() {
 		ha_log_debug "vrrp_instance $section: using interface '$interface' as-is"
 	fi
 
-	# Validate VRID (1-127, 128+ reserved for IPv6)
+	# 128-255 are taken by the IPv6 instances (VRID+128)
 	case "$vrid" in
 		''|*[!0-9]*) ha_log_error "vrrp_instance $section: VRID must be a number (got: $vrid)"; return 1 ;;
 	esac
@@ -529,7 +541,6 @@ ha_generate_vrrp_group() {
 		''|*[!0-9]*) ha_log_error "vrrp_instance $section: advert_int must be a number (got: $advert_int)"; return 1 ;;
 	esac
 
-	# Collect track interfaces (list or single)
 	_ha_list_result=""
 	config_list_foreach "$section" track_interface _ha_list_collect
 	track_ifaces="$_ha_list_result"
@@ -546,19 +557,17 @@ ha_generate_vrrp_group() {
 	config_foreach _ha_collect_managed_script script
 	track_scripts="$_ha_list_result"
 
-	# Normalize auth_type
 	case "$auth_type" in
 		pass|PASS) auth_type="PASS" ;;
 		ah|AH) auth_type="AH" ;;
 	esac
 
-	# Collect unicast peers (per-instance explicit config)
 	_ha_list_result=""
 	config_list_foreach "$section" unicast_peer _ha_list_collect
 	unicast_peers="$_ha_list_result"
 
-	# Unicast auto-derivation: when vrrp_transport=unicast and no per-instance override,
-	# derive unicast_src_ip from peer source_address and unicast_peer from peer addresses
+	# Global unicast transport without a per-instance unicast_peer list:
+	# derive peers and source address from the peer sections
 	if [ "$_ha_vrrp_transport" = "unicast" ] && [ -z "$unicast_peers" ]; then
 		unicast_peers="$_ha_peer_addresses"
 		if [ -z "$unicast_src_ip" ] && [ -n "$_ha_peer_source_address" ]; then
@@ -567,50 +576,58 @@ ha_generate_vrrp_group() {
 		ha_log_debug "vrrp_instance $section: unicast auto-derived from peer config"
 	fi
 
-	if [ -n "$unicast_peers" ] && [ -z "$unicast_src_ip" ]; then
-		ha_log_warning "vrrp_instance $section has unicast_peer but no unicast_src_ip"
+	# keepalived takes the instance family from its first unicast address
+	# and skips the addresses of the other family
+	if [ -n "$unicast_peers" ]; then
+		for first_peer in $unicast_peers; do break; done
+		if [ -n "$unicast_src_ip" ]; then
+			unicast_family=$(_ha_ip_family "$unicast_src_ip")
+			for peer in $unicast_peers; do
+				[ "$(_ha_ip_family "$peer")" = "$unicast_family" ] && break
+			done
+			if [ "$(_ha_ip_family "$peer")" != "$unicast_family" ]; then
+				ha_log_error "vrrp_instance $section: no IPv$unicast_family unicast peer for unicast_src_ip $unicast_src_ip, ignoring it"
+				unicast_src_ip=""
+				unicast_family=$(_ha_ip_family "$first_peer")
+			fi
+		else
+			ha_log_warning "vrrp_instance $section has unicast_peer but no unicast_src_ip"
+			unicast_family=$(_ha_ip_family "$first_peer")
+		fi
+		family_peers=""
+		for peer in $unicast_peers; do
+			if [ "$(_ha_ip_family "$peer")" = "$unicast_family" ]; then
+				family_peers="$family_peers $peer"
+			else
+				ha_log_warning "vrrp_instance $section: ignoring unicast peer $peer (not IPv$unicast_family)"
+			fi
+		done
+		unicast_peers="$family_peers"
 	fi
 
-	# Collect all VIPs belonging to this instance
 	_ha_current_instance="$section"
 	_ha_vip_v4_addrs=""
 	_ha_vip_v6_addrs=""
 	config_foreach _ha_collect_vip_for_instance vip
 
-	# Must have at least one VIP
 	[ -z "$_ha_vip_v4_addrs" ] && [ -z "$_ha_vip_v6_addrs" ] && {
 		ha_log_warning "vrrp_instance $section has no enabled VIPs"
 		return 0
 	}
 
-	# Write IPv4 VRRP instance (if any IPv4 VIPs)
-	if [ -n "$_ha_vip_v4_addrs" ]; then
-		cat >> "$KEEPALIVED_CONF" <<EOF
-vrrp_instance ${section} {
-    state BACKUP
-    interface $interface
-    virtual_router_id $vrid
-    priority $priority
-    advert_int $advert_int
-EOF
-
-		_ha_write_vrrp_instance_options "$section"
-
-		echo "    virtual_ipaddress {" >> "$KEEPALIVED_CONF"
-		printf '%s' "$_ha_vip_v4_addrs" >> "$KEEPALIVED_CONF"
-		cat >> "$KEEPALIVED_CONF" <<EOF
-    }
-
-    # Notify scripts for state changes
-    notify_master "/bin/busybox env -i ACTION=MASTER TYPE=INSTANCE NAME=${section} /sbin/hotplug-call keepalived"
-    notify_backup "/bin/busybox env -i ACTION=BACKUP TYPE=INSTANCE NAME=${section} /sbin/hotplug-call keepalived"
-    notify_fault "/bin/busybox env -i ACTION=FAULT TYPE=INSTANCE NAME=${section} /sbin/hotplug-call keepalived"
-}
-
-EOF
+	if [ -n "$unicast_peers" ]; then
+		if [ "$unicast_family" = 6 ]; then
+			_ha_write_vrrp_instance "$section" "$vrid" "$_ha_vip_v6_addrs" "$_ha_vip_v4_addrs"
+		else
+			_ha_write_vrrp_instance "$section" "$vrid" "$_ha_vip_v4_addrs" "$_ha_vip_v6_addrs"
+		fi
+		return 0
 	fi
 
-	# Write IPv6 VRRP instance (if any IPv6 VIPs)
+	if [ -n "$_ha_vip_v4_addrs" ]; then
+		_ha_write_vrrp_instance "$section" "$vrid" "$_ha_vip_v4_addrs"
+	fi
+
 	if [ -n "$_ha_vip_v6_addrs" ]; then
 		local vrid6=$((vrid + 128))
 		if [ "$vrid6" -gt 255 ]; then
@@ -618,33 +635,10 @@ EOF
 			return 1
 		fi
 
-		cat >> "$KEEPALIVED_CONF" <<EOF
-vrrp_instance ${section}_v6 {
-    state BACKUP
-    interface $interface
-    virtual_router_id $vrid6
-    priority $priority
-    advert_int $advert_int
-EOF
-
-		_ha_write_vrrp_instance_options "${section}_v6"
-
-		echo "    virtual_ipaddress {" >> "$KEEPALIVED_CONF"
-		printf '%s' "$_ha_vip_v6_addrs" >> "$KEEPALIVED_CONF"
-		cat >> "$KEEPALIVED_CONF" <<EOF
-    }
-
-    # Notify scripts for state changes
-    notify_master "/bin/busybox env -i ACTION=MASTER TYPE=INSTANCE NAME=${section}_v6 /sbin/hotplug-call keepalived"
-    notify_backup "/bin/busybox env -i ACTION=BACKUP TYPE=INSTANCE NAME=${section}_v6 /sbin/hotplug-call keepalived"
-    notify_fault "/bin/busybox env -i ACTION=FAULT TYPE=INSTANCE NAME=${section}_v6 /sbin/hotplug-call keepalived"
-}
-
-EOF
+		_ha_write_vrrp_instance "${section}_v6" "$vrid6" "$_ha_vip_v6_addrs"
 	fi
 }
 
-# Generate owsync configuration file
 # Decide the sync security mode from sync_encryption and encryption_key.
 # Sets _ha_sync_encrypted to 1 (encrypted) or 0 (operator chose plain mode).
 # Returns 1 when encryption is wanted but the key is missing or malformed.
@@ -682,7 +676,7 @@ ha_generate_owsync_conf() {
 	config_load ha-cluster
 
 	if ! ha_owsync_wanted; then
-		ha_log_debug "Config sync: sync_method is not owsync, no enabled sync group or no peer to sync with"
+		ha_log_debug "Config sync: no enabled sync group or no peer to sync with"
 		rm -f "$OWSYNC_CONF"
 		return 0
 	fi
@@ -708,11 +702,9 @@ ha_generate_owsync_conf() {
 
 	ha_log "Generating owsync configuration"
 
-	# Generate config file with secure permissions (born 0600)
 	rm -f "$OWSYNC_CONF"
 	(umask 077; : > "$OWSYNC_CONF")
 
-	# Use bind_address if configured, otherwise default to :: for dual-stack
 	local owsync_bind="${bind_address:-::}"
 
 	cat > "$OWSYNC_CONF" <<EOF
@@ -745,16 +737,13 @@ EOF
 	fi
 	echo "" >> "$OWSYNC_CONF"
 
-	# Add peers
 	echo "# Peers" >> "$OWSYNC_CONF"
 	config_foreach ha_add_owsync_peer_conf peer
 	echo "" >> "$OWSYNC_CONF"
 
-	# Add includes (files to sync based on enabled services)
 	echo "# Include patterns (sync these files)" >> "$OWSYNC_CONF"
-	config_foreach ha_add_owsync_includes_conf service
+	config_foreach ha_add_owsync_includes_conf sync_group
 
-	# Add excludes
 	echo "" >> "$OWSYNC_CONF"
 	echo "# Exclude patterns (never sync these)" >> "$OWSYNC_CONF"
 	config_foreach ha_add_owsync_excludes_conf exclude
@@ -763,15 +752,13 @@ EOF
 	return 0
 }
 
-# Add peer to owsync config (uses global port from config)
-# Supports per-peer source_address for source address selection
-# Skips peers with sync_enabled=0 (non-OpenWrt peers)
+# vrrp_only=1 marks a peer not running ha-cluster
 ha_add_owsync_peer_conf() {
 	local section="$1"
-	local address source_address sync_enabled
+	local address source_address vrrp_only
 
-	config_get_bool sync_enabled "$section" sync_enabled 1
-	[ "$sync_enabled" -eq 0 ] && return 0
+	config_get_bool vrrp_only "$section" vrrp_only 0
+	[ "$vrrp_only" -eq 1 ] && return 0
 
 	config_get address "$section" address
 	config_get source_address "$section" source_address ""
@@ -787,7 +774,6 @@ ha_add_owsync_peer_conf() {
 	fi
 }
 
-# Add includes from enabled services
 ha_add_owsync_includes_conf() {
 	local section="$1"
 	local enabled
@@ -802,7 +788,6 @@ ha_add_owsync_include_conf() {
 	echo "include=$1" >> "$OWSYNC_CONF"
 }
 
-# Add excludes
 ha_add_owsync_excludes_conf() {
 	local section="$1"
 	config_list_foreach "$section" file ha_add_owsync_exclude_conf
@@ -812,8 +797,6 @@ ha_add_owsync_exclude_conf() {
 	echo "exclude=$1" >> "$OWSYNC_CONF"
 }
 
-
-# Generate lease-sync configuration (flat file for managed mode)
 ha_generate_lease_sync_conf() {
 	local lease_sync_port encryption_key
 	local sync_interval peer_timeout log_level node_name bind_address
@@ -846,7 +829,6 @@ ha_generate_lease_sync_conf() {
 
 	ha_log "Generating lease-sync configuration"
 
-	# Generate config file with secure permissions (born 0600, holds the key)
 	rm -f "$LEASE_SYNC_CONF"
 	(umask 077; : > "$LEASE_SYNC_CONF")
 
@@ -862,7 +844,7 @@ peer_timeout=${peer_timeout}
 log_level=${log_level}
 EOF
 
-	# Add bind_address if configured (prevents VIP from being used as source)
+	# Keeps the VIP from being picked as source address
 	if [ -n "$bind_address" ]; then
 		echo "bind_address=${bind_address}" >> "$LEASE_SYNC_CONF"
 		ha_log "lease-sync will bind to $bind_address"
@@ -890,21 +872,18 @@ EOF
 
 	echo "" >> "$LEASE_SYNC_CONF"
 
-	# Add peers
 	config_foreach ha_add_lease_sync_peer_flat peer
 
 	ha_log "lease-sync configuration generated at $LEASE_SYNC_CONF"
 	return 0
 }
 
-# Supports per-peer source_address for source address selection
-# Skips peers with sync_enabled=0 (non-OpenWrt peers)
 ha_add_lease_sync_peer_flat() {
 	local section="$1"
-	local address source_address sync_enabled
+	local address source_address vrrp_only
 
-	config_get_bool sync_enabled "$section" sync_enabled 1
-	[ "$sync_enabled" -eq 0 ] && return 0
+	config_get_bool vrrp_only "$section" vrrp_only 0
+	[ "$vrrp_only" -eq 1 ] && return 0
 
 	config_get address "$section" address
 	config_get source_address "$section" source_address ""
@@ -1118,11 +1097,9 @@ ha_validate_config() {
 
 	config_load ha-cluster
 
-	# Check if enabled
 	config_get_bool enabled config enabled 0
 	[ "$enabled" -eq 0 ] && return 0
 
-	# Validate VRIDs are unique across vrrp_instance sections
 	config_foreach ha_check_vrid_unique vrrp_instance
 
 	# Validate script definitions, managed instance references and legacy
@@ -1130,7 +1107,14 @@ ha_validate_config() {
 	config_foreach ha_check_script_section script
 	config_foreach ha_check_track_script_refs vrrp_instance
 
-	# Check for peer configuration
+	# owsync is the only sync backend
+	local sync_method
+	config_get sync_method config sync_method "owsync"
+	[ "$sync_method" != "owsync" ] && {
+		ha_log_error "sync_method '$sync_method' is not supported (only 'owsync')"
+		errors=$((errors + 1))
+	}
+
 	local peer_count=0
 	config_foreach ha_count_peers peer
 	[ "$peer_count" -eq 0 ] && {
@@ -1147,13 +1131,12 @@ ha_validate_config() {
 
 	# With sync_encryption enabled (the default) the key must be present and
 	# well-formed; otherwise owsync and lease-sync would start without any
-	# authentication of their peers. Checked as soon as the configuration
-	# asks for a sync daemon, installed or not; a cluster with nothing to
-	# sync or no peer to sync with runs no such daemon and needs no key.
+	# authentication of their peers. Only checked for a daemon that has
+	# work to do.
 	local encryption_key
 	config_get encryption_key config encryption_key ""
 	if ha_owsync_wanted || ha_lease_sync_wanted; then
-		ha_sync_encryption_mode "$encryption_key" || errors=1
+		ha_sync_encryption_mode "$encryption_key" || errors=$((errors + 1))
 	fi
 
 	# Warn only: /etc/config/dhcp belongs to the user
@@ -1173,37 +1156,33 @@ _ha_check_dnsmasq_authoritative() {
 	[ "$authoritative" -eq 1 ] && _ha_dnsmasq_authoritative=1
 }
 
-# Usage: ha_dhcp_authoritative_conflict (ha-cluster config loaded)
+# Usage: ha_dhcp_authoritative_conflict (ha-cluster config loaded, and
+# reloaded on return)
 # A dnsmasq section is authoritative while several nodes serve DHCP, as
-# lease sync or the enabled dhcp service section listing files implies: an
+# lease sync or the enabled dhcp sync group listing files implies: an
 # authoritative dnsmasq NAKs every request carrying another node's
 # server-id.
 ha_dhcp_authoritative_conflict() {
-	local sync_method group_type group_enabled group_files
+	local group_type group_enabled group_files
 
 	if ! ha_lease_sync_active; then
 		[ -x "$OWSYNC_BIN" ] || return 1
-		config_get sync_method config sync_method "owsync"
-		[ "$sync_method" = "owsync" ] || return 1
 		config_get group_type dhcp TYPE ""
-		[ "$group_type" = "service" ] || return 1
+		[ "$group_type" = "sync_group" ] || return 1
 		config_get_bool group_enabled dhcp enabled 1
 		config_get group_files dhcp config_files ""
 		[ "$group_enabled" -eq 1 ] && [ -n "$group_files" ] &&
 			ha_has_sync_peer || return 1
 	fi
 
-	# In a subshell: config_load keeps the options of the previous config,
-	# so /etc/config/dhcp would leak into same-named ha-cluster sections
-	(
-		_ha_dnsmasq_authoritative=0
-		config_load dhcp
-		config_foreach _ha_check_dnsmasq_authoritative dnsmasq
-		[ "$_ha_dnsmasq_authoritative" -eq 1 ]
-	)
+	_ha_dnsmasq_authoritative=0
+	config_load dhcp
+	config_foreach _ha_check_dnsmasq_authoritative dnsmasq
+	config_load ha-cluster
+
+	[ "$_ha_dnsmasq_authoritative" -eq 1 ]
 }
 
-# Check that each enabled VIP interface has force=1 in its dhcp section
 _ha_dhcp_force_checked=""
 _ha_check_dhcp_force() {
 	local section="$1"
@@ -1215,12 +1194,10 @@ _ha_check_dhcp_force() {
 	config_get interface "$section" interface ""
 	[ -z "$interface" ] && return 0
 
-	# Skip already-checked interfaces (multiple VIPs on same interface)
 	echo "$_ha_dhcp_force_checked" | grep -qw "$interface" && return 0
 	_ha_dhcp_force_checked="$_ha_dhcp_force_checked $interface"
 
-	# Find the dhcp pool section (type=dhcp) for this interface.
-	# Must exclude dnsmasq sections which also have an 'interface' option.
+	# Only type=dhcp sections: dnsmasq sections also have an 'interface' option
 	local dhcp_section force
 	dhcp_section=""
 	local _s
@@ -1232,7 +1209,7 @@ _ha_check_dhcp_force() {
 			break
 		fi
 	done
-	[ -z "$dhcp_section" ] && return 0  # No DHCP pool on this interface, nothing to check
+	[ -z "$dhcp_section" ] && return 0
 
 	force=$(uci -q get "dhcp.$dhcp_section.force")
 	if [ "$force" != "1" ]; then
@@ -1249,7 +1226,6 @@ ha_check_vrid_unique() {
 	config_get vrid "$section" vrid
 	[ -z "$vrid" ] && return 0
 
-	# Validate VRID range (1-127, 128+ reserved for IPv6)
 	case "$vrid" in
 		''|*[!0-9]*) ha_log_error "vrrp_instance $section: VRID must be a number (got: $vrid)"; errors=$((errors + 1)); return 1 ;;
 	esac
@@ -1259,7 +1235,7 @@ ha_check_vrid_unique() {
 		return 1
 	}
 
-	# Check uniqueness (global, not per-interface — instances are global)
+	# Unique across all instances, even on different interfaces
 	echo "$vrid_list" | grep -qw "$vrid" && {
 		ha_log_error "Duplicate VRID $vrid in vrrp_instance section $section"
 		errors=$((errors + 1))
@@ -1273,15 +1249,16 @@ ha_count_peers() {
 	peer_count=$((peer_count + 1))
 }
 
-# Manage standalone services (disable/enable)
+# Usage: ha_manage_services take_over|release
+# take_over stops and disables the standalone services, recording whether
+# each was enabled; release re-enables and starts those that were.
 ha_manage_services() {
-	local action="$1"  # "take_over" or "release"
+	local action="$1"
 	local state_file="/etc/ha-cluster/service_states"
 
 	mkdir -p /etc/ha-cluster
 
 	if [ "$action" = "take_over" ]; then
-		# Save current state and disable standalone services
 		ha_log "Taking over service management from standalone init scripts"
 
 		# State already captured (e.g. on reload): the services are already
@@ -1291,14 +1268,12 @@ ha_manage_services() {
 
 		for service in keepalived owsync lease-sync; do
 			if [ -x "/etc/init.d/$service" ]; then
-				# Save enabled state
 				if /etc/init.d/$service enabled 2>/dev/null; then
 					echo "$service=1" >> "$state_file"
 				else
 					echo "$service=0" >> "$state_file"
 				fi
 
-				# Stop and disable
 				/etc/init.d/$service stop 2>/dev/null
 				/etc/init.d/$service disable 2>/dev/null
 				ha_log "Disabled standalone service: $service"
@@ -1306,7 +1281,6 @@ ha_manage_services() {
 		done
 
 	elif [ "$action" = "release" ]; then
-		# Restore previous state
 		ha_log "Releasing service management back to standalone init scripts"
 
 		[ ! -f "$state_file" ] && return 0
@@ -1323,20 +1297,17 @@ ha_manage_services() {
 	fi
 }
 
-# dnsmasq conf-dir overlay for HA operation
-# ha-cluster drops a config file into dnsmasq's conf-dir to enable HA-required
-# options at runtime, without modifying /etc/config/dhcp.
+# Dropped into dnsmasq's conf-dir to enable HA-required options at runtime
+# without modifying /etc/config/dhcp.
 HA_DNSMASQ_OVERLAY_NAME="ha-cluster.conf"
 
-# Resolve dnsmasq's conf-dir path from UCI
-# The conf-dir path depends on the dnsmasq section name (e.g., cfg01411c)
-# matching the logic in dnsmasq's init script.
+# Same per-section default as dnsmasq's init script; first section wins.
 _ha_dnsmasq_confdir=""
 _ha_resolve_dnsmasq_confdir_cb() {
 	local cfg="$1"
 	[ -n "$_ha_dnsmasq_confdir" ] && return 0
 	config_get _ha_dnsmasq_confdir "$cfg" confdir "/tmp/dnsmasq${cfg:+.$cfg}.d"
-	# Strip any filter suffixes (confdir supports ",*.ext" filters)
+	# Strip a ",*.ext" filter suffix
 	_ha_dnsmasq_confdir="${_ha_dnsmasq_confdir%%,*}"
 }
 
@@ -1352,7 +1323,6 @@ ha_restart_dnsmasq() {
 	/etc/init.d/dnsmasq restart 2>/dev/null
 }
 
-# Writes the dnsmasq conf-dir overlay and restarts dnsmasq (at most once)
 ha_configure_dnsmasq() {
 	local lease_sync_active=0 needs_restart=0
 	local confdir overlay_path tmp_overlay
@@ -1372,8 +1342,7 @@ ha_configure_dnsmasq() {
 			# Call dhcp-script on lease renewals so lease-sync can track expiry changes
 			script-on-renewal
 		EOF
-		# Only restart dnsmasq when the overlay actually changes, otherwise a
-		# reload would needlessly drop DNS/DHCP even though content is fixed.
+		# Restart only on change: a restart briefly drops DNS/DHCP
 		if cmp -s "$tmp_overlay" "$overlay_path"; then
 			rm -f "$tmp_overlay"
 		else
@@ -1382,7 +1351,7 @@ ha_configure_dnsmasq() {
 			ha_log "Wrote dnsmasq HA overlay to $overlay_path"
 		fi
 	elif [ -f "$overlay_path" ]; then
-		# Left over from a run with lease sync active (reload or crash recovery)
+		# Left over from a run with lease sync active
 		rm -f "$overlay_path"
 		needs_restart=1
 		ha_log "Removed stale dnsmasq HA overlay"
@@ -1394,7 +1363,6 @@ ha_configure_dnsmasq() {
 	}
 }
 
-# Removes the dnsmasq conf-dir overlay and restarts dnsmasq
 ha_release_dnsmasq() {
 	local confdir overlay_path
 	confdir="$(ha_get_dnsmasq_confdir)"
@@ -1417,23 +1385,18 @@ ha_release_ipv6_guard() {
 	nft delete table inet "$HA_RA_GUARD_TABLE" >/dev/null 2>&1 || true
 }
 
-# Apply all configurations
 ha_apply_config() {
 	ha_log "Applying HA cluster configuration"
 
-	# Validate first
 	ha_validate_config || {
 		ha_log_error "Configuration validation failed"
 		return 1
 	}
 
-	# Take over service management from standalone init scripts
 	ha_manage_services "take_over"
-
-	# Configure dnsmasq for HA operation (conf-dir overlay + restart)
 	ha_configure_dnsmasq
 
-	# Generate configs - services will be started by ha-cluster init
+	# Services themselves are started by the init script
 	ha_generate_keepalived_conf
 	ha_generate_owsync_conf
 	ha_generate_lease_sync_conf
