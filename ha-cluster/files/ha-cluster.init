@@ -85,6 +85,11 @@ start_service() {
 	return 0
 }
 
+# Runs after start_service, on start and on reload
+service_started() {
+	ha_reconcile_ipv6_guard
+}
+
 stop_service() {
 	ha_log_info "Stopping HA cluster"
 

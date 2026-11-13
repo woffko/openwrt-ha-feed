@@ -4,8 +4,13 @@
 #
 # The keepalived instance holding the IPv6 VIPs of a vrrp_instance section
 # is <section>_v6 with multicast VRRP and <section> itself with unicast
-# VRRP, which keeps both families in one instance. Events of that instance
-# are handled, all others ignored.
+# VRRP, which keeps both families in one instance. The state of every
+# instance of a section is recorded when it changes; the nft sets are built
+# from the instance that holds the IPv6 VIPs at that moment.
+#
+# ACTION=RECONCILE, from the init script after a start or a reload, rebuilds
+# the sets without recording anything: keepalived sends no notify for an
+# instance that a reload keeps or removes.
 #
 # BACKUP/FAULT/STOP:
 #   - drop locally generated Router Advertisements on the interface
@@ -160,7 +165,8 @@ ipv6_instance_of() {
 	fi
 }
 
-# Sets SECTION, the vrrp_instance section of the event's instance.
+# Sets SECTION, the vrrp_instance section of the event's instance. Fails
+# for an instance that belongs to no section.
 should_handle_event() {
 	[ -n "${ACTION:-}" ] || return 1
 	[ -n "${NAME:-}" ] || return 1
@@ -174,8 +180,7 @@ should_handle_event() {
 		*) return 1 ;;
 	esac
 
-	SECTION="$(instance_section "$NAME")" || return 1
-	[ "$(ipv6_instance_of "$SECTION")" = "$NAME" ]
+	SECTION="$(instance_section "$NAME")"
 }
 
 desired_from_action() {
@@ -199,7 +204,13 @@ resolve_instance_device() {
 	logical="$(uci -q get "ha-cluster.${instance}.interface")"
 	[ -n "$logical" ] || return 1
 
-	device="$(uci -q get "network.${logical}.device")"
+	# The device netifd has for the interface, as the generator resolves
+	# it for keepalived; the network config when netifd has none
+	if [ -r "$GUARD_ROOT/lib/functions/network.sh" ]; then
+		. "$GUARD_ROOT/lib/functions/network.sh"
+		network_get_device device "$logical" 2>/dev/null || device=""
+	fi
+	[ -n "$device" ] || device="$(uci -q get "network.${logical}.device")"
 	[ -n "$device" ] || device="$(uci -q get "network.${logical}.ifname" | awk '{print $1}')"
 	[ -n "$device" ] || device="$logical"
 
@@ -270,7 +281,7 @@ write_latest_state() {
 	local path
 
 	mkdir -p "$STATE_DIR" || return 1
-	path="$(state_path "$SECTION")"
+	path="$(state_path "$NAME")"
 
 	STATE_CHANGED=1
 	if [ -f "$path" ]; then
@@ -317,12 +328,46 @@ cleanup() {
 	[ "${LOCK_HELD:-0}" = "1" ] && release_lock
 }
 
-collect_backup_ifaces() {
-	local file desired token action type name iface lladdr blocked
+# The states that count: for each section, the state of the keepalived
+# instance that holds its IPv6 VIPs now, with the device and the virtual
+# link-local address of the current config. One line per section:
+# desired|device|link-local|instance
+effective_states() {
+	local file desired token action type name iface lladdr section
 
 	for file in "$STATE_DIR"/*.state; do
 		[ -f "$file" ] || continue
 		IFS='|' read -r desired token action type name iface lladdr < "$file"
+		[ -n "$name" ] || continue
+
+		section="$(instance_section "$name")" || continue
+		[ "$(ipv6_instance_of "$section")" = "$name" ] || continue
+
+		iface="$(resolve_instance_device "$section")" || continue
+		lladdr="$(resolve_instance_lladdr "$section")" || lladdr=""
+		printf '%s|%s|%s|%s\n' "$desired" "$iface" "$lladdr" "$name"
+	done
+}
+
+# Drop the states of instances the keepalived config no longer has: an
+# instance removed by a reload sends no notify, and its BACKUP state would
+# block the interface for good. Not while the config holds no instance.
+prune_states() {
+	local file name
+
+	grep -q '^vrrp_instance ' "$KEEPALIVED_CONF" 2>/dev/null || return 0
+
+	for file in "$STATE_DIR"/*.state; do
+		[ -f "$file" ] || continue
+		name="$(basename "$file" .state)"
+		grep -qxF "vrrp_instance $name {" "$KEEPALIVED_CONF" || rm -f "$file"
+	done
+}
+
+collect_backup_ifaces() {
+	local desired iface lladdr name blocked
+
+	while IFS='|' read -r desired iface lladdr name; do
 		[ "$desired" = "BACKUP" ] || continue
 		[ -n "$iface" ] || continue
 
@@ -330,7 +375,9 @@ collect_backup_ifaces() {
 			*" $iface "*) ;;
 			*) blocked="${blocked:+$blocked }$iface" ;;
 		esac
-	done
+	done <<EOF
+$EFFECTIVE_STATES
+EOF
 
 	printf '%s\n' "$blocked"
 }
@@ -487,9 +534,7 @@ collect_ra_source_rules() {
 
 	[ "$SOURCE_GUARD" = "1" ] || return 0
 
-	for file in "$STATE_DIR"/*.state; do
-		[ -f "$file" ] || continue
-		IFS='|' read -r desired token action type name iface lladdr < "$file"
+	while IFS='|' read -r desired iface lladdr name; do
 		[ "$desired" = "MASTER" ] || continue
 		[ -n "$iface" ] || continue
 		[ -n "$lladdr" ] || continue
@@ -515,7 +560,9 @@ collect_ra_source_rules() {
 		seen_ifaces="${seen_ifaces}|$iface|"
 		rules="${rules}add rule inet $RA_TABLE output meta oifname \"$iface\" meta nfproto ipv6 ip6 saddr != $addr icmpv6 type 134 counter drop comment \"ha-cluster: drop RA with non-virtual source\"
 "
-	done
+	done <<EOF
+$EFFECTIVE_STATES
+EOF
 
 	printf '%s' "$rules"
 }
@@ -535,36 +582,11 @@ reconcile_ra_output_rules() {
 	}
 }
 
-# State files are named after the section. Earlier releases named them
-# after the instance, <section>_v6: such a file takes the section's name.
-# A file whose section has no IPv6 instance in the running keepalived
-# config is dropped: left in place, a BACKUP state of an instance that is
-# gone would block the interface for good.
-migrate_states() {
-	local file name section
-
-	[ -r "$KEEPALIVED_CONF" ] || return 0
-
-	for file in "$STATE_DIR"/*.state; do
-		[ -f "$file" ] || continue
-		name="$(basename "$file" .state)"
-
-		ipv6_instance_of "$name" >/dev/null && continue
-
-		section="${name%_v6}"
-		if [ "$section" != "$name" ] && [ ! -f "$STATE_DIR/$section.state" ] &&
-		   ipv6_instance_of "$section" >/dev/null; then
-			mv "$file" "$STATE_DIR/$section.state"
-		else
-			rm -f "$file"
-		fi
-	done
-}
-
 reconcile_all() {
 	local backup_ifaces source_rules
 
-	migrate_states
+	prune_states
+	EFFECTIVE_STATES="$(effective_states)"
 	backup_ifaces="$(collect_backup_ifaces)"
 	source_rules="$(collect_ra_source_rules)"
 
@@ -601,6 +623,18 @@ process_latest_states() {
 	done
 }
 
+if [ "${ACTION:-}" = "RECONCILE" ]; then
+	# Nothing recorded yet: nothing to rebuild
+	[ -d "$STATE_DIR" ] || exit 0
+	: > "$PENDING_FILE"
+	NAME="-"
+	DESIRED="-"
+	IFACE="-"
+	LLADDR="-"
+	TOKEN="reconcile:$$"
+	STATE_CHANGED=0
+else
+
 should_handle_event || exit 0
 
 DESIRED="$(desired_from_action "$ACTION")" || exit 0
@@ -616,13 +650,20 @@ TOKEN="${DESIRED}:$$:$(mono_ms)"
 
 write_latest_state "$DESIRED" "$TOKEN" "$IFACE" "$LLADDR" || exit 1
 
+# Recorded for a later reconcile; only the instance holding the IPv6 VIPs
+# changes the nft sets now
+[ "$(ipv6_instance_of "$SECTION")" = "$NAME" ] || exit 0
+
+fi
+
 if ! acquire_lock; then
 	[ "${STATE_CHANGED:-1}" = "1" ] && log_info "IPv6 BACKUP guard handler busy, queued desired=$DESIRED iface=$IFACE lladdr=$LLADDR name=$NAME token=$TOKEN"
 	exit 0
 fi
 
 LOCK_HELD=1
-trap 'cleanup' EXIT INT TERM
+trap 'cleanup' EXIT
+trap 'exit 1' INT TERM
 
 log_info "IPv6 BACKUP guard processing action=$ACTION desired=$DESIRED iface=$IFACE lladdr=$LLADDR name=$NAME token=$TOKEN"
 

@@ -250,6 +250,11 @@ ha_generate_keepalived_conf() {
 
 	ha_log "Generating keepalived configuration for node: $node_name"
 
+	# Written under another name and renamed once complete: the IPv6 BACKUP
+	# guard reads this file whenever keepalived reports a state change
+	local conf_final="$KEEPALIVED_CONF"
+	KEEPALIVED_CONF="${conf_final}.new"
+
 	# The file carries VRRP authentication passwords: root-only from creation.
 	rm -f "$KEEPALIVED_CONF"
 	(umask 077; : > "$KEEPALIVED_CONF")
@@ -287,6 +292,9 @@ EOF
 
 	config_foreach ha_generate_vrrp_script script
 	config_foreach ha_generate_vrrp_group vrrp_instance
+
+	KEEPALIVED_CONF="$conf_final"
+	mv -f "${conf_final}.new" "$conf_final"
 
 	ha_log "Keepalived configuration generated at $KEEPALIVED_CONF"
 	return 0
@@ -1384,6 +1392,19 @@ ha_release_ipv6_guard() {
 	rm -rf "${HA_CLUSTER_RUN_DIR}/ra-backup-guard" "${HA_CLUSTER_RUN_DIR}/ra-backup-guard.lock"
 	nft delete table inet "$HA_DHCPV6_GUARD_TABLE" >/dev/null 2>&1 || true
 	nft delete table inet "$HA_RA_GUARD_TABLE" >/dev/null 2>&1 || true
+}
+
+# Rebuild the IPv6 BACKUP guard from the generated keepalived config and the
+# recorded VRRP states. keepalived sends no notify for an instance that a
+# reload keeps or removes, so the handler is not called when, for example,
+# an IPv6 VIP is added to or removed from a section.
+ha_reconcile_ipv6_guard() {
+	local handler="${HA_CLUSTER_ROOT}/usr/lib/ha-cluster/ipv6-backup-guard"
+
+	[ -r "$handler" ] || handler="${HA_CLUSTER_ROOT}/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
+	[ -r "$handler" ] || return 0
+
+	ACTION=RECONCILE TYPE=INSTANCE NAME= /bin/sh "$handler" >/dev/null 2>&1 &
 }
 
 ha_apply_config() {
