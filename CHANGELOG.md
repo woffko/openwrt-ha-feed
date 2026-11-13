@@ -11,6 +11,55 @@ the major version changes when an upgrade needs action (configuration
 schema change, all nodes upgraded together). Each package keeps its own
 version.
 
+## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
+
+This fork merges upstream 2.0.0 and carries the changes below. Its
+packages are `ha-cluster` and `luci-app-ha-cluster` 2.0.0-r3,
+`lease-sync` 1.2.1-r4, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
+[Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
+upgrading a node.
+
+### ha-cluster
+- Sync encryption is fail closed. A sync daemon that has work does not
+  start without a valid `encryption_key`, and ha-cluster refuses to
+  start; plain mode is the explicit `sync_encryption '0'`, never a
+  fallback.
+- Generated configs live in `/var/run/ha-cluster`, a directory created
+  0700 and checked for its owner; files holding keys or passwords are
+  created 0600.
+- Package-managed dataplane health checks (`check_type 'dataplane'`):
+  carrier, optional LACP membership and interface-bound reachability,
+  attached to the VRRP instances a check lists.
+- IPv6 BACKUP guard: a BACKUP node drops its Router Advertisements and
+  incoming DHCPv6 requests, so that clients neither route through it nor
+  get addresses from it. With unicast VRRP, which since 2.0.0 keeps both
+  families in one instance, the guard follows that instance.
+- The upgrade script puts the guard handler of the installed release
+  back after a sysupgrade that kept `/etc/hotplug.d/keepalived/`.
+
+### luci-app-ha-cluster
+- "Encrypt Sync Traffic" switch on the General page, for the backend's
+  `sync_encryption`.
+- Dataplane health checks on the Keepalived (Advanced) page.
+- The peer address is passed to ping after `--`.
+
+### lease-sync, owsync, dnsmasq-ha
+- lease-sync: DHCPv6 leases identified by DUID and IAID, reflected
+  dnsmasq events suppressed, peers checked before a message is used.
+- owsync: connections accepted from the configured peers only, a cap on
+  the frame size before the handshake, peer file states validated, and a
+  fix for the crash when a tombstone expires.
+- dnsmasq-ha: DHCPv6 leases carry the client DUID over ubus; the
+  dhcp-script forwards only `NAME=value` lines to hotplug.
+
+### Tests
+- `tests/unit`: host-side tests, no container needed.
+- `tests/scripts/run-characterization-rootless.sh`: the T24 cases
+  without podman or docker, in a bubblewrap sandbox over an unpacked
+  OpenWrt rootfs. The expected outputs are the fork's; cases for the
+  fork's own behaviour are added.
+- T28, the DHCPv6 BACKUP guard scenario.
+
 ## [2.0.0] - 2026-10-24
 
 Before upgrading from 1.0.x, read

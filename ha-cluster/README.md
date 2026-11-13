@@ -102,6 +102,36 @@ The upgrade starts `/etc/init.d/ha-cluster` even if it was disabled with
 `/etc/init.d/ha-cluster disable` (standard OpenWrt packaging). The
 switch that the upgrade respects is ha-cluster's own `enabled` option.
 
+### Notes for this fork
+
+They add to the list above when a node runs this fork's packages.
+
+- **Encryption key.** As soon as a sync daemon has work (see
+  [Which daemons run](#which-daemons-run)), ha-cluster does not start
+  without a valid `encryption_key` (64 hexadecimal characters), keepalived
+  included. Set the same key on every node before upgrading, or
+  `sync_encryption '0'` to sync in plaintext on purpose.
+- **`sync_method 'none'`.** The migration turns it into `enabled '0'` on
+  every sync group and removes the option. Lease sync follows
+  `lease_sync` alone, as before.
+- **Authoritative DHCP.** Earlier releases of this fork made dnsmasq
+  authoritative through the overlay they wrote. The overlay no longer
+  does, and `/etc/config/dhcp` decides: set `authoritative '0'` on every
+  node (`uci set dhcp.@dnsmasq[0].authoritative='0'; uci commit dhcp`),
+  as [DHCP Prerequisites](#dhcp-prerequisites) explains. Until then
+  ha-cluster logs a warning.
+- **IPv6 BACKUP guard.** The handler follows `<name>_v6` with multicast
+  VRRP and `<name>` with unicast VRRP, and takes over the state files an
+  earlier handler wrote. Custom hooks in `/etc/hotplug.d/keepalived/`
+  that match `<name>_v6` need the same change for unicast instances.
+- **Advanced section.** Settings in an unnamed `config advanced` section
+  were ignored by the 1.0.x backend and take effect once the section is
+  named: check that they are the same on every node, `lease_sync_port`
+  first.
+- **sysupgrade with kept settings.** `/etc/hotplug.d/keepalived/` is kept
+  as a whole for custom hooks; the upgrade script replaces the guard
+  handler it finds there with the one of the new image at first boot.
+
 ## Dependencies
 
 - `keepalived` - VRRP failover (required)

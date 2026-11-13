@@ -27,11 +27,24 @@ A high-availability solution for OpenWrt routers, providing automatic failover, 
 - **Two or more routers** on a shared network segment
 - **dnsmasq-ha** (for DHCP lease sync)
 
-## woffko build branch
+## This fork
 
-Branch `woffko-ha-master-pr2-dnsmasq-cve-2026` is a build integration branch for the x86_64 OpenWrt 25.12.4 images. It is based on `pgaufillet/master`, includes PR #2 (`Fix HA DHCPv6 lease synchronization and BACKUP node suppression`), and adds local `dnsmasq-ha` 2.92 CVE backports as OpenWrt package patches.
+[woffko/openwrt-ha-feed](https://github.com/woffko/openwrt-ha-feed) follows
+upstream [pgaufillet/openwrt-ha-feed](https://github.com/pgaufillet/openwrt-ha-feed)
+and merges its 2.0.0 release. On top of it, it refuses to sync without an
+encryption key unless told otherwise, keeps its generated files in a
+root-only directory, adds dataplane health checks and an IPv6 guard that
+keeps clients from routing through a BACKUP node, and hardens the sync
+daemons. The list is in the [changelog](CHANGELOG.md), the points to
+check before an upgrade in
+[Notes for this fork](ha-cluster/README.md#notes-for-this-fork).
 
-This branch is intended to make the firmware build reproducible while PR #2 and the dnsmasq backports are not yet available from a single upstream feed ref.
+To build it, use this repository as the feed source instead of the
+upstream URL shown below, at the branch or commit you want:
+
+```bash
+echo "src-git ha_feed https://github.com/woffko/openwrt-ha-feed.git;<branch>" >> feeds.conf
+```
 
 ## Installation
 
