@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: MIT
 # Keep IPv6 HA advertisements authoritative for IPv6 VRRP instances.
 #
+# The keepalived instance holding the IPv6 VIPs of a vrrp_instance section
+# is <section>_v6 with multicast VRRP and <section> itself with unicast
+# VRRP, which keeps both families in one instance. Events of that instance
+# are handled, all others ignored.
+#
 # BACKUP/FAULT/STOP:
 #   - drop locally generated Router Advertisements on the interface
 #   - drop inbound DHCPv6 client requests on the interface
@@ -25,6 +30,9 @@ RUN_DIR="${RUN_DIR:-/var/run/ha-cluster}"
 STATE_DIR="$RUN_DIR/ipv6-backup-guard"
 LOCK_DIR="$RUN_DIR/ipv6-backup-guard.lock"
 PENDING_FILE="$STATE_DIR/.pending"
+KEEPALIVED_CONF="$RUN_DIR/keepalived.conf"
+# Where /lib/functions.sh is looked up; set by the unit tests only
+GUARD_ROOT="${HA_GUARD_ROOT:-}"
 
 VIRTUAL_LL_DEFAULT="${HA_RA_VIRTUAL_LL_DEFAULT:-fe80::5/64}"
 SOURCE_GUARD="${HA_RA_SOURCE_GUARD:-1}"
@@ -83,6 +91,76 @@ normalize_lladdr() {
 	esac
 }
 
+CONFIG_LOADED=0
+load_config() {
+	[ "$CONFIG_LOADED" = "1" ] && return 0
+	[ -r "$GUARD_ROOT/lib/functions.sh" ] || return 1
+
+	. "$GUARD_ROOT/lib/functions.sh"
+	config_load ha-cluster
+	CONFIG_LOADED=1
+}
+
+# Usage: instance_section <keepalived instance name>
+# Prints the vrrp_instance section the instance was generated from.
+instance_section() {
+	local name="$1"
+	local base="${1%_v6}"
+
+	if [ "$base" != "$name" ] && [ "$(uci -q get "ha-cluster.$base")" = "vrrp_instance" ]; then
+		printf '%s\n' "$base"
+		return 0
+	fi
+
+	[ "$(uci -q get "ha-cluster.$name")" = "vrrp_instance" ] || return 1
+	printf '%s\n' "$name"
+}
+
+_find_ipv6_vip() {
+	local section="$1"
+	local enabled vip_instance address6
+
+	[ "$FOUND_IPV6_VIP" = "1" ] && return 0
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+
+	config_get vip_instance "$section" vrrp_instance ""
+	[ "$vip_instance" = "$TARGET_INSTANCE" ] || return 0
+
+	config_get address6 "$section" address6 ""
+	[ -n "$address6" ] && FOUND_IPV6_VIP=1
+	return 0
+}
+
+section_has_ipv6_vip() {
+	load_config || return 1
+
+	TARGET_INSTANCE="$1"
+	FOUND_IPV6_VIP=0
+	config_foreach _find_ipv6_vip vip
+	[ "$FOUND_IPV6_VIP" = "1" ]
+}
+
+# Usage: ipv6_instance_of <vrrp_instance section>
+# Prints the name of the keepalived instance that holds the IPv6 VIPs of the
+# section, as the generated keepalived config has it. Fails when none does.
+ipv6_instance_of() {
+	local section="$1"
+
+	[ -r "$KEEPALIVED_CONF" ] || return 1
+
+	if grep -qxF "vrrp_instance ${section}_v6 {" "$KEEPALIVED_CONF"; then
+		printf '%s_v6\n' "$section"
+	elif grep -qxF "vrrp_instance ${section} {" "$KEEPALIVED_CONF" &&
+	     section_has_ipv6_vip "$section"; then
+		printf '%s\n' "$section"
+	else
+		return 1
+	fi
+}
+
+# Sets SECTION, the vrrp_instance section of the event's instance.
 should_handle_event() {
 	[ -n "${ACTION:-}" ] || return 1
 	[ -n "${NAME:-}" ] || return 1
@@ -91,15 +169,13 @@ should_handle_event() {
 		return 1
 	fi
 
-	case "$NAME" in
-		*_v6) ;;
+	case "$ACTION" in
+		MASTER|BACKUP|FAULT|STOP) ;;
 		*) return 1 ;;
 	esac
 
-	case "$ACTION" in
-		MASTER|BACKUP|FAULT|STOP) return 0 ;;
-		*) return 1 ;;
-	esac
+	SECTION="$(instance_section "$NAME")" || return 1
+	[ "$(ipv6_instance_of "$SECTION")" = "$NAME" ]
 }
 
 desired_from_action() {
@@ -117,7 +193,7 @@ desired_from_action() {
 }
 
 resolve_instance_device() {
-	local instance="${1%_v6}"
+	local instance="$1"
 	local logical device
 
 	logical="$(uci -q get "ha-cluster.${instance}.interface")"
@@ -158,12 +234,10 @@ resolve_instance_vip_lladdr() {
 		return $?
 	fi
 
-	[ -r /lib/functions.sh ] || return 1
+	load_config || return 1
 
-	. /lib/functions.sh
 	TARGET_INSTANCE="$instance"
 	FOUND_LLADDR=""
-	config_load ha-cluster
 	config_foreach _find_vip_lladdr vip
 
 	[ -n "$FOUND_LLADDR" ] || return 1
@@ -171,7 +245,7 @@ resolve_instance_vip_lladdr() {
 }
 
 resolve_instance_lladdr() {
-	local instance="${1%_v6}"
+	local instance="$1"
 	local lladdr
 
 	lladdr="$(uci -q get "ha-cluster.${instance}.virtual_link_local")"
@@ -196,7 +270,7 @@ write_latest_state() {
 	local path
 
 	mkdir -p "$STATE_DIR" || return 1
-	path="$(state_path "$NAME")"
+	path="$(state_path "$SECTION")"
 
 	STATE_CHANGED=1
 	if [ -f "$path" ]; then
@@ -461,9 +535,36 @@ reconcile_ra_output_rules() {
 	}
 }
 
+# State files are named after the section. Earlier releases named them
+# after the instance, <section>_v6: such a file takes the section's name.
+# A file whose section has no IPv6 instance in the running keepalived
+# config is dropped: left in place, a BACKUP state of an instance that is
+# gone would block the interface for good.
+migrate_states() {
+	local file name section
+
+	[ -r "$KEEPALIVED_CONF" ] || return 0
+
+	for file in "$STATE_DIR"/*.state; do
+		[ -f "$file" ] || continue
+		name="$(basename "$file" .state)"
+
+		ipv6_instance_of "$name" >/dev/null && continue
+
+		section="${name%_v6}"
+		if [ "$section" != "$name" ] && [ ! -f "$STATE_DIR/$section.state" ] &&
+		   ipv6_instance_of "$section" >/dev/null; then
+			mv "$file" "$STATE_DIR/$section.state"
+		else
+			rm -f "$file"
+		fi
+	done
+}
+
 reconcile_all() {
 	local backup_ifaces source_rules
 
+	migrate_states
 	backup_ifaces="$(collect_backup_ifaces)"
 	source_rules="$(collect_ra_source_rules)"
 
@@ -503,11 +604,11 @@ process_latest_states() {
 should_handle_event || exit 0
 
 DESIRED="$(desired_from_action "$ACTION")" || exit 0
-IFACE="$(resolve_instance_device "$NAME")" || {
+IFACE="$(resolve_instance_device "$SECTION")" || {
 	log_warning "Cannot resolve interface for IPv6 VRRP instance $NAME"
 	exit 0
 }
-LLADDR="$(resolve_instance_lladdr "$NAME")" || {
+LLADDR="$(resolve_instance_lladdr "$SECTION")" || {
 	log_warning "Cannot resolve virtual link-local address for IPv6 VRRP instance $NAME"
 	exit 0
 }
