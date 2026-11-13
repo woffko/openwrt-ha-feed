@@ -37,8 +37,10 @@ All VIPs share a single failover group and switch together. Use the Advanced pag
 <button> Add VIP...
 h3: Synchronization
 Keeps configuration files and DHCP leases identical on the cluster nodes. These settings must be the same on every node.
+config.sync_encryption [CBI.FlagValue] Encrypt Sync Traffic: [x]
+  help: AES-256-GCM for configuration and lease sync. While this is on and there is a peer to sync with, the cluster does not start without a valid key. Switch it off only on a link protected otherwise, such as a VPN.
 config.encryption_key [CBI.Value] Encryption Key: password= (placeholder "Click "Generate New Key" below to create a secure random key") button "∗"
-  help: 256-bit AES key (64 hexadecimal characters), used for both configuration and lease sync. Must be identical on all nodes. Leave empty to sync in plaintext.
+  help: 256-bit AES key (64 hexadecimal characters), used for both configuration and lease sync. Must be identical on all nodes.
 config._generate_key [CBI.ButtonValue] Generate New Key: button "Generate New Key"
 h3: Configuration Files
 config._group_dhcp [CBI.FlagValue] DHCP and DNS: [x]
@@ -77,8 +79,8 @@ The General page creates a single "main" instance for atomic failover of all VIP
 <input> 
 <button> Add
 h3: Health Checks (VRRP Scripts)
-Custom checks referenced by track_script. Examples: ping gateway, check DNS, verify VPN.
-| Name | Script | 
+Command checks may be referenced manually. Managed checks are attached to every selected VRRP instance automatically, including generated IPv6 instances.
+| Name | Check | VRRP Instance | 
 | This section contains no values yet
 <input> 
 <button> Add

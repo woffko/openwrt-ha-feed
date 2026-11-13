@@ -46,8 +46,10 @@ All VIPs share a single failover group and switch together. Use the Advanced pag
 <button> Add VIP...
 h3: Synchronization
 Keeps configuration files and DHCP leases identical on the cluster nodes. These settings must be the same on every node.
+config.sync_encryption [CBI.FlagValue] Encrypt Sync Traffic: [x]
+  help: AES-256-GCM for configuration and lease sync. While this is on and there is a peer to sync with, the cluster does not start without a valid key. Switch it off only on a link protected otherwise, such as a VPN.
 config.encryption_key [CBI.Value] Encryption Key: password=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef (placeholder "Click "Generate New Key" below to create a secure random key") button "∗"
-  help: 256-bit AES key (64 hexadecimal characters), used for both configuration and lease sync. Must be identical on all nodes. Leave empty to sync in plaintext.
+  help: 256-bit AES key (64 hexadecimal characters), used for both configuration and lease sync. Must be identical on all nodes.
 config._generate_key [CBI.ButtonValue] Generate New Key: button "Generate New Key"
 h3: Configuration Files
 config._group_dhcp [CBI.FlagValue] DHCP and DNS: [x]
@@ -143,9 +145,9 @@ The General page creates a single "main" instance for atomic failover of all VIP
 <input> 
 <button> Add
 h3: Health Checks (VRRP Scripts)
-Custom checks referenced by track_script. Examples: ping gateway, check DNS, verify VPN.
-| Name | Script | 
-| check_gateway: check_gateway | /bin/ping -c 1 -W 1 192.168.50.1 | [☰][Edit][Delete]
+Command checks may be referenced manually. Managed checks are attached to every selected VRRP instance automatically, including generated IPv6 instances.
+| Name | Check | VRRP Instance | 
+| check_gateway: check_gateway | /bin/ping -c 1 -W 1 192.168.50.1 | Manual | [☰][Edit][Delete]
 <input> 
 <button> Add
 h3: State Change Hooks
@@ -249,19 +251,22 @@ vpn.unicast_peer [CBI.DynamicList] Unicast Peer IPs: item=172.30.0.11
 <button> Save
 ==== keepalived-advanced modal check_gateway
 h4: High Availability - Advanced VRRP - check_gateway
+check_gateway.check_type [CBI.ListValue] Health Check Type: select=command {command,dataplane}
+check_gateway.vrrp_instance [CBI.DynamicList] Managed VRRP Instances: 
+  help: Automatically track this check from every selected instance. Select all internal gateway groups that must move together; no manual VRRP Instance edit is needed.
 check_gateway.script [CBI.Value] Script Command: value=/bin/ping -c 1 -W 1 192.168.50.1 (placeholder "/bin/ping -c 1 -W 1 8.8.8.8")
   help: Command returning 0 for success. Use absolute paths.
 check_gateway.interval [CBI.Value] Interval: value=5 (placeholder "5")
   help: Seconds between checks.
 check_gateway.timeout [CBI.Value] Timeout: value=2 (placeholder "2")
-  help: Max seconds for script.
-check_gateway.weight [CBI.Value] Weight: value=-10 (placeholder "-10")
-  help: Priority adjustment on failure (e.g., -10).
+  help: Maximum seconds for the complete check. For dataplane checks, allow for all targets to time out.
+check_gateway.weight [CBI.Value] Weight: value=-10 (placeholder "0")
+  help: Leave empty or use 0 to put the instance in FAULT after repeated failures. A non-zero value only adjusts priority.
 check_gateway.rise [CBI.Value] Rise: value=2 (placeholder "2")
   help: Successes before healthy.
 check_gateway.fall [CBI.Value] Fall: value=2 (placeholder "2")
   help: Failures before unhealthy.
-check_gateway.user [CBI.Value] User: value= (placeholder "nobody")
+check_gateway.user [CBI.Value] User: value= (placeholder "root")
   help: Run as user (default: root).
 <button> Dismiss
 <button> Save
