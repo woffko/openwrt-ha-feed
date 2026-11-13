@@ -18,7 +18,7 @@ var callGetInterfaces = rpc.declare({
 });
 
 var hooksPath = '/etc/hotplug.d/keepalived';
-var systemHook = null;
+var systemHook = '20-ipv6-backup-guard';
 
 var hookTemplate = '#!/bin/sh\n' +
 	'# Keepalived state change hook\n' +
@@ -457,7 +457,7 @@ return view.extend({
 		o.optional = true;
 		o.modalonly = true;
 		o.validate = function(section_id, value) {
-			var checkType = checkTypeOption.formvalue(section_id) || 'command';
+			var checkType = this.section.formvalue(section_id, 'check_type') || 'command';
 			var instances = this.formvalue(section_id);
 			if (checkType === 'dataplane' && (!instances || instances.length === 0))
 				return _('At least one managed VRRP instance is required for a dataplane check.');
@@ -471,7 +471,7 @@ return view.extend({
 		o.optional = true;
 		o.modalonly = true;
 		o.validate = function(section_id, value) {
-			var checkType = checkTypeOption.formvalue(section_id) || 'command';
+			var checkType = this.section.formvalue(section_id, 'check_type') || 'command';
 			if (checkType !== 'command')
 				return true;
 			if (!value)
@@ -499,7 +499,7 @@ return view.extend({
 			return device;
 		};
 		o.validate = function(section_id, value) {
-			var checkType = checkTypeOption.formvalue(section_id) || 'command';
+			var checkType = this.section.formvalue(section_id, 'check_type') || 'command';
 			if (checkType === 'dataplane' && !value)
 				return _('A dataplane device is required.');
 			return true;
@@ -510,7 +510,7 @@ return view.extend({
 		o.depends('check_type', 'dataplane');
 		o.value('', _('None'));
 		netDevs.forEach(function(dev) {
-			if (dev.getName && dev.getType && dev.getType() === 'bonding')
+			if (dev.getName && dev.dev && dev.dev.devtype === 'bond')
 				o.value(dev.getName(), dev.getName());
 		});
 		o.optional = true;
@@ -525,64 +525,87 @@ return view.extend({
 		o = s.option(form.DynamicList, 'target', _('Probe Targets'),
 			_('Literal IPv4 or IPv6 addresses reachable through the dataplane device. Local addresses are skipped automatically.'));
 		o.depends('check_type', 'dataplane');
-		o.datatype = 'ipaddr';
+		o.datatype = 'ipaddr("nomask")';
 		o.rmempty = false;
 		o.modalonly = true;
 
 		o = s.option(form.Value, 'min_success', _('Minimum Successful Targets'),
 			_('The check succeeds as soon as this many non-local targets reply. Use 1 to fail only when every target is unreachable.'));
 		o.depends('check_type', 'dataplane');
-		o.datatype = 'range(1,64)';
+		o.datatype = 'and(uinteger,range(1,64))';
 		o.default = '1';
 		o.rmempty = false;
 		o.modalonly = true;
+		o.validate = function(section_id, value) {
+			var targets = L.toArray(this.section.formvalue(section_id, 'target')).length;
+			if (value && targets > 0 && +value > targets)
+				return _('Not more than the number of probe targets (%d).').format(targets);
+			return true;
+		};
 
 		o = s.option(form.Value, 'min_lacp_members', _('Minimum LACP Members'),
 			_('Minimum active members reported by the parent bond. Use 0 to disable this check.'));
 		o.depends('check_type', 'dataplane');
-		o.datatype = 'range(0,64)';
+		o.datatype = 'and(uinteger,range(0,64))';
 		o.default = '0';
 		o.rmempty = false;
 		o.modalonly = true;
+		o.validate = function(section_id, value) {
+			if (+value > 0 && !this.section.formvalue(section_id, 'bond'))
+				return _('Select the LACP bond device, or use 0.');
+			return true;
+		};
 
 		o = s.option(form.Value, 'probe_timeout', _('Per-Target Probe Timeout'),
 			_('Seconds allowed for each individual ping. Keep the VRRP script timeout above the worst-case total.'));
 		o.depends('check_type', 'dataplane');
-		o.datatype = 'range(1,60)';
+		o.datatype = 'and(uinteger,range(1,60))';
 		o.default = '1';
 		o.rmempty = false;
 		o.modalonly = true;
 
 		o = s.option(form.Value, 'interval', _('Interval'),
 			_('Seconds between checks.'));
-		o.datatype = 'uinteger';
+		o.datatype = 'and(uinteger,range(1,86400))';
 		o.placeholder = '5';
 		o.modalonly = true;
 
 		o = s.option(form.Value, 'timeout', _('Timeout'),
 			_('Maximum seconds for the complete check. For dataplane checks, allow for all targets to time out.'));
-		o.datatype = 'uinteger';
+		o.datatype = 'and(uinteger,range(1,86400))';
 		o.placeholder = '2';
 		o.optional = true;
 		o.modalonly = true;
+		o.validate = function(section_id, value) {
+			// As the backend: every target may time out in turn
+			if ((this.section.formvalue(section_id, 'check_type') || 'command') !== 'dataplane')
+				return true;
+			var targets = L.toArray(this.section.formvalue(section_id, 'target')).length;
+			var probe = +(this.section.formvalue(section_id, 'probe_timeout') || 1);
+			var effective = +(value || this.section.formvalue(section_id, 'interval') || 5);
+			var needed = targets * probe + 1;
+			if (targets > 0 && effective < needed)
+				return _('At least %d seconds for %d targets (targets × probe timeout + 1); an empty timeout means the interval.').format(needed, targets);
+			return true;
+		};
 
 		o = s.option(form.Value, 'weight', _('Weight'),
 			_('Leave empty or use 0 to put the instance in FAULT after repeated failures. A non-zero value only adjusts priority.'));
-		o.datatype = 'range(-253,253)';
+		o.datatype = 'and(integer,range(-253,253))';
 		o.placeholder = '0';
 		o.optional = true;
 		o.modalonly = true;
 
 		o = s.option(form.Value, 'rise', _('Rise'),
 			_('Successes before healthy.'));
-		o.datatype = 'uinteger';
+		o.datatype = 'and(uinteger,range(1,255))';
 		o.placeholder = '2';
 		o.optional = true;
 		o.modalonly = true;
 
 		o = s.option(form.Value, 'fall', _('Fall'),
 			_('Failures before unhealthy.'));
-		o.datatype = 'uinteger';
+		o.datatype = 'and(uinteger,range(1,255))';
 		o.placeholder = '2';
 		o.optional = true;
 		o.modalonly = true;
@@ -593,6 +616,11 @@ return view.extend({
 		o.placeholder = 'root';
 		o.optional = true;
 		o.modalonly = true;
+		o.validate = function(section_id, value) {
+			if (value && !/^[A-Za-z0-9_]+$/.test(value))
+				return _('Letters, digits and underscores only.');
+			return true;
+		};
 
 		return m.render().then(L.bind(function(mapEl) {
 			var hooksTable = E('table', { 'class': 'table cbi-section-table' }, [
