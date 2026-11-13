@@ -160,7 +160,7 @@ state() {
     node_sh '
         echo "instances: $(ubus call service list "{\"name\":\"ha-cluster\"}" 2>/dev/null |
             jsonfilter -e "@[\"ha-cluster\"].instances[*].pid" 2>/dev/null | tr "\n" " ")"
-        for f in /tmp/ha-cluster/* /tmp/dnsmasq*.d/ha-cluster.conf /etc/ha-cluster/*; do
+        for f in /var/run/ha-cluster/* /tmp/dnsmasq*.d/ha-cluster.conf /etc/ha-cluster/*; do
             [ -f "$f" ] && md5sum "$f"
         done
         md5sum /etc/config/ha-cluster'
@@ -399,11 +399,11 @@ test_case() {
     for expected in keepalived owsync lease-sync; do
         case " $after " in
             *" $expected "*)
-                node_sh "pgrep $expected >/dev/null && [ -s /tmp/ha-cluster/$expected.conf ]" ||
+                node_sh "pgrep $expected >/dev/null && [ -s /var/run/ha-cluster/$expected.conf ]" ||
                     { fail "$case_name: $expected not running or its config missing"; rc=1; }
                 ;;
             *)
-                node_sh "! pgrep $expected >/dev/null && [ ! -e /tmp/ha-cluster/$expected.conf ]" ||
+                node_sh "! pgrep $expected >/dev/null && [ ! -e /var/run/ha-cluster/$expected.conf ]" ||
                     { fail "$case_name: $expected running or its config present"; rc=1; }
                 ;;
         esac

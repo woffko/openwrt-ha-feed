@@ -39,9 +39,9 @@ TEST_DIR="$(dirname "$SCRIPT_DIR")"
 # Configuration
 # ============================================
 
-KEEPALIVED_CONF="/tmp/ha-cluster/keepalived.conf"
-OWSYNC_CONF="/tmp/ha-cluster/owsync.conf"
-LEASE_SYNC_CONF="/tmp/ha-cluster/lease-sync.conf"
+KEEPALIVED_CONF="/var/run/ha-cluster/keepalived.conf"
+OWSYNC_CONF="/var/run/ha-cluster/owsync.conf"
+LEASE_SYNC_CONF="/var/run/ha-cluster/lease-sync.conf"
 STATE_FILE="/etc/ha-cluster/service_states"
 CLIENT1="ha-client1"
 

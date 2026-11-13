@@ -25,7 +25,7 @@ TEST_DIR="$(dirname "$SCRIPT_DIR")"
 CAPTURE_FILE="/tmp/lease-sync-capture.pcap"
 CAPTURE_DURATION=5
 LEASE_SYNC_PORT=5378
-LEASE_SYNC_CONF="/tmp/ha-cluster/lease-sync.conf"
+LEASE_SYNC_CONF="/var/run/ha-cluster/lease-sync.conf"
 AUTH_FAILURE="lease-sync\[[0-9]*\]: Received message with invalid authentication tag"
 
 # DHCP client for generating real sync traffic

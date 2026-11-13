@@ -1,5 +1,5 @@
 #!/bin/sh
-# 23-dhcpv6-backup-guard.sh - Regression test for DHCPv6 BACKUP suppression
+# 28-dhcpv6-backup-guard.sh - Regression test for DHCPv6 BACKUP suppression
 #
 # Validates that a node which was temporary MASTER and then returns to BACKUP
 # does not answer DHCPv6 client traffic and does not publish local DHCPv6 lease
@@ -153,7 +153,7 @@ cleanup() {
 }
 
 main() {
-    header "T23: DHCPv6 BACKUP Guard"
+    header "T28: DHCPv6 BACKUP Guard"
     info "Validates that BACKUP nodes do not answer DHCPv6 or publish local DHCPv6 leases"
 
     local result=0

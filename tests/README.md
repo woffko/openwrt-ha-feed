@@ -13,8 +13,11 @@ access:
 ```
 
 They validate the package-managed dataplane checker, UCI validation, generated
-Keepalived script blocks, automatic multi-instance IPv4/IPv6 attachment, and
-compatibility with explicit `track_script` references.
+Keepalived script blocks, automatic multi-instance IPv4/IPv6 attachment,
+compatibility with explicit `track_script` references, the rules that start
+the sync daemons and ask for the encryption key, the dnsmasq overlay, the
+upgrade script's handling of the IPv6 BACKUP guard handler, and which VRRP
+instance that handler follows with multicast and with unicast VRRP.
 
 Then run the container integration suite:
 
@@ -432,6 +435,22 @@ running cluster; the host needs `python3`. The bind mounts carry no
 SELinux label option: on an SELinux host, relabel the feed checkout or
 run T24 with SELinux permissive.
 
+Without podman or docker, `scripts/run-characterization-rootless.sh` runs
+the same cases with the same harness and expected files in a bubblewrap
+sandbox, as an unprivileged user, over an unpacked OpenWrt rootfs that has
+the HA packages (the `root-*` directory or the unsquashed rootfs image of
+an OpenWrt build):
+
+```bash
+CHAR_ROOTFS=/path/to/rootfs ./scripts/run-characterization-rootless.sh
+CHAR_ROOTFS=/path/to/rootfs ./scripts/run-characterization-rootless.sh migration
+```
+
+The cases list `/etc/rc.d`: when the rootfs has services the node image
+does not, hide them, for example `CHAR_HIDE_INITD=keepalived-inotify` for
+a build with keepalived-sync. `CHAR_UPDATE=1` rewrites the expected files
+here too.
+
 A case file is sourced with `set -e` before the start: it changes UCI,
 creates or removes files, and sets the stub inputs (`FAKE_RUNNING`,
 `FAKE_ONLINE`, `FAKE_KEEPALIVED`). `STEP2=reload|stop`, with an optional
@@ -593,6 +612,15 @@ holders of UDP 5378: ha-cluster's daemon must exit before ha-cluster
 restores the standalone service and before the standalone daemon
 initializes its socket, and no sample may show two holders. The
 cleanup restores `/etc/config/lease-sync` and restarts ha-cluster.
+
+### DHCPv6 BACKUP guard (T28)
+
+| ID | Scenario | Validates |
+|----|----------|-----------|
+| T28 | DHCPv6 BACKUP guard | A BACKUP node drops DHCPv6 requests on its VIP interfaces and a MASTER answers them |
+
+T28 belongs to this fork, which adds the IPv6 BACKUP guard handler
+(`/etc/hotplug.d/keepalived/20-ipv6-backup-guard`).
 
 ## Usage
 
