@@ -123,14 +123,14 @@ write_config() {
 	add_option config enabled 1
 	add_option config node_priority 200
 	add_option config vrrp_transport multicast
-	add_option config sync_method none
+	add_option config lease_sync 0
 
 	add_option advanced TYPE advanced
 	add_option advanced max_auto_priority 0
 	add_option advanced enable_notifications 0
 
-	add_option dhcp TYPE service
-	add_option dhcp sync_leases 0
+	add_option dhcp TYPE sync_group
+	add_option dhcp enabled 0
 
 	add_option peer1 TYPE peer
 	add_option peer1 address 192.0.2.2
@@ -215,10 +215,12 @@ if ! ha_validate_config; then
 fi
 echo 'ok - valid managed and legacy checks pass validation'
 
-set +e
+# The library is not written for "set -u": a multicast instance is written
+# without the fourth argument, the VIPs of the other family
+set +eu
 ha_generate_keepalived_conf
 generate_status=$?
-set -e
+set -eu
 [ "$generate_status" -eq 0 ] || {
 	echo "not ok - configuration generation failed with status $generate_status" >&2
 	exit 1

@@ -4,8 +4,12 @@
 # The uci-defaults script of ha-cluster: the IPv6 BACKUP guard handler a
 # sysupgrade brought back from the previous image, the handlers of earlier
 # releases, the name of the advanced section and the persist interval. Runs
-# the script against a temporary root and a stand-in for uci, without a
-# router.
+# the script against a temporary root and stand-ins for uci and
+# /lib/functions.sh, without a router.
+#
+# The migration to the sync group model needs a real uci: it is covered by
+# tests/characterization/migration (scenario 24, or
+# tests/scripts/run-characterization-rootless.sh).
 
 set -eu
 
@@ -16,19 +20,44 @@ HOOKS="$TEST_ROOT/etc/hotplug.d/keepalived"
 GUARD="$TEST_ROOT/usr/lib/ha-cluster/ipv6-backup-guard"
 CONFIG_DIR="$TEST_ROOT/etc/config"
 UCI_STATE="$TEST_ROOT/uci-show"
-SCRIPT="$TEST_ROOT/60_ha-cluster-upgrade"
+SCRIPT="$TEST_ROOT/60_ha-cluster-sync-model"
 
 cleanup() {
 	rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT INT TERM
 
-# The script under test, with its two absolute paths moved under TEST_ROOT
+# The script under test, with its three absolute paths moved under TEST_ROOT
 sed -e "s|^HOOKS=\"/etc/hotplug.d/keepalived\"\$|HOOKS=\"$HOOKS\"|" \
 	-e "s|^GUARD=\"/usr/lib/ha-cluster/ipv6-backup-guard\"\$|GUARD=\"$GUARD\"|" \
+	-e "s|^\. /lib/functions.sh\$|. \"$TEST_ROOT/functions.sh\"|" \
 	"$REPO_ROOT/ha-cluster/files/ha-cluster.uci-defaults" > "$SCRIPT"
 grep -Fxq "HOOKS=\"$HOOKS\"" "$SCRIPT"
 grep -Fxq "GUARD=\"$GUARD\"" "$SCRIPT"
+grep -Fxq ". \"$TEST_ROOT/functions.sh\"" "$SCRIPT"
+
+# /lib/functions.sh: the config functions the script uses, on the data of
+# the uci stand-in below. The states of this test hold no sync group and no
+# peer, so the migration steps iterating them find nothing to do.
+cat > "$TEST_ROOT/functions.sh" <<'EOF'
+config_load() { :; }
+
+config_foreach() {
+	local _cf_fn="$1" _cf_type="$2" _cf_section
+
+	for _cf_section in $(awk -F'[.=]' -v type="$_cf_type" \
+		'NF == 3 && $3 == type { print $2 }' "$UCI_STATE"); do
+		"$_cf_fn" "$_cf_section"
+	done
+}
+
+config_get() {
+	local _cg_value
+
+	_cg_value="$(uci -q get "ha-cluster.$2.$3")" || _cg_value="${4:-}"
+	eval "$1=\$_cg_value"
+}
+EOF
 
 # Stand-in for uci on the output format of "uci show": enough for get of a
 # section, show, rename of a section, delete of an option and commit.
@@ -58,9 +87,10 @@ uci() {
 }
 
 # OpenWrt sources the script in a subshell, at first boot and from the
-# package postinst
+# package postinst, without errexit or nounset
 run_script() {
 	(
+		set +eu
 		export UCI_CONFIG_DIR="$CONFIG_DIR"
 		. "$SCRIPT"
 	)

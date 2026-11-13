@@ -118,17 +118,17 @@ add_option() {
 }
 
 # Usage: write_config [name=value ...]
-#   sync_method, key, encryption, dhcp_group, dhcp_files, sync_leases, peer,
-#   peer_sync, authoritative, owsync_bin, lease_sync_bin
+#   sync_method, key, encryption, dhcp_group, dhcp_files, lease_sync, peer,
+#   vrrp_only, authoritative, owsync_bin, lease_sync_bin
 write_config() {
-	sync_method=owsync
+	sync_method=
 	key="$KEY"
 	encryption=1
 	dhcp_group=1
 	dhcp_files=dhcp
-	sync_leases=1
+	lease_sync=1
 	peer=192.0.2.2
-	peer_sync=1
+	vrrp_only=0
 	authoritative=0
 	owsync_bin=1
 	lease_sync_bin=1
@@ -151,25 +151,25 @@ write_config() {
 
 	add_option config TYPE global
 	add_option config enabled 1
-	add_option config sync_method "$sync_method"
+	[ -n "$sync_method" ] && add_option config sync_method "$sync_method"
+	add_option config lease_sync "$lease_sync"
 	add_option config sync_encryption "$encryption"
 	[ -n "$key" ] && add_option config encryption_key "$key"
 
 	add_option advanced TYPE advanced
 
-	add_option dhcp TYPE service
+	add_option dhcp TYPE sync_group
 	add_option dhcp enabled "$dhcp_group"
-	add_option dhcp sync_leases "$sync_leases"
 	[ -n "$dhcp_files" ] && add_option dhcp config_files "$dhcp_files"
 
-	add_option firewall TYPE service
+	add_option firewall TYPE sync_group
 	add_option firewall enabled 0
 	add_option firewall config_files firewall
 
 	if [ -n "$peer" ]; then
 		add_option peer1 TYPE peer
 		add_option peer1 address "$peer"
-		add_option peer1 sync_enabled "$peer_sync"
+		add_option peer1 vrrp_only "$vrrp_only"
 	fi
 
 	add_option main TYPE vrrp_instance
@@ -251,20 +251,19 @@ refute 'no owsync.conf without a peer' [ -e "$RUN_DIR/owsync.conf" ]
 refute 'no lease-sync.conf without a peer' [ -e "$RUN_DIR/lease-sync.conf" ]
 echo 'ok - a cluster without a peer runs no sync daemon and needs no key'
 
-write_config peer_sync=0 key=
+write_config vrrp_only=1 key=
 refute 'owsync is not wanted with a VRRP-only peer' ha_owsync_wanted
 refute 'lease sync is not wanted with a VRRP-only peer' ha_lease_sync_wanted
 expect 'a VRRP-only peer needs no key' ha_validate_config
-echo 'ok - a peer with sync_enabled 0 does not count as a sync peer'
+echo 'ok - a vrrp_only peer does not count as a sync peer'
 
 # ------------------------------------------------------------------
+write_config sync_method=owsync
+expect 'sync_method owsync passes validation' ha_validate_config
 write_config sync_method=none
-refute 'owsync is not wanted with sync_method none' ha_owsync_wanted
-expect 'lease sync stays wanted with sync_method none' ha_lease_sync_wanted
-generate
-refute 'no owsync.conf with sync_method none' [ -e "$RUN_DIR/owsync.conf" ]
-expect 'lease-sync.conf with sync_method none' [ -s "$RUN_DIR/lease-sync.conf" ]
-echo 'ok - sync_method none turns file sync off and leaves lease sync alone'
+refute 'a sync_method other than owsync fails validation' ha_validate_config
+expect 'the unsupported sync_method is reported' logged "sync_method 'none' is not supported"
+echo 'ok - owsync is the only sync_method'
 
 write_config dhcp_group=0
 refute 'owsync is not wanted without an enabled group' ha_owsync_wanted
@@ -274,7 +273,7 @@ refute 'no owsync.conf without an enabled group' [ -e "$RUN_DIR/owsync.conf" ]
 expect 'lease-sync.conf with the dhcp group disabled' [ -s "$RUN_DIR/lease-sync.conf" ]
 echo 'ok - lease sync and the dhcp file group are independent'
 
-write_config sync_leases=0
+write_config lease_sync=0
 expect 'owsync is wanted with lease sync off' ha_owsync_wanted
 refute 'lease sync is off' ha_lease_sync_wanted
 generate
@@ -320,7 +319,7 @@ refute 'a pool without force fails validation with lease sync active' ha_validat
 expect 'the missing force is reported' logged "dhcp.lan.force must be '1'"
 write_config lease_sync_bin=0
 expect 'a pool without force passes when lease-sync is not installed' ha_validate_config
-write_config sync_leases=0
+write_config lease_sync=0
 expect 'a pool without force passes with lease sync off' ha_validate_config
 POOL_FORCE=1
 echo 'ok - the dhcp force check follows active lease sync'
@@ -334,15 +333,13 @@ write_config authoritative=0
 refute 'a non-authoritative dnsmasq is no conflict' ha_dhcp_authoritative_conflict
 ha_validate_config
 refute 'nothing is reported for a non-authoritative dnsmasq' logged 'dnsmasq is authoritative'
-write_config authoritative=1 sync_leases=0
+write_config authoritative=1 lease_sync=0
 expect 'authoritative with the dhcp group synced is a conflict' ha_dhcp_authoritative_conflict
-write_config authoritative=1 sync_leases=0 dhcp_group=0
+write_config authoritative=1 lease_sync=0 dhcp_group=0
 refute 'authoritative without shared DHCP is no conflict' ha_dhcp_authoritative_conflict
-write_config authoritative=1 sync_leases=0 dhcp_files=
+write_config authoritative=1 lease_sync=0 dhcp_files=
 refute 'an empty dhcp group is no conflict' ha_dhcp_authoritative_conflict
-write_config authoritative=1 sync_leases=0 sync_method=none
-refute 'sync_method none is no conflict' ha_dhcp_authoritative_conflict
-write_config authoritative=1 sync_leases=0 owsync_bin=0
+write_config authoritative=1 lease_sync=0 owsync_bin=0
 refute 'owsync not installed is no conflict' ha_dhcp_authoritative_conflict
 write_config authoritative=1 peer=
 refute 'no peer is no conflict' ha_dhcp_authoritative_conflict
