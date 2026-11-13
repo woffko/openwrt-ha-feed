@@ -1,6 +1,7 @@
 == dhcp-script rc=0
 == hotplug.dhcp env
 ACTION=add
+DNSMASQ_CLIENT_ID=00:01:00:01:2f:00:00:00:02:00:00:00:00:02
 DNSMASQ_DOMAIN=lan
 DNSMASQ_IAID=305419896
 DNSMASQ_INTERFACE=br-lan
@@ -16,12 +17,12 @@ MACADDR=00:01:00:01:2f:00:00:00:02:00:00:00:00:02
 == ubus send
 dhcp.lease {"action":"add",
 "ip":"fd00:192:168:50::100",
-"mac":"00:01:00:01:2f:00:00:00:02:00:00:00:00:02",
 "hostname":"host6",
 "node_id":"char-node",
 "timestamp":(now),
 "expires":1767229200,
 "time_remaining":43200,
+"client_id":"00:01:00:01:2f:00:00:00:02:00:00:00:00:02",
 "interface":"br-lan",
 "iaid":305419896,
 "is_temporary":0}

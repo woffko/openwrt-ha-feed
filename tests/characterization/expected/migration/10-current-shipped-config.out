@@ -11,8 +11,10 @@ config global 'config'
 
 	# File sync backend; owsync is the only one
 	#option sync_method 'owsync'
-	# 64 hex chars, shared by owsync and lease-sync; empty = plain
+	# 64 hex chars, shared by owsync and lease-sync. Required as soon as
+	# a sync daemon has work, unless sync_encryption is '0' (plain mode)
 	option encryption_key ''
+	#option sync_encryption '1'
 	# DHCP lease sync (lease-sync and dnsmasq-ha packages)
 	option lease_sync '1'
 
@@ -87,12 +89,34 @@ config exclude
 	list file 'wireless'
 
 #config script 'check_gateway'
+#	option check_type 'command'
 #	option script '/bin/ping -c 1 -W 1 8.8.8.8'
+#	list vrrp_instance 'main'  # Optional automatic attachment
 #	option interval '5'
 #	option timeout '2'
-#	option weight '-10'
+#	option weight '0'           # 0/empty enters FAULT; non-zero adjusts priority
 #	option rise '2'
 #	option fall '2'
+
+# Package-managed dataplane check. It verifies device carrier, optional LACP
+# membership, and interface-bound reachability. The check is automatically
+# tracked by every selected IPv4 instance and its generated IPv6 instance.
+#config script 'check_main_dataplane'
+#	option check_type 'dataplane'
+#	list vrrp_instance 'main'
+#	#list vrrp_instance 'guest'  # Move related gateway groups together
+#	option interface 'br-lan'
+#	option bond ''
+#	option min_lacp_members '0'
+#	list target '192.168.1.10'
+#	list target '192.168.1.11'
+#	option min_success '1'      # Fail only when every non-local target fails
+#	option probe_timeout '1'
+#	option interval '2'
+#	option timeout '3'          # Must cover the worst-case target probe time
+#	option weight '0'
+#	option rise '5'
+#	option fall '3'
 == migration rc=0
 == /etc/config/ha-cluster
 config global 'config'
@@ -107,8 +131,10 @@ config global 'config'
 
 	# File sync backend; owsync is the only one
 	#option sync_method 'owsync'
-	# 64 hex chars, shared by owsync and lease-sync; empty = plain
+	# 64 hex chars, shared by owsync and lease-sync. Required as soon as
+	# a sync daemon has work, unless sync_encryption is '0' (plain mode)
 	option encryption_key ''
+	#option sync_encryption '1'
 	# DHCP lease sync (lease-sync and dnsmasq-ha packages)
 	option lease_sync '1'
 
@@ -183,11 +209,33 @@ config exclude
 	list file 'wireless'
 
 #config script 'check_gateway'
+#	option check_type 'command'
 #	option script '/bin/ping -c 1 -W 1 8.8.8.8'
+#	list vrrp_instance 'main'  # Optional automatic attachment
 #	option interval '5'
 #	option timeout '2'
-#	option weight '-10'
+#	option weight '0'           # 0/empty enters FAULT; non-zero adjusts priority
 #	option rise '2'
 #	option fall '2'
+
+# Package-managed dataplane check. It verifies device carrier, optional LACP
+# membership, and interface-bound reachability. The check is automatically
+# tracked by every selected IPv4 instance and its generated IPv6 instance.
+#config script 'check_main_dataplane'
+#	option check_type 'dataplane'
+#	list vrrp_instance 'main'
+#	#list vrrp_instance 'guest'  # Move related gateway groups together
+#	option interface 'br-lan'
+#	option bond ''
+#	option min_lacp_members '0'
+#	list target '192.168.1.10'
+#	list target '192.168.1.11'
+#	option min_success '1'      # Fail only when every non-local target fails
+#	option probe_timeout '1'
+#	option interval '2'
+#	option timeout '3'          # Must cover the worst-case target probe time
+#	option weight '0'
+#	option rise '5'
+#	option fall '3'
 == second run rc=0
 (unchanged)

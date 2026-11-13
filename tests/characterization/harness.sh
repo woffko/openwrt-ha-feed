@@ -41,7 +41,7 @@ export CHAR_LOG=/tmp/char.log
 cp "$CHAR/base-ha-cluster" /etc/config/ha-cluster
 cp "$CHAR/base-dhcp" /etc/config/dhcp
 cp /shipped/lease-sync /etc/config/lease-sync
-rm -rf /tmp/ha-cluster /etc/ha-cluster /tmp/dnsmasq*.d
+rm -rf /tmp/ha-cluster /var/run/ha-cluster /etc/ha-cluster /tmp/dnsmasq*.d
 rm -f /etc/owsync/owsync.db /tmp/dhcp.leases /etc/lease-sync/config
 
 # Standalone services enabled, whatever the image build left

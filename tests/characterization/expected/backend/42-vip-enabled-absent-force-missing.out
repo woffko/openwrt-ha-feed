@@ -109,12 +109,12 @@ ha-cluster|daemon.err|dhcp.lan.force must be '1' for HA lease sync on interface 
 ha-cluster|daemon.err|Set it with: uci set dhcp.lan.force='1' && uci commit dhcp
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
-== ls /tmp/ha-cluster
-== /tmp/ha-cluster/keepalived.conf
+== ls /var/run/ha-cluster
+== /var/run/ha-cluster/keepalived.conf
 (absent)
-== /tmp/ha-cluster/owsync.conf
+== /var/run/ha-cluster/owsync.conf
 (absent)
-== /tmp/ha-cluster/lease-sync.conf
+== /var/run/ha-cluster/lease-sync.conf
 (absent)
 == ls /tmp/dnsmasq.cfg01411c.d
 (absent)

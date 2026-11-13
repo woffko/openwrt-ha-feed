@@ -1,0 +1,38 @@
+== /etc/config/ha-cluster
+config global 'config'
+	option enabled '1'
+	option sync_method 'owsync'
+	option sync_encryption '0'
+
+config peer 'peer1'
+	option address '172.30.0.11'
+	option sync_enabled '1'
+
+config service 'dhcp'
+	option enabled '1'
+	option sync_leases '1'
+	list config_files 'dhcp'
+
+config advanced
+	option log_level '2'
+== migration rc=0
+== /etc/config/ha-cluster
+
+config global 'config'
+	option enabled '1'
+	option sync_method 'owsync'
+	option sync_encryption '0'
+	option lease_sync '1'
+
+config peer 'peer1'
+	option address '172.30.0.11'
+
+config sync_group 'dhcp'
+	option enabled '1'
+	list config_files 'dhcp'
+
+config advanced 'advanced'
+	option log_level '2'
+
+== second run rc=0
+(unchanged)

@@ -106,13 +106,13 @@ rc=0
 == service_triggers
 reload_trigger [ha-cluster]
 == log
-== ls /tmp/ha-cluster
+== ls /var/run/ha-cluster
 (absent)
-== /tmp/ha-cluster/keepalived.conf
+== /var/run/ha-cluster/keepalived.conf
 (absent)
-== /tmp/ha-cluster/owsync.conf
+== /var/run/ha-cluster/owsync.conf
 (absent)
-== /tmp/ha-cluster/lease-sync.conf
+== /var/run/ha-cluster/lease-sync.conf
 (absent)
 == ls /tmp/dnsmasq.cfg01411c.d
 (absent)

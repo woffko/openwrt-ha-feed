@@ -111,12 +111,12 @@ ha-cluster|daemon.info|Applying HA cluster configuration
 ha-cluster|daemon.err|vrrp_instance main: VRID must be a number (got: abc)
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
-== ls /tmp/ha-cluster
-== /tmp/ha-cluster/keepalived.conf
+== ls /var/run/ha-cluster
+== /var/run/ha-cluster/keepalived.conf
 (absent)
-== /tmp/ha-cluster/owsync.conf
+== /var/run/ha-cluster/owsync.conf
 (absent)
-== /tmp/ha-cluster/lease-sync.conf
+== /var/run/ha-cluster/lease-sync.conf
 (absent)
 == ls /tmp/dnsmasq.cfg01411c.d
 (absent)

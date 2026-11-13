@@ -1,0 +1,28 @@
+== /etc/config/ha-cluster
+config global 'config'
+	option enabled '1'
+
+config service 'firewall'
+	option enabled '1'
+	option sync_leases '1'
+	list config_files 'firewall'
+
+config service 'dhcp'
+	option enabled '1'
+	list config_files 'dhcp'
+== migration rc=0
+== /etc/config/ha-cluster
+
+config global 'config'
+	option enabled '1'
+
+config sync_group 'firewall'
+	option enabled '1'
+	list config_files 'firewall'
+
+config sync_group 'dhcp'
+	option enabled '1'
+	list config_files 'dhcp'
+
+== second run rc=0
+(unchanged)
