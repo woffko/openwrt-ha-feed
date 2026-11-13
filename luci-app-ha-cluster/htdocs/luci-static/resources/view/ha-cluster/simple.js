@@ -499,14 +499,22 @@ return view.extend({
 		s = m.section(form.NamedSection, 'config', 'global', _('Synchronization'),
 			_('Keeps configuration files and DHCP leases identical on the cluster nodes. These settings must be the same on every node.'));
 
+		// The backend refuses to run a sync daemon without a valid key
+		// unless this switch is off: plaintext is a choice, not a fallback
+		o = s.option(form.Flag, 'sync_encryption', _('Encrypt Sync Traffic'),
+			_('AES-256-GCM for configuration and lease sync. While this is on, sync does not start without a valid key. Switch it off only on a link protected otherwise, such as a VPN.'));
+		boolFlag(o, true);
+
 		var encryption_key_option = s.option(form.Value, 'encryption_key', _('Encryption Key'),
-			_('256-bit AES key (64 hexadecimal characters), used for both configuration and lease sync. Must be identical on all nodes. Leave empty to sync in plaintext.'));
+			_('256-bit AES key (64 hexadecimal characters), used for both configuration and lease sync. Must be identical on all nodes.'));
+		encryption_key_option.depends('sync_encryption', '1');
 		encryption_key_option.password = true;
 		encryption_key_option.datatype = 'and(hexstring,rangelength(64,64))';
 		encryption_key_option.rmempty = true;
 		encryption_key_option.placeholder = _('Click "Generate New Key" below to create a secure random key');
 
 		o = s.option(form.Button, '_generate_key', _('Generate New Key'));
+		o.depends('sync_encryption', '1');
 		o.inputtitle = _('Generate New Key');
 		o.inputstyle = 'action';
 		o.onclick = function(ev, section_id) {
