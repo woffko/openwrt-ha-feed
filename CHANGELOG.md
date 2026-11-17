@@ -15,7 +15,7 @@ version.
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
 packages are `ha-cluster` and `luci-app-ha-cluster` 2.0.0-r3,
-`lease-sync` 1.2.1-r4, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
+`lease-sync` 1.2.1-r5, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
 
@@ -48,6 +48,10 @@ upgrading a node.
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, reflected
   dnsmasq events suppressed, peers checked before a message is used.
+  A DHCPv6 renewal served by a node after a failover, or after its
+  lease-sync restarted, is taken over and sent to the peer; before, it
+  was dropped as the echo of a peer's lease, and the lease was lost when
+  the other copy ran out.
 - owsync: connections accepted from the configured peers only, a cap on
   the frame size before the handshake, peer file states validated, and a
   fix for the crash when a tombstone expires.

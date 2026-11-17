@@ -1,0 +1,402 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] lease-sync: take over a DHCPv6 lease renewed on this node
+
+A local DHCPv6 event was dropped whenever the lease-db record of the
+address carried another node's name. That name is not the node serving
+the client: a record is labelled with the node it was last received from,
+and a node answering a full sync request labels every lease with its own
+name. So the leases a node serves carry the peer's name after a failover,
+and after its lease-sync restarted and learned them back from the peer.
+
+Every renewal on that node was then neither stored nor sent to the peer.
+The peer's copy kept the expiry of before and ran out: when the peer was
+the node that had issued the lease, its "del" went out as a DELETE with
+the timestamp both nodes still had, and the serving node deleted the live
+lease from its dnsmasq; otherwise the peer just lost its copy. The client
+got NoBinding at a later RENEW.
+
+A renewal served by the local dnsmasq moves the expiry forward, while the
+echo of a lease this daemon injected, such as the replay of the lease
+file, carries the expiry that was injected. A local event that extends
+the stored lease is now taken over: stored under this node's name and
+sent to the peer as an UPDATE. The peer refreshes its copy, and a DELETE
+that still names the old timestamp is answered with the live lease by the
+existing causality check. Events that do not extend the lease stay
+suppressed, as do events without an expiry and events for an infinite
+lease of the peer.
+
+The wire protocol is unchanged. With clocks apart by more than the time
+since the last renewal, the first renewal after a failover can still be
+taken for an echo; the next one is not.
+
+tests/test_sync_flow.c covers the renewal after an ADD and after a sync
+response of the peer, the events that must stay suppressed, and the stale
+DELETE.
+
+--- a/daemon/ubus-handler.c
++++ b/daemon/ubus-handler.c
+@@ -242,6 +242,26 @@ static bool consume_suppressed_lease_event(const char *action, const char *ip)
+   return false;
+ }
+ 
++/* Slack for the second or two by which an injected expiry may shift */
++#define DHCPV6_RENEWAL_MARGIN 5
++
++/* A local DHCPv6 event moves the stored expiry forward only when the local
++ * dnsmasq served the client itself: an event for a lease this daemon
++ * injected, such as the replay of the lease file, carries the expiry that
++ * was injected. An expiry of 0 is an infinite lease.
++ */
++static bool dhcpv6_event_extends_lease(const struct lease_entry *stored,
++                                       const struct lease_entry *event)
++{
++  if (stored->expires == 0)
++    return false;
++
++  if (event->expires == 0)
++    return true;
++
++  return event->expires > stored->expires + DHCPV6_RENEWAL_MARGIN;
++}
++
+ static void handle_lease_event(struct ubus_context *ctx, struct ubus_event_handler *ev,
+                                const char *type, struct blob_attr *msg)
+ {
+@@ -425,13 +445,26 @@ static void handle_lease_event(struct ubus_context *ctx, struct ubus_event_handl
+               return;
+             }
+ 
++          /* source_node is the node the record was last received from,
++           * not the node that serves the client: after a failover, or
++           * after this daemon restarted and learned its leases back from
++           * the peer, the leases this node serves carry the peer's name.
++           * A renewal served here extends the lease and takes it over;
++           * anything else is the echo of a lease this daemon injected.
++           */
+           if (existing &&
+               strcmp(existing->source_node, g_state->config.node_id) != 0 &&
+               lease_entry_same_dhcpv6_identity(existing, &entry))
+             {
+-              log_info("Suppressing local DHCPv6 %s for peer-owned lease %s from %s",
++              if (!tb[5] || !dhcpv6_event_extends_lease(existing, &entry))
++                {
++                  log_info("Suppressing local DHCPv6 %s for peer-owned lease %s from %s",
++                           action, entry.ip_str, existing->source_node);
++                  return;
++                }
++
++              log_info("Local DHCPv6 %s extends lease %s last received from %s: taking it over",
+                        action, entry.ip_str, existing->source_node);
+-              return;
+             }
+ 
+           identity_conflict = lease_db_find_dhcpv6_identity(&entry, entry.ip_str);
+--- a/tests/test_sync_flow.c
++++ b/tests/test_sync_flow.c
+@@ -121,14 +121,17 @@ static int fake_add_lease(struct blob_attr *msg)
+         { .name = "ip", .type = BLOBMSG_TYPE_STRING },
+         { .name = "mac", .type = BLOBMSG_TYPE_STRING },
+         { .name = "expires", .type = BLOBMSG_TYPE_INT32 },
++        { .name = "client_id", .type = BLOBMSG_TYPE_STRING },
+     };
+-    struct blob_attr *tb[3];
++    struct blob_attr *tb[4];
+ 
+-    blobmsg_parse(policy, 3, tb, blob_data(msg), blob_len(msg));
+-    if (!tb[0] || !tb[1] || !tb[2] || blobmsg_get_u32(tb[2]) == 0)
++    /* A DHCPv6 lease carries a client_id and no mac */
++    blobmsg_parse(policy, 4, tb, blob_data(msg), blob_len(msg));
++    if (!tb[0] || (!tb[1] && !tb[3]) || !tb[2] || blobmsg_get_u32(tb[2]) == 0)
+         return UBUS_STATUS_INVALID_ARGUMENT;
+ 
+-    fake_put(blobmsg_get_string(tb[0]), blobmsg_get_string(tb[1]),
++    fake_put(blobmsg_get_string(tb[0]),
++             blobmsg_get_string(tb[1] ? tb[1] : tb[3]),
+              blobmsg_get_u32(tb[2]));
+     return UBUS_STATUS_OK;
+ }
+@@ -298,6 +301,34 @@ static void fake_event(const char *action, const char *ip, const char *mac)
+     handle_lease_event(NULL, NULL, "dhcp.lease", b.head);
+ }
+ 
++/* DHCPv6 lease event: the client is known by its DUID and IAID, and the
++ * expiry is the caller's. expires < 0 leaves the field out. */
++#define TEST_DUID "00:01:00:01:2f:00:00:00:02:00:00:00:00:02"
++#define TEST_IAID 0x12345678
++
++static void fake_event6(const char *action, const char *ip, long expires)
++{
++    static struct blob_buf b;
++
++    blob_buf_init(&b, 0);
++    blobmsg_add_string(&b, "action", action);
++    blobmsg_add_string(&b, "ip", ip);
++    blobmsg_add_string(&b, "client_id", TEST_DUID);
++    if (expires >= 0)
++        blobmsg_add_u32(&b, "expires", (uint32_t)expires);
++    blobmsg_add_u32(&b, "lease_length", 3600);
++    blobmsg_add_u32(&b, "iaid", TEST_IAID);
++    handle_lease_event(NULL, NULL, "dhcp.lease", b.head);
++}
++
++/* The daemon expects the echo of a lease it injected for ten seconds and
++ * drops the next event for that address within them. A renewal comes much
++ * later: forget the pending echoes, as the ten seconds would. */
++static void reflection_window_passed(void)
++{
++    memset(suppressed_events, 0, sizeof(suppressed_events));
++}
++
+ /* "del" events dnsmasq emits, asynchronously, for the leases removed
+  * through delete_lease */
+ static void fake_deliver_del_events(void)
+@@ -318,6 +349,10 @@ struct peer_rx
+ {
+     int deletes;
+     int adds_updates;
++    /* Last ADD or UPDATE */
++    uint8_t last_action;
++    uint32_t last_expires;
++    char last_node_id[MAX_NODE_ID_LEN];
+ };
+ 
+ static void peer_send(uint8_t action, const char *ip, const char *mac,
+@@ -356,6 +391,46 @@ static void peer_send(uint8_t action, const char *ip, const char *mac,
+     peer_sync_handle_message(g_state);
+ }
+ 
++/* The same for a DHCPv6 lease of the test client */
++static void peer_send6(uint8_t action, const char *ip, uint64_t ts,
++                       uint32_t expires, uint64_t expected_ts)
++{
++    static const unsigned char duid[] = { 0x00, 0x01, 0x00, 0x01, 0x2f, 0x00, 0x00,
++                                          0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
++    struct sync_message msg;
++    struct sockaddr_in to;
++
++    memset(&msg, 0, sizeof(msg));
++    msg.magic = htonl(SYNC_MAGIC);
++    msg.version = LEASE_SYNC_PROTOCOL_VERSION;
++    msg.action = action;
++    msg.sequence = htons(peer_seq++);
++    strncpy(msg.node_id, PEER_NODE_ID, sizeof(msg.node_id) - 1);
++    msg.timestamp_ms = htobe64(ts);
++    msg.af_family = SYNC_AF_INET6;
++    inet_pton(AF_INET6, ip, &msg.addr.addr6);
++    strncpy(msg.hostname, "peer-host6", sizeof(msg.hostname) - 1);
++    memcpy(msg.client_id, duid, sizeof(duid));
++    msg.client_id_len = htons(sizeof(duid));
++    msg.iaid = htonl(TEST_IAID);
++    msg.expires = htonl(expires);
++    msg.lease_length = htonl(3600);
++    msg.expected_ts = htobe64(expected_ts);
++
++    memset(&to, 0, sizeof(to));
++    to.sin_family = AF_INET;
++    to.sin_port = htons(DAEMON_PORT);
++    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    if (sendto(peer_sock, &msg, sizeof(msg), 0, (struct sockaddr *)&to,
++               sizeof(to)) != (ssize_t)sizeof(msg))
++    {
++        perror("peer_send6: sendto");
++        exit(1);
++    }
++
++    peer_sync_handle_message(g_state);
++}
++
+ /* Collect everything the daemon sent to the peer since the last call */
+ static void peer_drain(struct peer_rx *rx)
+ {
+@@ -376,6 +451,10 @@ static void peer_drain(struct peer_rx *rx)
+         case SYNC_ACTION_ADD:
+         case SYNC_ACTION_UPDATE:
+             rx->adds_updates++;
++            rx->last_action = msg.action;
++            rx->last_expires = ntohl(msg.expires);
++            memcpy(rx->last_node_id, msg.node_id, sizeof(rx->last_node_id));
++            rx->last_node_id[sizeof(rx->last_node_id) - 1] = '\0';
+             break;
+         default:
+             break;
+@@ -619,6 +698,167 @@ static void test_delete_failures_still_retried(void)
+     ASSERT_EQ_INT("retry queue drained", retry_queue_count(), 0);
+ }
+ 
++/* ============================================
++ * DHCPv6 leases served after a failover or a restart
++ *
++ * The record of a lease carries the name of the node it was last received
++ * from. After a failover, and after this daemon restarted and learned its
++ * leases back from the peer, that is the peer, while this node serves the
++ * client.
++ * ============================================ */
++#define V6_LEASE "fd00:192:168:50::100"
++
++/* Usage: a lease the peer reported with the given action, stored and
++ * injected, the echo window over */
++static void peer_reported_lease6(uint8_t action, uint32_t expires)
++{
++    reset_state();
++    startup_timer_cb(&startup_timer);
++    peer_send6(action, V6_LEASE, get_timestamp_ms() - 60000, expires, 0);
++    peer_drain(NULL);
++    reflection_window_passed();
++}
++
++static void renewal_taken_over(const char *what, uint8_t action)
++{
++    uint32_t now = (uint32_t)time(NULL);
++    struct peer_rx rx;
++    struct lease_entry *e;
++
++    printf("\n=== Test: DHCPv6 renewal of a lease from the peer's %s ===\n", what);
++    peer_reported_lease6(action, now + 600);
++    e = lease_db_find(V6_LEASE);
++    ASSERT_NOT_NULL("peer lease is tracked", e);
++    if (e)
++        ASSERT_EQ_STR("record carries the peer's name", e->source_node, PEER_NODE_ID);
++    ASSERT_TRUE("peer lease injected into dnsmasq", fake_find(V6_LEASE) >= 0);
++
++    fake_event6("old", V6_LEASE, now + 3600);
++    peer_drain(&rx);
++
++    ASSERT_EQ_INT("renewal is sent to the peer", rx.adds_updates, 1);
++    ASSERT_EQ_INT("as an UPDATE", rx.last_action, SYNC_ACTION_UPDATE);
++    ASSERT_EQ_INT("with the new expiry", (int)(rx.last_expires - now), 3600);
++    ASSERT_EQ_STR("under this node's name", rx.last_node_id, NODE_ID);
++    e = lease_db_find(V6_LEASE);
++    ASSERT_NOT_NULL("lease is still tracked", e);
++    if (e)
++    {
++        ASSERT_EQ_STR("record is this node's now", e->source_node, NODE_ID);
++        ASSERT_EQ_INT("record has the new expiry", (int)(e->expires - now), 3600);
++    }
++}
++
++static void test_dhcpv6_renewal_after_failover(void)
++{
++    renewal_taken_over("ADD", SYNC_ACTION_ADD);
++}
++
++static void test_dhcpv6_renewal_after_restart(void)
++{
++    renewal_taken_over("sync response", SYNC_ACTION_SYNC_RESPONSE);
++}
++
++static void test_dhcpv6_echo_stays_suppressed(void)
++{
++    uint32_t now = (uint32_t)time(NULL);
++    struct peer_rx rx;
++    struct lease_entry *e;
++
++    printf("\n=== Test: DHCPv6 event that does not extend the peer's lease ===\n");
++    peer_reported_lease6(SYNC_ACTION_ADD, now + 600);
++
++    fake_event6("old", V6_LEASE, now + 600);
++    peer_drain(&rx);
++    ASSERT_EQ_INT("same expiry is not announced", rx.adds_updates, 0);
++
++    fake_event6("old", V6_LEASE, now + 602);
++    peer_drain(&rx);
++    ASSERT_EQ_INT("an expiry two seconds later is not announced", rx.adds_updates, 0);
++
++    fake_event6("old", V6_LEASE, now + 300);
++    peer_drain(&rx);
++    ASSERT_EQ_INT("an earlier expiry is not announced", rx.adds_updates, 0);
++
++    fake_event6("old", V6_LEASE, -1);
++    peer_drain(&rx);
++    ASSERT_EQ_INT("an event without expiry is not announced", rx.adds_updates, 0);
++
++    e = lease_db_find(V6_LEASE);
++    ASSERT_NOT_NULL("lease is still tracked", e);
++    if (e)
++    {
++        ASSERT_EQ_STR("record keeps the peer's name", e->source_node, PEER_NODE_ID);
++        ASSERT_EQ_INT("record keeps the peer's expiry", (int)(e->expires - now), 600);
++    }
++}
++
++static void test_dhcpv6_infinite_lease_not_taken_over(void)
++{
++    uint32_t now = (uint32_t)time(NULL);
++    struct peer_rx rx;
++    struct lease_entry *e;
++
++    printf("\n=== Test: DHCPv6 event for an infinite lease of the peer ===\n");
++    peer_reported_lease6(SYNC_ACTION_ADD, 0);
++
++    fake_event6("old", V6_LEASE, now + 3600);
++    peer_drain(&rx);
++
++    ASSERT_EQ_INT("event is not announced", rx.adds_updates, 0);
++    e = lease_db_find(V6_LEASE);
++    ASSERT_NOT_NULL("lease is still tracked", e);
++    if (e)
++        ASSERT_EQ_STR("record keeps the peer's name", e->source_node, PEER_NODE_ID);
++}
++
++static void test_dhcpv6_lease_made_infinite_taken_over(void)
++{
++    uint32_t now = (uint32_t)time(NULL);
++    struct peer_rx rx;
++    struct lease_entry *e;
++
++    printf("\n=== Test: DHCPv6 lease of the peer made infinite here ===\n");
++    peer_reported_lease6(SYNC_ACTION_ADD, now + 600);
++
++    fake_event6("old", V6_LEASE, 0);
++    peer_drain(&rx);
++
++    ASSERT_EQ_INT("event is sent to the peer", rx.adds_updates, 1);
++    e = lease_db_find(V6_LEASE);
++    ASSERT_NOT_NULL("lease is still tracked", e);
++    if (e)
++        ASSERT_EQ_STR("record is this node's now", e->source_node, NODE_ID);
++}
++
++/* The old serving node still holds its copy with the expiry of before the
++ * failover. When that copy expires there, it sends a DELETE naming the
++ * timestamp it knows. */
++static void test_dhcpv6_stale_delete_after_takeover(void)
++{
++    uint32_t now = (uint32_t)time(NULL);
++    uint64_t peer_ts = get_timestamp_ms() - 60000;
++    struct peer_rx rx;
++
++    printf("\n=== Test: peer DELETE for a DHCPv6 lease renewed here ===\n");
++    reset_state();
++    startup_timer_cb(&startup_timer);
++    peer_send6(SYNC_ACTION_ADD, V6_LEASE, peer_ts, now + 600, 0);
++    peer_drain(NULL);
++    reflection_window_passed();
++
++    fake_event6("old", V6_LEASE, now + 3600);
++    peer_drain(NULL);
++
++    peer_send6(SYNC_ACTION_DELETE, V6_LEASE, get_timestamp_ms(), 0, peer_ts);
++    peer_drain(&rx);
++
++    ASSERT_NOT_NULL("lease survives the DELETE", lease_db_find(V6_LEASE));
++    ASSERT_TRUE("lease is still in dnsmasq", fake_find(V6_LEASE) >= 0);
++    ASSERT_EQ_INT("dnsmasq was not asked to delete it", fake_delete_calls, 0);
++    ASSERT_EQ_INT("the peer is told about the live lease", rx.adds_updates, 1);
++}
++
+ int main(void)
+ {
+     printf("========================================\n");
+@@ -639,6 +879,12 @@ int main(void)
+     test_peer_delete_absent_lease_not_retried();
+     test_retry_of_absent_delete_succeeds();
+     test_delete_failures_still_retried();
++    test_dhcpv6_renewal_after_failover();
++    test_dhcpv6_renewal_after_restart();
++    test_dhcpv6_echo_stays_suppressed();
++    test_dhcpv6_infinite_lease_not_taken_over();
++    test_dhcpv6_lease_made_infinite_taken_over();
++    test_dhcpv6_stale_delete_after_takeover();
+ 
+     teardown();
+     return print_test_summary();
