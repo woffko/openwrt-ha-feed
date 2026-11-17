@@ -46,12 +46,16 @@ upgrading a node.
 - The peer address is passed to ping after `--`.
 
 ### lease-sync, owsync, dnsmasq-ha
-- lease-sync: DHCPv6 leases identified by DUID and IAID, reflected
-  dnsmasq events suppressed, peers checked before a message is used.
+- lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a
+  deletion asked of dnsmasq suppressed, peers checked before a message
+  is used.
   A DHCPv6 renewal served by a node after a failover, or after its
   lease-sync restarted, is taken over and sent to the peer; before, it
   was dropped as the echo of a peer's lease, and the lease was lost when
   the other copy ran out.
+  No echo is expected after a lease is injected: dnsmasq-ha runs no
+  script for it, and waiting for one dropped the next real event for
+  that address within ten seconds.
 - owsync: connections accepted from the configured peers only, a cap on
   the frame size before the handshake, peer file states validated, and a
   fix for the crash when a tombstone expires.
