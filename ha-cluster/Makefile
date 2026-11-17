@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -66,9 +66,11 @@ endef
 
 define Package/ha-cluster/prerm
 #!/bin/sh
+# Disabled first: the stop of a service that still starts at boot keeps the
+# IPv6 BACKUP guard closed, and nothing would open it once the package is gone
 if [ -z "$${IPKG_INSTROOT}" ]; then
-	/etc/init.d/ha-cluster stop >/dev/null 2>&1
 	/etc/init.d/ha-cluster disable >/dev/null 2>&1
+	/etc/init.d/ha-cluster stop >/dev/null 2>&1
 fi
 exit 0
 endef

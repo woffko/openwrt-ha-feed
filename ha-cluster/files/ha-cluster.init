@@ -109,11 +109,12 @@ service_stopped() {
 		i=$((i + 1))
 	done
 
-	ha_release_dnsmasq
+	# Before dnsmasq restarts on its own, and now that keepalived can no
+	# longer report a state: closed for a node that only stops, removed
+	# for a node that leaves the cluster
+	ha_stop_ipv6_guard
 
-	# Remove the IPv6 BACKUP guard nft rules, now that keepalived can no
-	# longer report a state that would put them back
-	ha_release_ipv6_guard
+	ha_release_dnsmasq
 
 	ha_manage_services "release"
 }

@@ -128,6 +128,14 @@ They add to the list above when a node runs this fork's packages.
   VRRP; the guard is rebuilt after every start and reload. Custom hooks
   in `/etc/hotplug.d/keepalived/` that match `<name>_v6` need the same
   distinction for unicast instances.
+- **Stopping a node.** `/etc/init.d/ha-cluster stop` leaves the guard
+  closed on every section: the node's dnsmasq goes on running without HA
+  and would otherwise advertise the node as a router and hand out DHCPv6
+  addresses. The guard opens again when the service starts and the node
+  becomes MASTER. A node taken out of the cluster gets the rules removed:
+  set `enabled '0'` in the `config` section and apply, or disable the
+  service (`/etc/init.d/ha-cluster disable`) before stopping it. Removing
+  the package does the latter.
 - **Router Advertisements of the MASTER.** The guard lets a MASTER send
   Router Advertisements from one source address only, the virtual
   link-local address of the section: option `virtual_link_local` of the

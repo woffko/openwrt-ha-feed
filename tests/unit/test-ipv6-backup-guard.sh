@@ -206,6 +206,12 @@ expect 'a BACKUP of the IPv4 instance does not block a MASTER of the IPv6 one' u
 
 guard main_v6 FAULT
 expect 'FAULT blocks like BACKUP' blocked ha_cluster_ra
+
+guard main_v6 MASTER
+guard main_v6 STOP
+expect 'STOP blocks a MASTER for DHCPv6' blocked ha_cluster_dhcpv6
+expect 'STOP blocks a MASTER for RA' blocked ha_cluster_ra
+expect 'the state is BACKUP' state_is main_v6 BACKUP
 echo 'ok - with multicast VRRP <section>_v6 decides'
 
 # ------------------------------------------------------------------

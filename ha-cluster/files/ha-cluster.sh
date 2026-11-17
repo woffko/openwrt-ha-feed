@@ -1384,7 +1384,64 @@ ha_release_dnsmasq() {
 	ha_restart_dnsmasq
 }
 
-# Remove IPv6 BACKUP guard state/rules when ha-cluster stops.
+# Whether the init script starts at boot. A node whose service is disabled
+# has been taken out of the cluster.
+ha_service_enabled() {
+	local link
+
+	for link in "${HA_CLUSTER_ROOT}"/etc/rc.d/S[0-9][0-9]ha-cluster; do
+		[ -e "$link" ] && return 0
+	done
+
+	return 1
+}
+
+# Close the IPv6 BACKUP guard for every keepalived instance, as a STOP of
+# each: the handler records BACKUP and blocks the interface of the
+# instances that hold IPv6 VIPs. Returns once the rules are in place.
+ha_close_ipv6_guard() {
+	local handler="${HA_CLUSTER_ROOT}/usr/lib/ha-cluster/ipv6-backup-guard"
+	local name i
+
+	[ -r "$handler" ] || handler="${HA_CLUSTER_ROOT}/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
+	[ -r "$handler" ] || return 0
+	[ -r "$KEEPALIVED_CONF" ] || return 0
+
+	for name in $(sed -n 's/^vrrp_instance \([^ ]*\) {$/\1/p' "$KEEPALIVED_CONF"); do
+		ACTION=STOP TYPE=INSTANCE NAME="$name" /bin/sh "$handler" >/dev/null 2>&1
+	done
+
+	# A handler that found another one at work left the rules to it
+	i=0
+	while [ -d "${HA_CLUSTER_RUN_DIR}/ipv6-backup-guard.lock" ] && [ "$i" -lt 5 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+}
+
+# The IPv6 BACKUP guard when the service stops. A node that stops but stays
+# in the cluster (enabled in the config, started at boot) keeps the guard
+# closed for every instance: its dnsmasq, restarted on its own, must not
+# advertise the node as a router nor serve DHCPv6. A node taken out of the
+# cluster (HA disabled in the config, or the service disabled) gets the
+# rules removed.
+ha_stop_ipv6_guard() {
+	local enabled
+
+	config_load ha-cluster
+	config_get_bool enabled config enabled 0
+
+	if [ "$enabled" -eq 1 ] && ha_service_enabled; then
+		ha_log "HA cluster stopped but still enabled: IPv6 BACKUP guard stays closed"
+		ha_close_ipv6_guard
+		return 0
+	fi
+
+	ha_release_ipv6_guard
+}
+
+# Remove the IPv6 BACKUP guard state and rules of a node that leaves the
+# cluster.
 ha_release_ipv6_guard() {
 	rm -rf "$HA_IPV6_GUARD_STATE_DIR"
 	rm -rf "${HA_CLUSTER_RUN_DIR}/ipv6-backup-guard.lock"

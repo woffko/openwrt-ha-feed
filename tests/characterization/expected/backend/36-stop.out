@@ -251,6 +251,7 @@ S25ha-cluster
 rc=0
 == log
 ha-cluster|daemon.info|Stopping HA cluster
+ha-cluster|daemon.info|HA cluster stopped but still enabled: IPv6 BACKUP guard stays closed
 ha-cluster|daemon.info|Removing dnsmasq HA overlay
 ha-cluster|daemon.info|Releasing service management back to standalone init scripts
 ha-cluster|daemon.info|Restored standalone service: keepalived
@@ -258,6 +259,7 @@ ha-cluster|daemon.info|Restored standalone service: owsync
 lease-sync|daemon.info|lease-sync disabled in UCI configuration
 ha-cluster|daemon.info|Restored standalone service: lease-sync
 == ls /var/run/ha-cluster
+ipv6-backup-guard
 keepalived.conf
 lease-sync.conf
 owsync.conf
