@@ -1,0 +1,152 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] lease-sync: expect no echo after add_lease
+
+Before every dnsmasq add_lease the daemon noted that an event for the
+address was to come back within ten seconds, and dropped the next add or
+old event for it as that echo. dnsmasq-ha sends none: add_lease clears the
+change flags of the lease it adds, so that no dhcp-script runs for it,
+which is its own guard against ping-pong. What got dropped was the next
+real event for the address: the replay of the lease file for a lease a
+peer reported during startup, or a renewal within ten seconds of a peer's
+update or of the leases learned back after a restart. The renewal then
+reached the peer only one renewal later. The sync flow test "startup 'old'
+event for a lease a peer reported" failed for this.
+
+The daemon no longer expects that echo. delete_lease does report the
+deletion as a "del" event: that echo is still expected and dropped.
+
+tests/test_sync_flow.c covers an event right after an inject and the echo
+of a deletion; the DHCPv6 tests no longer skip the ten seconds.
+
+--- a/daemon/ubus-handler.c
++++ b/daemon/ubus-handler.c
+@@ -626,7 +626,11 @@ int ubus_handler_inject_lease(struct lease_entry *entry)
+         blobmsg_add_string(&b, "client_id", clid_str);
+     }
+ 
+-  remember_suppressed_lease_event(entry->ip_str, SUPPRESSED_ACTION_UPSERT);
++  /* No echo to expect: dnsmasq-ha clears the change flags of a lease added
++   * through add_lease and runs no script for it. Expecting one made the
++   * daemon drop the next real event for the address. delete_lease does
++   * report the deletion, see ubus_handler_delete_lease().
++   */
+ 
+   /* Call dnsmasq.add_lease */
+   ret = ubus_invoke(g_state->ubus_ctx, id, "add_lease", b.head, NULL, NULL, 3000);
+@@ -634,7 +638,6 @@ int ubus_handler_inject_lease(struct lease_entry *entry)
+ 
+   if (ret)
+     {
+-      forget_suppressed_lease_event(entry->ip_str, SUPPRESSED_ACTION_UPSERT);
+       log_error("Failed to inject lease %s: %s", entry->ip_str, ubus_strerror(ret));
+       return -1;
+     }
+--- a/tests/test_sync_flow.c
++++ b/tests/test_sync_flow.c
+@@ -321,14 +321,6 @@ static void fake_event6(const char *action, const char *ip, long expires)
+     handle_lease_event(NULL, NULL, "dhcp.lease", b.head);
+ }
+ 
+-/* The daemon expects the echo of a lease it injected for ten seconds and
+- * drops the next event for that address within them. A renewal comes much
+- * later: forget the pending echoes, as the ten seconds would. */
+-static void reflection_window_passed(void)
+-{
+-    memset(suppressed_events, 0, sizeof(suppressed_events));
+-}
+-
+ /* "del" events dnsmasq emits, asynchronously, for the leases removed
+  * through delete_lease */
+ static void fake_deliver_del_events(void)
+@@ -698,6 +690,58 @@ static void test_delete_failures_still_retried(void)
+     ASSERT_EQ_INT("retry queue drained", retry_queue_count(), 0);
+ }
+ 
++/* ============================================
++ * Events right after a lease was injected
++ *
++ * dnsmasq-ha runs no script for a lease added through add_lease, so the
++ * next event for that address is a real one.
++ * ============================================ */
++static void test_event_after_inject_is_processed(void)
++{
++    struct peer_rx rx;
++    struct lease_entry *e;
++
++    printf("\n=== Test: event for a lease the peer just reported ===\n");
++    reset_state();
++    startup_timer_cb(&startup_timer);
++
++    peer_send(SYNC_ACTION_ADD, "10.0.0.90", "02:00:00:00:00:90",
++              get_timestamp_ms() - 1000, 0);
++    peer_drain(NULL);
++    ASSERT_TRUE("peer lease injected into dnsmasq", fake_find("10.0.0.90") >= 0);
++
++    fake_event("old", "10.0.0.90", "02:00:00:00:00:90");
++    peer_drain(&rx);
++
++    ASSERT_EQ_INT("event is sent to the peer", rx.adds_updates, 1);
++    e = lease_db_find("10.0.0.90");
++    ASSERT_NOT_NULL("lease is tracked", e);
++    if (e)
++        ASSERT_EQ_STR("record is this node's", e->source_node, NODE_ID);
++}
++
++/* A deletion asked of dnsmasq does come back as a "del" event: that echo
++ * is still dropped, and not sent to the peers as a DELETE of this node */
++static void test_delete_echo_still_suppressed(void)
++{
++    struct peer_rx rx;
++
++    printf("\n=== Test: echo of a deletion asked by the peer ===\n");
++    reset_state();
++    startup_timer_cb(&startup_timer);
++
++    peer_send(SYNC_ACTION_ADD, "10.0.0.91", "02:00:00:00:00:91",
++              get_timestamp_ms() - 2000, 0);
++    peer_send(SYNC_ACTION_DELETE, "10.0.0.91", "02:00:00:00:00:91",
++              get_timestamp_ms(), 0);
++    peer_drain(NULL);
++    ASSERT_EQ_INT("dnsmasq deleted the lease", fake_find("10.0.0.91"), -1);
++
++    fake_deliver_del_events();
++    peer_drain(&rx);
++    ASSERT_EQ_INT("the echo is not sent back as a DELETE", rx.deletes, 0);
++}
++
+ /* ============================================
+  * DHCPv6 leases served after a failover or a restart
+  *
+@@ -709,14 +753,13 @@ static void test_delete_failures_still_retried(void)
+ #define V6_LEASE "fd00:192:168:50::100"
+ 
+ /* Usage: a lease the peer reported with the given action, stored and
+- * injected, the echo window over */
++ * injected */
+ static void peer_reported_lease6(uint8_t action, uint32_t expires)
+ {
+     reset_state();
+     startup_timer_cb(&startup_timer);
+     peer_send6(action, V6_LEASE, get_timestamp_ms() - 60000, expires, 0);
+     peer_drain(NULL);
+-    reflection_window_passed();
+ }
+ 
+ static void renewal_taken_over(const char *what, uint8_t action)
+@@ -845,7 +888,6 @@ static void test_dhcpv6_stale_delete_after_takeover(void)
+     startup_timer_cb(&startup_timer);
+     peer_send6(SYNC_ACTION_ADD, V6_LEASE, peer_ts, now + 600, 0);
+     peer_drain(NULL);
+-    reflection_window_passed();
+ 
+     fake_event6("old", V6_LEASE, now + 3600);
+     peer_drain(NULL);
+@@ -879,6 +921,8 @@ int main(void)
+     test_peer_delete_absent_lease_not_retried();
+     test_retry_of_absent_delete_succeeds();
+     test_delete_failures_still_retried();
++    test_event_after_inject_is_processed();
++    test_delete_echo_still_suppressed();
+     test_dhcpv6_renewal_after_failover();
+     test_dhcpv6_renewal_after_restart();
+     test_dhcpv6_echo_stays_suppressed();
