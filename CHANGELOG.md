@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r7, `luci-app-ha-cluster` 2.0.0-r5,
+packages are `ha-cluster` 2.0.0-r7, `luci-app-ha-cluster` 2.0.0-r6,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -66,7 +66,8 @@ upgrading a node.
   - the status reports, for each Kea DHCP daemon, whether it is enabled,
     whether its DHCP sockets are open, and the state of its high
     availability, and the cluster is `DEGRADED` when an enabled daemon is
-    stopped, not listening, alone (`partner-down`) or has ended its HA;
+    stopped, not listening on a device of the cluster, alone
+    (`partner-down`) or has ended its HA;
   - warnings at start for a Kea config without the high-availability hook
     and for one without socket retries, with which a Kea that starts
     before its interface is up never listens;

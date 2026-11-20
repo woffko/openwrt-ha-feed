@@ -396,8 +396,8 @@ on a BACKUP again.
 |-------|---------|
 | `installed`, `running`, `pid`, `uptime` | as for the other services |
 | `enabled` | the daemon's section in `/etc/config/kea` is there and not disabled |
-| `sockets` | `ready`, `retrying` or `failed`: whether Kea has its DHCP sockets open |
-| `sockets_error` | the first reason Kea gives when they are not |
+| `sockets` | `ready`, `retrying` or `failed`, as Kea says it: the last two mean that at least one of its DHCP sockets is not open |
+| `sockets_error` | the reason Kea gives for a device of the cluster, else the first reason it gives |
 | `ha` | `mode`, `state` and `role` of this server in Kea's high availability, `partner_in_touch`, `partner_state`; absent when the hook is not loaded |
 | `problem` | absent, or why this node is not a full member of the DHCP pair |
 
@@ -412,14 +412,23 @@ without it, or with other socket names, the entry stops at `running`.
 | `problem` | When |
 |-----------|------|
 | `stopped` | enabled in Kea's config and not running |
-| `not-listening` | running, `sockets` is not `ready` |
+| `not-listening` | running, and a socket is not open on a device the cluster has an instance or a VIP on |
 | `ha-terminated` | Kea has ended its high availability, as it does when the clocks of the two servers are more than 60 seconds apart |
 | `partner-down` | Kea serves alone |
 
+Kea calls its sockets `failed`, or `retrying`, as soon as one of them is
+not open, on whatever interface its config lists, and goes on listening on
+the others: an interface without an address in the list is enough, and with
+`"*"` any interface of the node. Each of Kea's reasons names its interface,
+and `not-listening` is set when one of them names a device of the cluster,
+or when Kea gives no reason at all. A socket that failed elsewhere shows in
+`sockets` and `sockets_error` and is not held against the cluster.
+
 A Kea without the hook, and one that cannot be asked, are reported as they
-are and not held against the cluster. `sockets` says what Kea believes: the
-deafness after a device was made anew does not show there, which is why
-ha-cluster makes Kea reopen its sockets instead of looking for it.
+are and not held against the cluster either. `sockets` says what Kea
+believes: the deafness after a device was made anew does not show there,
+which is why ha-cluster makes Kea reopen its sockets instead of looking for
+it.
 
 ### Setting up Kea's high availability
 

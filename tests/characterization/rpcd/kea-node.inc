@@ -11,3 +11,8 @@ uci set kea.dhcp4.disabled=0
 chmod +x /usr/sbin/kea-dhcp4
 export KEA_STATUS_GET=kea-status-get
 KEA_FIXTURES="$CHAR/rpcd/fixtures"
+# The cluster's interface 'lan' is the device br-lan, as the network config
+# says (netifd answers nothing in this harness)
+: > /etc/config/network
+uci set network.lan=interface
+uci set network.lan.device=br-lan

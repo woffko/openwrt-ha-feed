@@ -126,22 +126,62 @@ kea_status_get() {
 	KEA_SOCKET="$socket" ucode -e "$KEA_STATUS_UCODE" 2>/dev/null
 }
 
+# Usage: kea_cluster_device <vip or vrrp_instance section>
+# (ha-cluster config loaded)
+# Adds the device of the section's interface to $_kea_cluster_devices, the
+# devices the cluster has an instance or a VIP on.
+_kea_cluster_devices=""
+kea_cluster_device() {
+	local logical device
+
+	config_get logical "$1" interface ""
+	[ -n "$logical" ] || return 0
+	ha_resolve_device device "$logical" || device="$logical"
+	case " $_kea_cluster_devices " in
+		*" $device "*) return 0 ;;
+	esac
+	_kea_cluster_devices="$_kea_cluster_devices $device"
+}
+
+# Usage: kea_cluster_socket_error <Kea's socket errors, one per line>
+# Prints the first error that names a device of the cluster, and fails when
+# none does. Kea calls its sockets "failed" or "retrying" as soon as one of
+# them is not open, on whatever interface its config lists (one without an
+# address, with "*" every interface of the node), and goes on listening on
+# the others. Each error names its interface: "the interface eth0 is down",
+# "failed to open socket on interface br-lan, reason: ...".
+kea_cluster_socket_error() {
+	local errors="$1" device pattern line
+
+	for device in $_kea_cluster_devices; do
+		pattern="interface $(printf '%s' "$device" | sed 's/[][\.*^$+?(){}|]/\\&/g')([^A-Za-z0-9._-]|\$)"
+		line="$(printf '%s\n' "$errors" | grep -m 1 -E -e "$pattern")" || continue
+		printf '%s\n' "$line"
+		return 0
+	done
+	return 1
+}
+
 # Usage: kea_probe dhcp4|dhcp6 <daemon name>
 # Looks at one Kea daemon and leaves what it found in kea_<daemon>_* (the
 # daemon being dhcp4 or dhcp6):
 #   enabled        1 when the Kea init script starts it
 #   pid            its process, empty when it does not run
-#   sockets        ready, retrying or failed: whether it listens for DHCP
-#   sockets_error  the first reason Kea gives when they are not ready
+#   sockets        ready, retrying or failed, as Kea says: failed and
+#                  retrying mean that at least one socket is not open
+#   sockets_error  the reason Kea gives for a device of the cluster, else
+#                  the first reason it gives
 #   ha_mode        hot-standby, load-balancing, passive-backup; empty: no HA
 #   ha_state, ha_role, ha_in_touch, ha_partner_state
 #   problem        empty, or what keeps this node from being a full member
 #                  of the DHCP pair: stopped, not-listening, ha-terminated,
 #                  partner-down
-# A daemon that is not enabled has no problem, whatever its state.
+# A daemon that is not enabled has no problem, whatever its state. Sockets
+# that are not ready are a problem when Kea names a device of the cluster
+# ($_kea_cluster_devices) as the reason, or names none at all.
 kea_probe() {
 	local daemon="$1" name="$2"
-	local enabled=0 pid answer problem=""
+	local enabled=0 pid answer problem="" errors cluster_error deaf=0
 	local kea_sockets="" kea_sockets_error="" kea_ha_mode="" kea_ha_state="" kea_ha_role=""
 	local kea_ha_in_touch="" kea_ha_partner_state=""
 
@@ -155,7 +195,6 @@ kea_probe() {
 		answer="$(kea_status_get "$daemon")"
 		[ -n "$answer" ] && eval "$(printf '%s' "$answer" | jsonfilter \
 			-e 'kea_sockets=@.arguments.sockets.status' \
-			-e 'kea_sockets_error=@.arguments.sockets.errors[0]' \
 			-e 'kea_ha_mode=@.arguments["high-availability"][0]["ha-mode"]' \
 			-e 'kea_ha_state=@.arguments["high-availability"][0]["ha-servers"].local.state' \
 			-e 'kea_ha_role=@.arguments["high-availability"][0]["ha-servers"].local.role' \
@@ -164,10 +203,22 @@ kea_probe() {
 			2>/dev/null)"
 	fi
 
+	if [ -n "$kea_sockets" ] && [ "$kea_sockets" != "ready" ]; then
+		errors="$(printf '%s' "$answer" | jsonfilter -e '@.arguments.sockets.errors[*]' 2>/dev/null)"
+		if [ -z "$errors" ]; then
+			deaf=1
+		elif cluster_error="$(kea_cluster_socket_error "$errors")"; then
+			deaf=1
+			kea_sockets_error="$cluster_error"
+		else
+			kea_sockets_error="$(printf '%s\n' "$errors" | head -n 1)"
+		fi
+	fi
+
 	if [ "$enabled" -eq 1 ]; then
 		if [ -z "$pid" ]; then
 			problem="stopped"
-		elif [ -n "$kea_sockets" ] && [ "$kea_sockets" != "ready" ]; then
+		elif [ "$deaf" -eq 1 ]; then
 			problem="not-listening"
 		elif [ "$kea_ha_state" = "terminated" ]; then
 			problem="ha-terminated"
@@ -430,6 +481,10 @@ case "$1" in
 				# or alone on this node is not healthy either
 				kea_problem=0
 				if [ "$dhcp_backend" = "kea" ]; then
+					config_load ha-cluster
+					_kea_cluster_devices=""
+					config_foreach kea_cluster_device vrrp_instance
+					config_foreach kea_cluster_device vip
 					kea_probe dhcp4 kea-dhcp4
 					kea_probe dhcp6 kea-dhcp6
 					[ -n "$kea_dhcp4_problem$kea_dhcp6_problem" ] && kea_problem=1
