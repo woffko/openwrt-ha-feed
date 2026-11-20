@@ -115,8 +115,17 @@ uci() {
 		"-q get dhcp.lan.force") echo "$POOL_FORCE" ;;
 		"-q get dhcp.lan.ignore") echo "$POOL_IGNORE" ;;
 		"-q get dhcp.lan.dhcpv4") echo "$POOL_DHCPV4" ;;
+		"-q get kea.dhcp4") echo "$KEA4_SECTION" ;;
+		"-q get kea.dhcp4.disabled") echo "$KEA4_DISABLED" ;;
+		"-q get kea.dhcp6") echo "$KEA6_SECTION" ;;
+		"-q get kea.dhcp6.disabled") echo "$KEA6_DISABLED" ;;
 	esac
 }
+# /etc/config/kea: no section for either daemon unless a test says so
+KEA4_SECTION=
+KEA4_DISABLED=
+KEA6_SECTION=
+KEA6_DISABLED=
 
 KEY="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
@@ -130,6 +139,7 @@ add_option() {
 write_config() {
 	sync_method=
 	backend=
+	cluster_enabled=1
 	key="$KEY"
 	encryption=1
 	dhcp_group=1
@@ -158,7 +168,7 @@ write_config() {
 	fi
 
 	add_option config TYPE global
-	add_option config enabled 1
+	add_option config enabled "$cluster_enabled"
 	[ -n "$sync_method" ] && add_option config sync_method "$sync_method"
 	[ -n "$backend" ] && add_option config dhcp_backend "$backend"
 	add_option config lease_sync "$lease_sync"
@@ -457,6 +467,289 @@ expect 'Kea without file sync needs no key' ha_validate_config
 write_config backend=kea key=
 refute 'file sync still needs its key with Kea' ha_validate_config
 echo 'ok - with Kea the authoritative warning is off and the key is asked for file sync only'
+
+# ------------------------------------------------------------------
+# The config file of an enabled Kea daemon: the high-availability hook and
+# the socket retries are looked for, in what is not a comment
+KEA_CONF_DIR="$TEST_ROOT/kea"
+mkdir -p "$KEA_CONF_DIR"
+kea_conf() {
+	printf '%s\n' "$@" > "$KEA_CONF_DIR/kea-dhcp4.conf"
+}
+HOOK='{ "library": "/usr/lib/kea/hooks/libdhcp_ha.so" }'
+RETRIES='"service-sockets-max-retries": 60,'
+
+KEA4_SECTION=service
+KEA4_DISABLED=0
+kea_conf "$RETRIES" "$HOOK"
+write_config backend=kea
+expect 'validation passes' ha_validate_config
+refute 'a config with the hook is not reported' logged 'high-availability hook'
+refute 'a config with retries is not reported' logged 'service-sockets-max-retries'
+
+kea_conf "$RETRIES"
+write_config backend=kea
+expect 'a config without the hook still passes validation' ha_validate_config
+expect 'the missing hook is reported' logged "kea-dhcp4.conf does not load Kea's high-availability hook"
+refute 'the retries are not' logged 'service-sockets-max-retries'
+
+kea_conf "$HOOK"
+write_config backend=kea
+ha_validate_config
+expect 'missing socket retries are reported' logged 'kea-dhcp4.conf sets no service-sockets-max-retries'
+refute 'the hook is not' logged 'high-availability hook'
+
+kea_conf '"service-sockets-max-retries": 0,' "$HOOK"
+write_config backend=kea
+ha_validate_config
+expect 'socket retries set to none are reported' logged 'kea-dhcp4.conf sets no service-sockets-max-retries'
+
+kea_conf '"service-sockets-max-retries" : 5' "$HOOK"
+write_config backend=kea
+ha_validate_config
+refute 'retries written with spaces are found' logged 'service-sockets-max-retries'
+
+kea_conf "  // $RETRIES" "# $HOOK"
+write_config backend=kea
+ha_validate_config
+expect 'a hook named in a comment only is reported as missing' logged 'high-availability hook'
+expect 'retries named in a comment only are reported as missing' logged 'sets no service-sockets-max-retries'
+
+kea_conf '"url": "http://192.0.2.1:8001/",' "$RETRIES" "$HOOK"
+write_config backend=kea
+ha_validate_config
+refute 'a line with // inside a value is not taken for a comment' logged 'kea-dhcp4.conf'
+
+rm -f "$KEA_CONF_DIR/kea-dhcp4.conf"
+write_config backend=kea
+ha_validate_config
+expect 'a missing config file of an enabled daemon is reported' logged 'kea-dhcp4 is enabled but'
+
+kea_conf '{}'
+KEA4_DISABLED=1
+write_config backend=kea
+ha_validate_config
+refute 'the config of a disabled daemon is not looked at' logged 'kea-dhcp4.conf'
+KEA4_SECTION=
+KEA4_DISABLED=
+write_config backend=kea
+ha_validate_config
+refute 'nor that of a daemon without a section' logged 'kea-dhcp4.conf'
+
+KEA4_SECTION=service
+write_config
+ha_validate_config
+refute 'with dnsmasq the Kea config is not looked at' logged 'kea-dhcp4.conf'
+
+KEA4_SECTION=
+KEA6_SECTION=service
+printf '%s\n' '{}' > "$KEA_CONF_DIR/kea-dhcp6.conf"
+write_config backend=kea
+ha_validate_config
+expect 'kea-dhcp6 has its own file' logged "kea-dhcp6.conf does not load Kea's high-availability hook"
+refute 'and kea-dhcp4 is left alone' logged 'kea-dhcp4.conf'
+KEA6_SECTION=
+echo 'ok - the config of an enabled Kea daemon is checked for the hook and for socket retries'
+
+# ------------------------------------------------------------------
+# An interface has come up: a Kea daemon whose config names the device reads
+# its config again, once it takes the signal for that
+HA_PROC_DIR="$TEST_ROOT/proc"
+HA_SYS_NET_DIR="$TEST_ROOT/sys-net"
+HA_KEA_DEVICE_DIR="$RUN_DIR/kea-devices"
+SIGNALS="$TEST_ROOT/signals"
+SLEEPS="$TEST_ROOT/sleeps"
+KEA4_PIDS=
+KEA6_PIDS=
+READY_AFTER=
+pidof() {
+	case "$1" in
+		kea-dhcp4) [ -z "$KEA4_PIDS" ] || echo "$KEA4_PIDS" ;;
+		kea-dhcp6) [ -z "$KEA6_PIDS" ] || echo "$KEA6_PIDS" ;;
+	esac
+}
+kill() {
+	echo "$*" >> "$SIGNALS"
+}
+# SigCgt of a Kea that handles SIGHUP (as read on a running kea-dhcp4), and
+# of one that does not yet
+CATCHES=0000000000004003
+NOT_YET=0000000000004002
+process() {
+	mkdir -p "$HA_PROC_DIR/$1"
+	printf 'Name:\tkea-dhcp4\nSigCgt:\t%s\n' "$2" > "$HA_PROC_DIR/$1/status"
+}
+# Each second waited is counted; after READY_AFTER of them process 4001
+# starts to take the signal
+sleep() {
+	echo "$1" >> "$SLEEPS"
+	[ -n "$READY_AFTER" ] || return 0
+	[ "$(grep -c . "$SLEEPS")" -lt "$READY_AFTER" ] || process 4001 "$CATCHES"
+}
+# The index of a device, as the kernel shows it
+device_index() {
+	mkdir -p "$HA_SYS_NET_DIR/$1"
+	echo "$2" > "$HA_SYS_NET_DIR/$1/ifindex"
+}
+# ifup of an interface on the device it had before
+same_device_up() {
+	: > "$SIGNALS"
+	: > "$SLEEPS"
+	: > "$LOG_FILE"
+	ha_kea_device_up "$@"
+	wait
+}
+# ifup of an interface whose device netifd has made anew: a new index
+NEXT_INDEX=10
+device_up() {
+	NEXT_INDEX=$((NEXT_INDEX + 1))
+	[ -z "${2:-}" ] || device_index "$2" "$NEXT_INDEX"
+	same_device_up "$@"
+}
+signalled() {
+	grep -qx -- "-HUP $1" "$SIGNALS"
+}
+no_signal() {
+	[ ! -s "$SIGNALS" ]
+}
+
+rm -rf "$HA_PROC_DIR"
+KEA4_SECTION=service
+KEA4_PIDS=4001
+process 4001 "$CATCHES"
+kea_conf '"interfaces": [ "br-lan" ],'
+write_config backend=kea
+
+device_up lan br-lan
+expect 'the daemon that listens on the device is signalled' signalled 4001
+expect 'and the log says why' logged "Interface 'lan' (br-lan) is up: kea-dhcp4 told to read its config again"
+[ ! -s "$SLEEPS" ] || fail 'a daemon that takes the signal was waited for'
+
+device_up wan eth9
+expect 'a device the config does not name is no reason' no_signal
+device_up lan br-la
+expect 'nor is a device whose name is the beginning of a named one' no_signal
+# An empty string in the config is not the name of a device
+kea_conf '"interfaces": [ "br-lan" ],' '"boot-file-name": "",'
+device_up lan ''
+expect 'nor an event without a device' no_signal
+
+kea_conf '"interfaces": [ "br-lan/192.0.2.1" ],'
+device_up lan br-lan
+expect 'a device named with an address is found' signalled 4001
+
+kea_conf '"interfaces": [ "*" ],'
+device_up wan eth9
+expect 'a config that listens everywhere is reloaded for any device' signalled 4001
+
+kea_conf '// "interfaces": [ "br-lan" ],' '"interfaces": [ "eth7" ],'
+device_up lan br-lan
+expect 'a device named in a comment only is no reason' no_signal
+
+kea_conf '"interfaces": [ "br-lan" ],'
+write_config
+device_up lan br-lan
+expect 'with dnsmasq as the DHCP server Kea is left alone' no_signal
+write_config backend=kea cluster_enabled=0
+device_up lan br-lan
+expect 'and so it is in a cluster that is switched off' no_signal
+write_config backend=kea
+
+KEA4_PIDS=
+device_up lan br-lan
+expect 'a daemon that does not run gets nothing' no_signal
+[ ! -s "$LOG_FILE" ] || fail 'a daemon that does not run was logged about'
+
+# kea-dhcp6 has its own config and is asked on its own
+KEA4_PIDS=4001
+KEA6_PIDS=6001
+process 6001 "$CATCHES"
+printf '%s\n' '"interfaces": [ "br-guest" ],' > "$KEA_CONF_DIR/kea-dhcp6.conf"
+device_up guest br-guest
+expect 'the daemon whose config names the device is signalled' signalled 6001
+refute 'and the other one is not' signalled 4001
+device_up lan br-lan
+expect 'each for its own device' signalled 4001
+refute 'each for its own device only' signalled 6001
+KEA6_PIDS=
+rm -f "$KEA_CONF_DIR/kea-dhcp6.conf"
+echo 'ok - a Kea daemon reads its config again when a device it listens on has come up'
+
+# A Kea in its first moments does not handle SIGHUP and would be ended by it
+process 4001 "$NOT_YET"
+READY_AFTER=3
+device_up lan br-lan
+expect 'the signal is sent once the daemon takes it' signalled 4001
+[ "$(grep -c . "$SLEEPS")" -eq 3 ] || fail "waited $(grep -c . "$SLEEPS") seconds for a daemon ready after 3"
+
+process 4001 "$NOT_YET"
+READY_AFTER=
+device_up lan br-lan
+expect 'a daemon that never takes the signal is not sent it' no_signal
+[ "$(grep -c . "$SLEEPS")" -eq 10 ] || fail "gave up after $(grep -c . "$SLEEPS") seconds, not 10"
+expect 'and that is reported' logged 'kea-dhcp4 (pid 4001) takes no reload signal'
+
+rm -rf "$HA_PROC_DIR/4001"
+device_up lan br-lan
+expect 'a daemon that is gone is not signalled' no_signal
+[ ! -s "$LOG_FILE" ] || fail 'a daemon that is gone was logged about'
+[ ! -s "$SLEEPS" ] || fail 'a daemon that is gone was waited for'
+echo 'ok - the reload signal waits for a Kea that has just started and is never sent blind'
+
+# Only a device that is another one than at its last ifup is a reason
+process 4001 "$CATCHES"
+rm -rf "$HA_KEA_DEVICE_DIR" "$HA_SYS_NET_DIR"
+device_index br-lan 7
+same_device_up lan br-lan
+expect 'the first ifup of a device counts as a new device' signalled 4001
+[ "$(cat "$HA_KEA_DEVICE_DIR/br-lan")" = "7" ] || fail 'the index of the device was not remembered'
+same_device_up lan br-lan
+expect 'an ifup on the same device leaves Kea alone' no_signal
+device_index br-lan 12
+same_device_up lan br-lan
+expect 'the device made anew, with a new index, is a reason again' signalled 4001
+same_device_up lan br-lan
+expect 'and once is enough' no_signal
+
+device_index br-guest 13
+printf '%s\n' '"interfaces": [ "br-guest" ],' > "$KEA_CONF_DIR/kea-dhcp6.conf"
+KEA6_PIDS=6001
+same_device_up guest br-guest
+expect 'each device has its own index remembered' signalled 6001
+same_device_up lan br-lan
+expect 'and the ifup of one does not stand for another' no_signal
+KEA6_PIDS=
+rm -f "$KEA_CONF_DIR/kea-dhcp6.conf"
+
+rm -rf "$HA_SYS_NET_DIR/br-lan"
+same_device_up lan br-lan
+expect 'a device that is gone again is no reason' no_signal
+[ "$(cat "$HA_KEA_DEVICE_DIR/br-lan")" = "12" ] || fail 'the index of a device that is gone was overwritten'
+
+device_index br-lan 14
+KEA4_PIDS=
+same_device_up lan br-lan
+expect 'no daemon runs: nothing is signalled' no_signal
+KEA4_PIDS=4001
+same_device_up lan br-lan
+expect 'a Kea started after that ifup opened its sockets on that device' no_signal
+
+rm -rf "$HA_KEA_DEVICE_DIR"
+write_config backend=kea cluster_enabled=0
+same_device_up lan br-lan
+[ ! -e "$HA_KEA_DEVICE_DIR/br-lan" ] || fail 'an index was remembered in a cluster that is switched off'
+write_config
+same_device_up lan br-lan
+[ ! -e "$HA_KEA_DEVICE_DIR/br-lan" ] || fail 'an index was remembered with dnsmasq as the DHCP server'
+write_config backend=kea
+# A name that would lead out of both directories, with an index to be found
+mkdir -p "$TEST_ROOT/escape"
+echo 99 > "$TEST_ROOT/escape/ifindex"
+same_device_up lan ../escape
+[ ! -e "$RUN_DIR/escape" ] || fail 'a device name with a slash left the directory'
+KEA4_PIDS=
+KEA4_SECTION=
+echo 'ok - Kea is asked to reload only for a device that is another one than at its last ifup'
 
 write_config backend=isc
 refute 'an unknown backend fails validation' ha_validate_config

@@ -110,17 +110,49 @@ return view.extend({
 		var pid = (isRunning && serviceInfo.pid) || '-';
 		var uptime = (isRunning && this.formatUptime(serviceInfo.uptime)) || '-';
 
+		var problem = (serviceInfo && serviceInfo.problem) || '';
+		var ha = (serviceInfo && serviceInfo.ha) || null;
+
 		var statusBadge;
 		if (isRunning)
 			statusBadge = E('span', { 'class': 'label success' }, _('Running'));
+		else if (problem === 'stopped')
+			// Enabled in Kea's own config, so the cluster has no DHCP here
+			statusBadge = E('span', { 'class': 'label important' }, _('Stopped'));
 		else if (isInstalled)
 			statusBadge = E('span', { 'class': 'label' }, _('Stopped'));
 		else
 			statusBadge = E('span', { 'class': 'label' }, _('Not installed'));
 
+		// What a running Kea says about itself: whether it listens, and
+		// where its own high availability stands. Nothing is added when it
+		// could not be asked.
+		var status = [ statusBadge ];
+		var problems = {
+			'not-listening': _('Not listening'),
+			'ha-terminated': _('Kea HA terminated'),
+			'partner-down': _('Partner down')
+		};
+
+		// The reason Kea gives for sockets that are not open is the tooltip
+		if (isRunning && problems[problem])
+			status.push(' ', E('span', {
+				'class': 'label important',
+				'title': (problem === 'not-listening' && serviceInfo.sockets_error) || null
+			}, problems[problem]));
+
+		if (isRunning && ha) {
+			var text = _('Kea HA: %s (%s)').format(ha.state || '?', ha.role || '?');
+			if (ha.partner_in_touch === false)
+				text += ', ' + _('partner not in touch');
+			status.push(' ', E('span', {}, text));
+		} else if (isRunning && serviceInfo.sockets) {
+			status.push(' ', E('span', {}, _('No Kea HA')));
+		}
+
 		return E('tr', { 'class': 'tr' }, [
 			E('td', { 'class': 'td left', 'data-title': _('Service') }, name),
-			E('td', { 'class': 'td left', 'data-title': _('Status') }, statusBadge),
+			E('td', { 'class': 'td left', 'data-title': _('Status') }, status),
 			E('td', { 'class': 'td left', 'data-title': _('PID') }, String(pid)),
 			E('td', { 'class': 'td left', 'data-title': _('Uptime') }, uptime)
 		]);

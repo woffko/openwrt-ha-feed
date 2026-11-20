@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r6, `luci-app-ha-cluster` 2.0.0-r4,
+packages are `ha-cluster` 2.0.0-r7, `luci-app-ha-cluster` 2.0.0-r5,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -56,6 +56,22 @@ upgrading a node.
   into the keepalived config in place of the device (`br-lan`), keepalived
   waited for a device of that name, and the node stayed in FAULT until
   ha-cluster was restarted. A config that names devices was not affected.
+- With `dhcp_backend 'kea'`, help for Kea's own high availability:
+  - a Kea DHCP daemon is told to read its config again when an interface
+    has come up on a device it listens on and the device is not the one
+    it was. Kea does not notice that netifd made a device anew (`ifdown`
+    and `ifup`, a network restart): it goes on running, calls its sockets
+    ready and hears nothing, while its partner still reaches it and does
+    not take over;
+  - the status reports, for each Kea DHCP daemon, whether it is enabled,
+    whether its DHCP sockets are open, and the state of its high
+    availability, and the cluster is `DEGRADED` when an enabled daemon is
+    stopped, not listening, alone (`partner-down`) or has ended its HA;
+  - warnings at start for a Kea config without the high-availability hook
+    and for one without socket retries, with which a Kea that starts
+    before its interface is up never listens;
+  - a `nodes` call that names the nodes alike on every node and gives
+    their addresses, for setting up Kea's HA.
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
@@ -63,7 +79,8 @@ upgrading a node.
 - Dataplane health checks on the Keepalived (Advanced) page.
 - The peer address is passed to ping after `--`.
 - "DHCP Server" on the General page, for `dhcp_backend`; with Kea the
-  Status page lists the Kea DHCP daemons.
+  Status page lists the Kea DHCP daemons, with what each says about its
+  sockets and its high availability.
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a

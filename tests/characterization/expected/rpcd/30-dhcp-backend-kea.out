@@ -39,6 +39,7 @@
         },
         "kea-dhcp4": {
             "required": false,
+            "enabled": false,
             "installed": false,
             "running": false,
             "pid": 0,
@@ -46,6 +47,7 @@
         },
         "kea-dhcp6": {
             "required": false,
+            "enabled": false,
             "installed": false,
             "running": false,
             "pid": 0,

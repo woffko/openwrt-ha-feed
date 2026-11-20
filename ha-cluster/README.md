@@ -313,17 +313,63 @@ high-availability hook (`kea-hook-ha`), so with this setting:
 - the IPv6 BACKUP guard no longer drops DHCPv6 requests on a BACKUP node.
   Kea decides by itself which server answers, whatever VRRP says, and a
   BACKUP may be the one. Router Advertisements stay guarded as before;
-- the Status page and the `status` call name the backend and show whether
-  `kea-dhcp4` and `kea-dhcp6` are installed and running.
+- the Status page and the `status` call name the backend and say how
+  `kea-dhcp4` and `kea-dhcp6` are doing, see
+  [What the status says about Kea](#what-the-status-says-about-kea).
 
 VRRP, the VIPs, file sync and the guard for Router Advertisements work as
-with dnsmasq.
+with dnsmasq. Kea's primary need not be the VRRP MASTER: the clients reach
+Kea by broadcast and multicast on the LAN, not through the VIP.
+
+### What ha-cluster does for Kea
+
+- **It tells Kea to read its config again when an interface has come up.**
+  Kea opens its DHCP sockets on the devices as they are when it reads its
+  config, and does not follow them. After netifd has made a device anew
+  (`ifdown` and `ifup`, a network restart) Kea runs, reports its sockets as
+  ready, and hears nothing. Its partner still reaches it over the HA link
+  and so does not take over: the clients on that device lose their leases.
+  `/etc/hotplug.d/iface/60-ha-cluster-kea` sends SIGHUP, on which Kea reads
+  its config again and opens its sockets on the device as it is now, to
+  each Kea DHCP daemon whose config names the device that came up (or
+  `"*"`). Kea keeps its process and its leases; its high availability is
+  back in step after a few seconds. A Kea that has only just started has
+  no handler for the signal yet and would be ended by it, so the signal
+  waits, up to ten seconds, until the process takes it.
+
+  The signal is sent only when the device is another one than at its last
+  ifup, which its index tells (remembered under
+  `/var/run/ha-cluster/kea-devices/`): an interface that comes back on the
+  device it had, as after a lost carrier, leaves Kea alone. The first ifup
+  after boot counts as a new device. Reading the config again applies what
+  the file holds by then: a change that was saved to `/etc/kea` and not
+  yet applied takes effect at that moment, and with a file Kea cannot use
+  it logs a failed reconfiguration and keeps the config it had.
+- **It reports Kea in the cluster status**, and calls the cluster
+  `DEGRADED` when Kea is the reason, see below.
+- **It checks two things in the config of each enabled Kea DHCP daemon**
+  (`/etc/kea/kea-dhcp4.conf`, `kea-dhcp6.conf`) at every start, and logs a
+  warning for each that is missing; neither stops the cluster:
+  - the high-availability hook (`libdhcp_ha`): without it, and without a
+    shared lease database, the leases stay on the node that gave them;
+  - `"service-sockets-max-retries"` in `interfaces-config`, with a number
+    above zero. A Kea that cannot open a socket at its start, as at boot
+    when it starts before the interface is up or before the IPv6
+    link-local address is usable, gives up for good unless this is set.
+    Something like `"service-sockets-max-retries": 60` with
+    `"service-sockets-retry-wait-time": 2000` is enough.
+- **It names the nodes for Kea's HA setup**, see
+  [Setting up Kea's high availability](#setting-up-keas-high-availability).
 
 What ha-cluster does not do for Kea:
 
 - It does not start, stop or configure Kea. Set up the subnets and the
   high-availability hook in Kea on every node, with the peers' addresses on
-  the link the nodes sync over.
+  the link the nodes sync over. The signal described above is the one thing
+  it does to a running Kea.
+- It opens no ports in the firewall, for Kea no more than for VRRP, owsync
+  or lease-sync. The ports of Kea's HA listeners must be reachable from the
+  peer.
 - It does not sync Kea's configuration: owsync works inside `/etc/config`,
   and Kea keeps its files in `/etc/kea`.
 - It does not stop dnsmasq from answering DHCP. Take the pools of the
@@ -333,13 +379,100 @@ What ha-cluster does not do for Kea:
 - It does not carry leases over when the backend changes: clients ask
   again.
 
-At every start ha-cluster logs a warning when neither Kea DHCP daemon is
-installed, and when a dnsmasq pool on a VIP interface still answers DHCPv4.
-Neither stops the cluster.
+At every start ha-cluster also logs a warning when neither Kea DHCP daemon
+is installed, and when a dnsmasq pool on a VIP interface still answers
+DHCPv4. Neither stops the cluster.
 
 Back to dnsmasq: remove the option or set it to `dnsmasq`, and reload.
 lease-sync starts again if `lease_sync` is `1`, and the guard drops DHCPv6
 on a BACKUP again.
+
+### What the status says about Kea
+
+`ubus call ha-cluster status` lists `kea-dhcp4` and `kea-dhcp6` under
+`services` when the backend is `kea`:
+
+| Field | Meaning |
+|-------|---------|
+| `installed`, `running`, `pid`, `uptime` | as for the other services |
+| `enabled` | the daemon's section in `/etc/config/kea` is there and not disabled |
+| `sockets` | `ready`, `retrying` or `failed`: whether Kea has its DHCP sockets open |
+| `sockets_error` | the first reason Kea gives when they are not |
+| `ha` | `mode`, `state` and `role` of this server in Kea's high availability, `partner_in_touch`, `partner_state`; absent when the hook is not loaded |
+| `problem` | absent, or why this node is not a full member of the DHCP pair |
+
+`sockets` and `ha` come from Kea itself, asked on its control socket
+(`/var/run/kea/kea4-ctrl-socket`, `kea6-ctrl-socket`, the names of the Kea
+package). This needs the ucode socket module, package `ucode-mod-socket`;
+without it, or with other socket names, the entry stops at `running`.
+
+`problem` is set for an enabled daemon only, and makes the cluster
+`DEGRADED` unless it is `FAULTY` or `STOPPED` for another reason:
+
+| `problem` | When |
+|-----------|------|
+| `stopped` | enabled in Kea's config and not running |
+| `not-listening` | running, `sockets` is not `ready` |
+| `ha-terminated` | Kea has ended its high availability, as it does when the clocks of the two servers are more than 60 seconds apart |
+| `partner-down` | Kea serves alone |
+
+A Kea without the hook, and one that cannot be asked, are reported as they
+are and not held against the cluster. `sockets` says what Kea believes: the
+deafness after a device was made anew does not show there, which is why
+ha-cluster makes Kea reopen its sockets instead of looking for it.
+
+### Setting up Kea's high availability
+
+Kea wants, in the config of both servers, the same list of servers with a
+name and a URL each, and its own name in `this-server-name`.
+`ubus call ha-cluster nodes` gives what a pair needs from the cluster's
+side:
+
+```json
+{
+	"dhcp_backend": "kea",
+	"node": {
+		"name": "ha-192-168-50-2",
+		"label": "node1",
+		"address": "192.168.50.2",
+		"priority": 100,
+		"kea_role": "primary"
+	},
+	"peers": [
+		{
+			"name": "ha-192-168-50-3",
+			"label": "node2",
+			"address": "192.168.50.3",
+			"vrrp_only": false,
+			"kea_role": "standby"
+		}
+	]
+}
+```
+
+- `name` is made from the address a node is reached at by its peers, so
+  every node gives every node the same name. `label` is the host name of
+  this node and the configured name of a peer.
+- `address` of `node` is this node's own address towards its first sync
+  peer: the peer's `source_address`, else `bind_address`, else the one the
+  kernel routes with. It is never a VIP as long as one of the first two is
+  set.
+- `kea_role` is a suggestion for hot-standby: the node whose name sorts
+  first is `primary`, the next `standby`, any further one `backup`. Every
+  node sorts the same names, so they agree without knowing each other's
+  VRRP priority. A peer with `vrrp_only` takes no part.
+
+The call only reads the ha-cluster config and writes nothing. The mode, the
+ports and the URLs are Kea's to choose.
+
+Tried with Kea 3.0.4 in hot-standby on a pair of OpenWrt 25.12.6 x86_64
+guests, DHCPv4 and DHCPv6, leases of 120 seconds: with Kea's primary on
+the VRRP BACKUP the client got and renewed its addresses; Kea's primary
+stopped for three minutes, the node cut off for two and a half, the node
+rebooted: the client kept both addresses each time. Kea of the OpenWrt
+package keeps its lease files in `/var/lib/kea`, which is in RAM: after a
+reboot a node has the leases its partner sends it, and after both nodes
+were down at once there are none, as with dnsmasq's lease file.
 
 ## UCI Configuration
 
@@ -356,7 +489,7 @@ All configuration lives in `/etc/config/ha-cluster`.
 | `sync_encryption` | bool | `1` | Encrypt owsync and lease-sync traffic (AES-256-GCM). With `1`, a sync daemon is not started without a valid `encryption_key`; `0` is the explicit choice of plain mode |
 | `encryption_key` | string | | 256-bit hex key (64 hexadecimal characters); use LuCI "Generate" button or `hexdump -n 32 -v -e '1/1 "%02x"' /dev/urandom` |
 | `lease_sync` | bool | `0` | DHCP lease sync (lease-sync and dnsmasq-ha); the shipped config sets it to `1` |
-| `dhcp_backend` | string | `dnsmasq` | DHCP server on the cluster interfaces: `dnsmasq` or `kea`. With `kea`, lease-sync does not run; ha-cluster refuses to start with any other value. See [Kea as the DHCP Server](#kea-as-the-dhcp-server) |
+| `dhcp_backend` | string | `dnsmasq` | DHCP server on the cluster interfaces: `dnsmasq` or `kea`. With `kea`, lease-sync does not run, Kea is reported in the status and told to reread its config when an interface it listens on comes up; ha-cluster refuses to start with any other value. See [Kea as the DHCP Server](#kea-as-the-dhcp-server) |
 | `sync_port` | int | `4321` | owsync TCP port |
 | `sync_dir` | string | `/etc/config` | Directory to synchronize |
 | `bind_address` | string | | Local IP for sync traffic (use real IP, not VIP) |
@@ -533,6 +666,7 @@ Available environment variables:
 /etc/config/ha-cluster                  UCI configuration
 /etc/init.d/ha-cluster                  procd init script (START=25, STOP=91)
 /usr/lib/ha-cluster/ha-cluster.sh       Core library
+/etc/hotplug.d/iface/60-ha-cluster-kea  With Kea as the DHCP server: Kea rereads its config at ifup
 /var/run/ha-cluster/                        Generated configs (runtime)
 ```
 

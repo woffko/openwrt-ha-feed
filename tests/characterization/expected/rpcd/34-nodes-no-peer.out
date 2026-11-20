@@ -1,0 +1,11 @@
+== nodes rc=0
+{
+    "dhcp_backend": "dnsmasq",
+    "node": {
+        "name": "",
+        "label": "ha-char",
+        "address": "",
+        "priority": 100
+    },
+    "peers": []
+}

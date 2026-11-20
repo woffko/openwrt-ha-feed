@@ -19,6 +19,12 @@ OWSYNC_BIN="${OWSYNC_BIN:-/usr/bin/owsync}"
 LEASE_SYNC_BIN="${LEASE_SYNC_BIN:-/usr/sbin/lease-sync}"
 KEA_DHCP4_BIN="${KEA_DHCP4_BIN:-/usr/sbin/kea-dhcp4}"
 KEA_DHCP6_BIN="${KEA_DHCP6_BIN:-/usr/sbin/kea-dhcp6}"
+KEA_CONF_DIR="${KEA_CONF_DIR:-/etc/kea}"
+KEA_RUN_DIR="${KEA_RUN_DIR:-/var/run/kea}"
+HA_PROC_DIR="${HA_PROC_DIR:-/proc}"
+HA_SYS_NET_DIR="${HA_SYS_NET_DIR:-/sys/class/net}"
+# The index each device had when netifd last brought its interface up
+HA_KEA_DEVICE_DIR="${HA_CLUSTER_RUN_DIR}/kea-devices"
 HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
@@ -216,6 +222,32 @@ ha_resolve_device() {
 
 	eval "$1=\$__ha_dev"
 	return 0
+}
+
+# Usage: ha_node_id <address>
+# A name for a node that every node of the cluster derives alike: from the
+# address the node is reached at by its peers. Kea wants the same server
+# names in the config of both servers.
+ha_node_id() {
+	printf 'ha-%s\n' "$(printf '%s' "$1" | tr '.:' '--')"
+}
+
+# Usage: ha_own_address_for <peer address> <source_address of that peer>
+# (ha-cluster config loaded)
+# This node's own address as that peer reaches it: the source address set
+# for the peer, else bind_address, else the one the kernel routes with.
+# Never a VIP as long as one of the first two is set.
+ha_own_address_for() {
+	local peer="$1" source="$2" bind
+
+	if [ -z "$source" ]; then
+		config_get bind config bind_address ""
+		source="$bind"
+	fi
+	[ -n "$source" ] ||
+		source="$(ip -o route get "$peer" 2>/dev/null | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n 1)"
+
+	printf '%s\n' "$source"
 }
 
 _ha_include_count=0
@@ -1269,6 +1301,141 @@ ha_check_kea_backend() {
 
 	_ha_kea_pools_checked=""
 	config_foreach _ha_check_kea_dnsmasq_pool vip
+
+	_ha_check_kea_daemon_conf dhcp4
+	_ha_check_kea_daemon_conf dhcp6
+}
+
+# Usage: ha_kea_daemon_enabled dhcp4|dhcp6
+# The Kea init script starts the daemon: its section in /etc/config/kea is
+# there and not disabled.
+ha_kea_daemon_enabled() {
+	local disabled
+
+	[ "$(uci -q get "kea.$1")" = "service" ] || return 1
+	disabled="$(uci -q get "kea.$1.disabled")"
+	case "$disabled" in
+		1|on|true|yes|enabled) return 1 ;;
+	esac
+	return 0
+}
+
+# Usage: ha_kea_conf_names_device dhcp4|dhcp6 <device>
+# The daemon's config names the device, alone or with an address after a
+# slash, or every device ("*"). Lines that are only a comment are skipped.
+ha_kea_conf_names_device() {
+	local conf="$KEA_CONF_DIR/kea-$1.conf"
+
+	[ -r "$conf" ] || return 1
+	grep -v -e '^[[:space:]]*//' -e '^[[:space:]]*#' "$conf" |
+		grep -q -F -e "\"$2\"" -e "\"$2/" -e '"*"'
+}
+
+# Usage: _ha_kea_catches_hup <pid>
+# The process has a handler for SIGHUP: the lowest bit of the mask of caught
+# signals in its status.
+_ha_kea_catches_hup() {
+	case "$(sed -n 's/^SigCgt:[[:space:]]*//p' "$HA_PROC_DIR/$1/status" 2>/dev/null)" in
+		*[13579bdfBDF]) return 0 ;;
+	esac
+	return 1
+}
+
+# Usage: _ha_kea_reload <daemon name> <pid> <logical interface> <device>
+# Kea reads its config again on SIGHUP. A Kea in its first moments has no
+# handler for the signal yet and would be ended by it, and those moments are,
+# at boot, when the interfaces come up: the signal is sent once the process
+# catches it, and given up after ten seconds without.
+_ha_kea_reload() {
+	local name="$1" pid="$2" logical="$3" device="$4"
+	local tries=0
+
+	until _ha_kea_catches_hup "$pid"; do
+		[ -d "$HA_PROC_DIR/$pid" ] || return 0
+		tries=$((tries + 1))
+		if [ "$tries" -gt 10 ]; then
+			ha_log_warning "Interface '$logical' ($device) is up, but $name (pid $pid) takes no reload signal: restart Kea if it does not answer on $device"
+			return 0
+		fi
+		sleep 1
+	done
+
+	kill -HUP "$pid" 2>/dev/null || return 0
+	ha_log_info "Interface '$logical' ($device) is up: $name told to read its config again, to listen on the device as it is now"
+}
+
+# Usage: ha_kea_device_up <logical interface> <device>
+# (ha-cluster config loaded)
+# netifd has brought an interface up. Kea opens its DHCP sockets on the
+# devices as they are when it reads its config and does not follow them.
+# After netifd has made a device anew (ifdown and ifup, a network restart)
+# Kea runs, calls its sockets ready, and hears nothing; its partner still
+# reaches it and so does not take over, and the clients on that device lose
+# their leases. Reading the config again makes Kea open its sockets on the
+# device as it is now.
+# Only with Kea as the DHCP server of a cluster that is switched on, and only
+# for a daemon whose config names the device. The wait for a daemon that has
+# just started is left in the background: netifd's other handlers go on.
+#
+# Reading the config again is not free: it applies whatever the file holds
+# by now, and Kea's high availability starts over. So it is asked for only
+# when the device is another one than at its last ifup, which its index
+# tells: an interface that comes back on the device it had, as after a lost
+# carrier, leaves Kea's sockets as they were. The first ifup after boot
+# finds no index remembered and counts as a new device: Kea may have started
+# before it.
+ha_kea_device_up() {
+	local logical="$1" device="$2"
+	local enabled daemon pid index
+
+	config_get_bool enabled config enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+	ha_dhcp_backend_is_kea || return 0
+
+	# A name that is no device has no index either
+	case "$device" in
+		*/*|.|..) return 0 ;;
+	esac
+	index="$(cat "$HA_SYS_NET_DIR/$device/ifindex" 2>/dev/null || true)"
+	[ -n "$index" ] || return 0
+	[ "$(cat "$HA_KEA_DEVICE_DIR/$device" 2>/dev/null || true)" = "$index" ] && return 0
+	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" "$HA_KEA_DEVICE_DIR" 2>/dev/null || return 0
+	printf '%s\n' "$index" > "$HA_KEA_DEVICE_DIR/$device"
+
+	for daemon in dhcp4 dhcp6; do
+		ha_kea_conf_names_device "$daemon" "$device" || continue
+		for pid in $(pidof "kea-$daemon" 2>/dev/null); do
+			_ha_kea_reload "kea-$daemon" "$pid" "$logical" "$device" &
+		done
+	done
+}
+
+# Usage: _ha_check_kea_daemon_conf dhcp4|dhcp6
+# Two things a Kea server of a cluster needs in its config file and that
+# only show when they are missed: the high-availability hook, without which
+# its leases stay on this node, and retries for its sockets, without which
+# a Kea started before the interface is up, as at boot, never listens.
+# The file is the user's (or luci-app-kea's): warnings only. Lines that are
+# only a comment are skipped.
+_ha_check_kea_daemon_conf() {
+	local daemon="$1"
+	local conf="$KEA_CONF_DIR/kea-$daemon.conf"
+	local text
+
+	ha_kea_daemon_enabled "$daemon" || return 0
+	[ -r "$conf" ] || {
+		ha_log_warning "kea-$daemon is enabled but $conf is missing"
+		return 0
+	}
+
+	# grep fails when every line is a comment: that is an answer, not an error
+	text="$(grep -v -e '^[[:space:]]*//' -e '^[[:space:]]*#' "$conf" || true)"
+
+	printf '%s\n' "$text" | grep -q 'libdhcp_ha' ||
+		ha_log_warning "$conf does not load Kea's high-availability hook: unless its lease database is shared, the leases of kea-$daemon stay on this node"
+
+	printf '%s\n' "$text" | grep -q '"service-sockets-max-retries"[[:space:]]*:[[:space:]]*[1-9]' ||
+		ha_log_warning "$conf sets no service-sockets-max-retries: a kea-$daemon started before its interface is up, as at boot, does not listen and does not try again"
 }
 
 # A dnsmasq pool on a VIP interface that still answers DHCPv4: two servers
