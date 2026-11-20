@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r4, `luci-app-ha-cluster` 2.0.0-r3,
+packages are `ha-cluster` 2.0.0-r5, `luci-app-ha-cluster` 2.0.0-r4,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -44,12 +44,20 @@ upgrading a node.
   disabled, or the package removed.
 - The upgrade script puts the guard handler of the installed release
   back after a sysupgrade that kept `/etc/hotplug.d/keepalived/`.
+- `dhcp_backend 'kea'`: ISC Kea as the DHCP server of the cluster
+  interfaces. lease-sync does not run, the checks that only its dnsmasq
+  side needs are skipped, and the guard leaves DHCPv6 to Kea while it keeps
+  guarding Router Advertisements. ha-cluster neither runs nor configures
+  Kea: its high availability is set up in Kea. See
+  [Kea as the DHCP Server](ha-cluster/README.md#kea-as-the-dhcp-server).
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
   `sync_encryption`.
 - Dataplane health checks on the Keepalived (Advanced) page.
 - The peer address is passed to ping after `--`.
+- "DHCP Server" on the General page, for `dhcp_backend`; with Kea the
+  Status page lists the Kea DHCP daemons.
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a

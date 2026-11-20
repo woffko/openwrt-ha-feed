@@ -467,6 +467,15 @@ const ACTIONS = [
 		await setCheckbox(p, field('config', '_group_firewall'), true);
 		await saveMain(p);
 	}],
+	// The lease sync switch is hidden with Kea, and its value must stay
+	['general-dhcp-server-kea', 'full', 'simple', async p => {
+		await select(p, field('config', 'dhcp_backend'), 'kea');
+		await saveMain(p);
+	}],
+	['general-dhcp-server-dnsmasq', 'kea', 'simple', async p => {
+		await select(p, field('config', 'dhcp_backend'), 'dnsmasq');
+		await saveMain(p);
+	}],
 	['vrrp-instance-add', 'full', 'keepalived-advanced', async p => {
 		await addNamed(p, 'vrrp_instance', 'guest');
 		await fill(p, field('guest', 'vrid'), '20');

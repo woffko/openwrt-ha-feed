@@ -17,6 +17,11 @@ config global 'config'
 	#option sync_encryption '1'
 	# DHCP lease sync (lease-sync and dnsmasq-ha packages)
 	option lease_sync '1'
+	# DHCP server on the cluster interfaces: dnsmasq | kea. With kea,
+	# lease-sync does not run (Kea replicates its leases itself; set up its
+	# high availability in Kea, on every node), the dhcp force check is
+	# skipped, and the IPv6 guard leaves DHCPv6 to Kea
+	#option dhcp_backend 'dnsmasq'
 
 	# This node's own address for owsync and lease-sync, so that the VIP is
 	# never used as source; empty = all addresses
@@ -137,6 +142,11 @@ config global 'config'
 	#option sync_encryption '1'
 	# DHCP lease sync (lease-sync and dnsmasq-ha packages)
 	option lease_sync '1'
+	# DHCP server on the cluster interfaces: dnsmasq | kea. With kea,
+	# lease-sync does not run (Kea replicates its leases itself; set up its
+	# high availability in Kea, on every node), the dhcp force check is
+	# skipped, and the IPv6 guard leaves DHCPv6 to Kea
+	#option dhcp_backend 'dnsmasq'
 
 	# This node's own address for owsync and lease-sync, so that the VIP is
 	# never used as source; empty = all addresses

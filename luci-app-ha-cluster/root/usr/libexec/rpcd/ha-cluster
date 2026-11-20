@@ -40,6 +40,41 @@ keepalived_roles() {
 	done
 }
 
+# Usage: kea_service <daemon name> <binary>
+# Adds the daemon to the "services" object. ha-cluster does not run Kea, so
+# the daemon is never required: the entry says whether it is there and runs.
+kea_service() {
+	local name="$1" binary="$2"
+	local pid start_time uptime_jiffies uptime_sec=0
+
+	json_add_object "$name"
+	json_add_boolean required 0
+	if [ -x "$binary" ]; then
+		json_add_boolean installed 1
+	else
+		json_add_boolean installed 0
+	fi
+
+	# No -x: BusyBox pgrep matches the path the daemon was started with,
+	# so an exact match on the bare name finds nothing
+	pid=$(pgrep -o "$name" 2>/dev/null)
+	if [ -n "$pid" ]; then
+		start_time=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+		if [ -n "$start_time" ]; then
+			uptime_jiffies=$(awk '{print $1 * 100}' /proc/uptime 2>/dev/null)
+			uptime_sec=$(awk "BEGIN{print int(($uptime_jiffies - $start_time) / 100)}")
+		fi
+		json_add_boolean running 1
+		json_add_int pid "$pid"
+		json_add_int uptime "$uptime_sec"
+	else
+		json_add_boolean running 0
+		json_add_int pid 0
+		json_add_int uptime 0
+	fi
+	json_close_object
+}
+
 case "$1" in
 	list)
 		json_init
@@ -83,6 +118,9 @@ case "$1" in
 				lease_sync_wanted=0
 
 				ha_enabled=$(get_bool "$(uci -q get ha-cluster.config.enabled)" 0)
+
+				dhcp_backend=$(uci -q get ha-cluster.config.dhcp_backend)
+				dhcp_backend=${dhcp_backend:-dnsmasq}
 
 				if [ "$ha_enabled" != "1" ]; then
 					cluster_state="STOPPED"
@@ -160,9 +198,10 @@ case "$1" in
 					config_last_sync=$(date -r "$owsync_db" +%s 2>/dev/null || echo 0)
 				fi
 
+				# The lease file of dnsmasq says nothing about the leases of Kea
 				leasefile=$(uci -q get dhcp.@dnsmasq[0].leasefile)
 				leasefile=${leasefile:-/tmp/dhcp.leases}
-				if [ -f "$leasefile" ]; then
+				if [ "$dhcp_backend" != "kea" ] && [ -f "$leasefile" ]; then
 					lease_last_sync=$(date -r "$leasefile" +%s 2>/dev/null || echo 0)
 				fi
 
@@ -221,6 +260,7 @@ case "$1" in
 					cluster_state="HEALTHY"
 				fi
 				json_add_string state "$cluster_state"
+				json_add_string dhcp_backend "$dhcp_backend"
 
 
 				json_add_object services
@@ -297,6 +337,11 @@ case "$1" in
 					json_add_int uptime 0
 				fi
 				json_close_object
+
+				if [ "$dhcp_backend" = "kea" ]; then
+					kea_service kea-dhcp4 "$KEA_DHCP4_BIN"
+					kea_service kea-dhcp6 "$KEA_DHCP6_BIN"
+				fi
 
 				json_close_object
 

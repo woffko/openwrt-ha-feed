@@ -17,6 +17,8 @@ OWSYNC_CONF="${HA_CLUSTER_RUN_DIR}/owsync.conf"
 LEASE_SYNC_CONF="${HA_CLUSTER_RUN_DIR}/lease-sync.conf"
 OWSYNC_BIN="${OWSYNC_BIN:-/usr/bin/owsync}"
 LEASE_SYNC_BIN="${LEASE_SYNC_BIN:-/usr/sbin/lease-sync}"
+KEA_DHCP4_BIN="${KEA_DHCP4_BIN:-/usr/sbin/kea-dhcp4}"
+KEA_DHCP6_BIN="${KEA_DHCP6_BIN:-/usr/sbin/kea-dhcp6}"
 HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
@@ -211,10 +213,29 @@ ha_owsync_wanted() {
 	[ "$_ha_include_count" -gt 0 ] && ha_has_sync_peer
 }
 
+# Usage: ha_dhcp_backend (ha-cluster config loaded)
+# Prints the DHCP server whose leases the cluster keeps in step: dnsmasq,
+# with lease-sync, or kea. Kea replicates its leases itself through its
+# high-availability hook, which is configured in Kea, not here.
+ha_dhcp_backend() {
+	local backend
+
+	config_get backend config dhcp_backend "dnsmasq"
+	printf '%s\n' "$backend"
+}
+
+# Usage: ha_dhcp_backend_is_kea (ha-cluster config loaded)
+ha_dhcp_backend_is_kea() {
+	[ "$(ha_dhcp_backend)" = "kea" ]
+}
+
 # Usage: ha_lease_sync_wanted (ha-cluster config loaded)
-# Lease sync is enabled and has a peer to sync with.
+# Lease sync is enabled and has a peer to sync with. Never with Kea, whose
+# leases lease-sync cannot read or write.
 ha_lease_sync_wanted() {
 	local lease_sync
+
+	ha_dhcp_backend_is_kea && return 1
 
 	config_get_bool lease_sync config lease_sync 0
 	[ "$lease_sync" -eq 1 ] && ha_has_sync_peer
@@ -1129,6 +1150,18 @@ ha_validate_config() {
 		ha_log_warning "No peers configured - HA will not function"
 	}
 
+	# Which DHCP server the cluster works with
+	local dhcp_backend
+	dhcp_backend="$(ha_dhcp_backend)"
+	case "$dhcp_backend" in
+		dnsmasq) ;;
+		kea) ha_check_kea_backend ;;
+		*)
+			ha_log_error "dhcp_backend '$dhcp_backend' is not supported (only 'dnsmasq' and 'kea')"
+			errors=$((errors + 1))
+			;;
+	esac
+
 	# When lease sync is active, VIP interfaces need dhcp.*.force=1
 	# so that dnsmasq initializes DHCP (required for ubus add_lease).
 	# Without it, the BACKUP node cannot receive synced leases.
@@ -1172,6 +1205,9 @@ _ha_check_dnsmasq_authoritative() {
 ha_dhcp_authoritative_conflict() {
 	local group_type group_enabled group_files
 
+	# dnsmasq hands out no leases when Kea does
+	ha_dhcp_backend_is_kea && return 1
+
 	if ! ha_lease_sync_active; then
 		[ -x "$OWSYNC_BIN" ] || return 1
 		config_get group_type dhcp TYPE ""
@@ -1190,6 +1226,54 @@ ha_dhcp_authoritative_conflict() {
 		config_foreach _ha_check_dnsmasq_authoritative dnsmasq
 		[ "$_ha_dnsmasq_authoritative" -eq 1 ]
 	)
+}
+
+# Usage: ha_check_kea_backend (ha-cluster config loaded)
+# What does not fit dhcp_backend 'kea'. Warnings only: Kea and
+# /etc/config/dhcp belong to the user, and VRRP works whatever they hold.
+ha_check_kea_backend() {
+	local lease_sync
+
+	[ -x "$KEA_DHCP4_BIN" ] || [ -x "$KEA_DHCP6_BIN" ] ||
+		ha_log_warning "dhcp_backend is 'kea' but neither kea-dhcp4 nor kea-dhcp6 is installed"
+
+	config_get_bool lease_sync config lease_sync 0
+	[ "$lease_sync" -eq 1 ] &&
+		ha_log "lease_sync is not used with dhcp_backend 'kea': Kea replicates its leases itself"
+
+	_ha_kea_pools_checked=""
+	config_foreach _ha_check_kea_dnsmasq_pool vip
+}
+
+# A dnsmasq pool on a VIP interface that still answers DHCPv4: two servers
+# on one node would answer the same clients
+_ha_kea_pools_checked=""
+_ha_check_kea_dnsmasq_pool() {
+	local section="$1"
+	local vip_enabled interface pool pool_interface ignore dhcpv4
+
+	config_get_bool vip_enabled "$section" enabled 1
+	[ "$vip_enabled" -eq 0 ] && return 0
+
+	config_get interface "$section" interface ""
+	[ -z "$interface" ] && return 0
+
+	echo "$_ha_kea_pools_checked" | grep -qw "$interface" && return 0
+	_ha_kea_pools_checked="$_ha_kea_pools_checked $interface"
+
+	# Only type=dhcp sections: dnsmasq sections also have an 'interface' option
+	for pool in $(uci show dhcp 2>/dev/null | grep '=dhcp$' | cut -d. -f2 | cut -d= -f1); do
+		pool_interface=$(uci -q get "dhcp.$pool.interface")
+		[ "$pool_interface" = "$interface" ] || continue
+
+		ignore=$(uci -q get "dhcp.$pool.ignore")
+		dhcpv4=$(uci -q get "dhcp.$pool.dhcpv4")
+		[ "$ignore" = "1" ] && continue
+		[ "$dhcpv4" = "disabled" ] && continue
+
+		ha_log_warning "dnsmasq still answers DHCPv4 on interface '$interface' (dhcp.$pool) while dhcp_backend is 'kea'"
+		ha_log_warning "Set dhcp.$pool.dhcpv4='disabled' to keep its router advertisements, or dhcp.$pool.ignore='1'"
+	done
 }
 
 _ha_dhcp_force_checked=""

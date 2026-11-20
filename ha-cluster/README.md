@@ -188,7 +188,8 @@ only when they are installed, at least one peer with an address is not
 `vrrp_only`, and:
 
 - owsync: at least one enabled sync group lists files
-- lease-sync: `lease_sync='1'`
+- lease-sync: `lease_sync='1'`, and dnsmasq is the DHCP server
+  (`dhcp_backend`, see [Kea as the DHCP Server](#kea-as-the-dhcp-server))
 
 A sync daemon that has work but is not installed is logged as a warning;
 the cluster still starts.
@@ -298,6 +299,48 @@ which the `dhcp` sync group keeps identical on all nodes, rather than in
 default), but it lies outside `sync_dir` (`/etc/config`), so owsync
 cannot sync it.
 
+## Kea as the DHCP Server
+
+Only in this fork. `option dhcp_backend 'kea'` in the `config` section tells
+ha-cluster that ISC Kea gives out the leases on the cluster interfaces. Kea
+replicates its leases between two servers itself, through its
+high-availability hook (`kea-hook-ha`), so with this setting:
+
+- lease-sync is not started, whatever `lease_sync` says, and the `force`
+  option of the DHCP pools is not asked for;
+- the `script-on-renewal` overlay of dnsmasq is removed;
+- the warning about an authoritative dnsmasq is off;
+- the IPv6 BACKUP guard no longer drops DHCPv6 requests on a BACKUP node.
+  Kea decides by itself which server answers, whatever VRRP says, and a
+  BACKUP may be the one. Router Advertisements stay guarded as before;
+- the Status page and the `status` call name the backend and show whether
+  `kea-dhcp4` and `kea-dhcp6` are installed and running.
+
+VRRP, the VIPs, file sync and the guard for Router Advertisements work as
+with dnsmasq.
+
+What ha-cluster does not do for Kea:
+
+- It does not start, stop or configure Kea. Set up the subnets and the
+  high-availability hook in Kea on every node, with the peers' addresses on
+  the link the nodes sync over.
+- It does not sync Kea's configuration: owsync works inside `/etc/config`,
+  and Kea keeps its files in `/etc/kea`.
+- It does not stop dnsmasq from answering DHCP. Take the pools of the
+  cluster interfaces out of dnsmasq yourself: `dhcpv4 'disabled'` in the
+  pool keeps its Router Advertisements, `ignore '1'` turns the pool off.
+  dnsmasq goes on serving DNS, and Router Advertisements if it did.
+- It does not carry leases over when the backend changes: clients ask
+  again.
+
+At every start ha-cluster logs a warning when neither Kea DHCP daemon is
+installed, and when a dnsmasq pool on a VIP interface still answers DHCPv4.
+Neither stops the cluster.
+
+Back to dnsmasq: remove the option or set it to `dnsmasq`, and reload.
+lease-sync starts again if `lease_sync` is `1`, and the guard drops DHCPv6
+on a BACKUP again.
+
 ## UCI Configuration
 
 All configuration lives in `/etc/config/ha-cluster`.
@@ -313,6 +356,7 @@ All configuration lives in `/etc/config/ha-cluster`.
 | `sync_encryption` | bool | `1` | Encrypt owsync and lease-sync traffic (AES-256-GCM). With `1`, a sync daemon is not started without a valid `encryption_key`; `0` is the explicit choice of plain mode |
 | `encryption_key` | string | | 256-bit hex key (64 hexadecimal characters); use LuCI "Generate" button or `hexdump -n 32 -v -e '1/1 "%02x"' /dev/urandom` |
 | `lease_sync` | bool | `0` | DHCP lease sync (lease-sync and dnsmasq-ha); the shipped config sets it to `1` |
+| `dhcp_backend` | string | `dnsmasq` | DHCP server on the cluster interfaces: `dnsmasq` or `kea`. With `kea`, lease-sync does not run; ha-cluster refuses to start with any other value. See [Kea as the DHCP Server](#kea-as-the-dhcp-server) |
 | `sync_port` | int | `4321` | owsync TCP port |
 | `sync_dir` | string | `/etc/config` | Directory to synchronize |
 | `bind_address` | string | | Local IP for sync traffic (use real IP, not VIP) |

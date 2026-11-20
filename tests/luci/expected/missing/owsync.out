@@ -54,6 +54,8 @@ config._generate_key [CBI.ButtonValue] Generate New Key: button "Generate New Ke
 h3: Configuration Files
 config._owsync_missing [CBI.DummyValue] : text "owsync is not installed. Install the owsync package to synchronize configuration files. The 4 enabled sync groups in the configuration will apply once it is installed.Go to Software…"
 h3: DHCP Leases
+config.dhcp_backend [CBI.ListValue] DHCP Server: select=dnsmasq {dnsmasq,kea}
+  help: The server that gives out the leases on the cluster interfaces. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, which are made in Kea on every node. The IPv6 guard then leaves DHCPv6 to Kea and keeps guarding Router Advertisements.
 config.lease_sync [CBI.FlagValue] Real-time Lease Sync: [x]
   help: Replicates DHCP leases between nodes so that clients keep their address after a failover. Independent of the DHCP configuration sync above.
 ==== simple modal peer1

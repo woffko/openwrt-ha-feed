@@ -1,0 +1,3 @@
+staged:
+set config vrrp_transport multicast
+set config dhcp_backend dnsmasq

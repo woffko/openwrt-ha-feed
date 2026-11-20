@@ -48,6 +48,8 @@ config._group_dhcp [CBI.FlagValue] DHCP and DNS: [ ]
 config._group_firewall [CBI.FlagValue] Firewall: [ ]
   help: /etc/config/firewall: zones, rules, port forwards. Review the rules before enabling: they apply to every node.
 h3: DHCP Leases
+config.dhcp_backend [CBI.ListValue] DHCP Server: select=dnsmasq {dnsmasq,kea}
+  help: The server that gives out the leases on the cluster interfaces. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, which are made in Kea on every node. The IPv6 guard then leaves DHCPv6 to Kea and keeps guarding Router Advertisements.
 config.lease_sync [CBI.FlagValue] Real-time Lease Sync: [ ]
   help: Replicates DHCP leases between nodes so that clients keep their address after a failover. Independent of the DHCP configuration sync above.
 ==== keepalived-advanced

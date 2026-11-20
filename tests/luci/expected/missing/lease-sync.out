@@ -57,6 +57,8 @@ config._group_dhcp [CBI.FlagValue] DHCP and DNS: [x]
 config._group_firewall [CBI.FlagValue] Firewall: [x]
   help: /etc/config/firewall: zones, rules, port forwards. Review the rules before enabling: they apply to every node.
 h3: DHCP Leases
+config.dhcp_backend [CBI.ListValue] DHCP Server: select=dnsmasq {dnsmasq,kea}
+  help: The server that gives out the leases on the cluster interfaces. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, which are made in Kea on every node. The IPv6 guard then leaves DHCPv6 to Kea and keeps guarding Router Advertisements.
 config._lease_sync_missing [CBI.DummyValue] : text "lease-sync is not installed. Install the lease-sync and dnsmasq-ha packages to synchronize DHCP leases. Lease sync is on in the configuration and will start once they are installed.Go to Software…"
 ==== simple modal peer1
 h4: High Availability - General

@@ -12,6 +12,7 @@
         }
     ],
     "state": "FAULTY",
+    "dhcp_backend": "dnsmasq",
     "services": {
         "keepalived": {
             "required": true,

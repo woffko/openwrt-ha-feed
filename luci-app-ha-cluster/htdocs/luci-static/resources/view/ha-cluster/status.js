@@ -103,6 +103,29 @@ return view.extend({
 		]);
 	},
 
+	// A Kea daemon: ha-cluster does not run it, the row says what it finds
+	renderKeaRow: function(name, serviceInfo) {
+		var isRunning = (serviceInfo && serviceInfo.running) || false;
+		var isInstalled = (serviceInfo && serviceInfo.installed) || false;
+		var pid = (isRunning && serviceInfo.pid) || '-';
+		var uptime = (isRunning && this.formatUptime(serviceInfo.uptime)) || '-';
+
+		var statusBadge;
+		if (isRunning)
+			statusBadge = E('span', { 'class': 'label success' }, _('Running'));
+		else if (isInstalled)
+			statusBadge = E('span', { 'class': 'label' }, _('Stopped'));
+		else
+			statusBadge = E('span', { 'class': 'label' }, _('Not installed'));
+
+		return E('tr', { 'class': 'tr' }, [
+			E('td', { 'class': 'td left', 'data-title': _('Service') }, name),
+			E('td', { 'class': 'td left', 'data-title': _('Status') }, statusBadge),
+			E('td', { 'class': 'td left', 'data-title': _('PID') }, String(pid)),
+			E('td', { 'class': 'td left', 'data-title': _('Uptime') }, uptime)
+		]);
+	},
+
 	formatLastSync: function(serviceInfo, installed, timestamp) {
 		if (serviceInfo && serviceInfo.required)
 			return this.formatRelativeTime(timestamp);
@@ -114,6 +137,8 @@ return view.extend({
 	renderStatus: function(data, owsyncInstalled, leaseSyncInstalled) {
 		var status = data || {};
 		var services = status.services || {};
+		// Kea replicates its leases itself and lease-sync does not run
+		var keaBackend = status.dhcp_backend === 'kea';
 
 		var clusterState = status.state || 'UNKNOWN';
 		var nodeRole = status.role || 'UNKNOWN';
@@ -207,8 +232,9 @@ return view.extend({
 						]),
 						E('tr', { 'class': 'tr' }, [
 							E('td', { 'class': 'td left' }, _('Lease Sync')),
-							E('td', { 'class': 'td left' },
-								this.formatLastSync(services['lease-sync'], leaseSyncInstalled, syncStatus.lease_last_sync))
+							E('td', { 'class': 'td left' }, keaBackend
+								? _('By Kea')
+								: this.formatLastSync(services['lease-sync'], leaseSyncInstalled, syncStatus.lease_last_sync))
 						])
 					])
 				])
@@ -226,7 +252,10 @@ return view.extend({
 					this.renderServiceRow('keepalived', services.keepalived, true),
 					this.renderServiceRow('owsync', services.owsync, owsyncInstalled),
 					this.renderServiceRow('lease-sync', services['lease-sync'], leaseSyncInstalled)
-				])
+				].concat(keaBackend ? [
+					this.renderKeaRow('kea-dhcp4', services['kea-dhcp4']),
+					this.renderKeaRow('kea-dhcp6', services['kea-dhcp6'])
+				] : []))
 			]),
 
 			E('h3', {}, _('Peer Status')),

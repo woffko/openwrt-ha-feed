@@ -103,13 +103,18 @@ export TEST_LOG_FILE="$LOG_FILE"
 . "$REPO_ROOT/ha-cluster/files/ha-cluster.sh"
 
 # The library asks uci for the dhcp pools of the VIP interfaces: one pool on
-# br-lan, whose force option the test sets.
+# br-lan, whose options the test sets, and one on an interface without VIP.
 POOL_FORCE=1
+POOL_IGNORE=
+POOL_DHCPV4=
 uci() {
 	case "$*" in
-		"show dhcp") echo "dhcp.lan=dhcp" ;;
+		"show dhcp") printf 'dhcp.guest=dhcp\ndhcp.lan=dhcp\n' ;;
+		"-q get dhcp.guest.interface") echo "br-guest" ;;
 		"-q get dhcp.lan.interface") echo "br-lan" ;;
 		"-q get dhcp.lan.force") echo "$POOL_FORCE" ;;
+		"-q get dhcp.lan.ignore") echo "$POOL_IGNORE" ;;
+		"-q get dhcp.lan.dhcpv4") echo "$POOL_DHCPV4" ;;
 	esac
 }
 
@@ -121,9 +126,10 @@ add_option() {
 
 # Usage: write_config [name=value ...]
 #   sync_method, key, encryption, dhcp_group, dhcp_files, lease_sync, peer,
-#   vrrp_only, authoritative, owsync_bin, lease_sync_bin
+#   vrrp_only, authoritative, owsync_bin, lease_sync_bin, backend
 write_config() {
 	sync_method=
+	backend=
 	key="$KEY"
 	encryption=1
 	dhcp_group=1
@@ -154,6 +160,7 @@ write_config() {
 	add_option config TYPE global
 	add_option config enabled 1
 	[ -n "$sync_method" ] && add_option config sync_method "$sync_method"
+	[ -n "$backend" ] && add_option config dhcp_backend "$backend"
 	add_option config lease_sync "$lease_sync"
 	add_option config sync_encryption "$encryption"
 	[ -n "$key" ] && add_option config encryption_key "$key"
@@ -386,5 +393,74 @@ expect 'dnsmasq restarts for a removed overlay' [ "$(restarts)" = 3 ]
 configure_dnsmasq
 expect 'dnsmasq does not restart without an overlay' [ "$(restarts)" = 3 ]
 echo 'ok - the dnsmasq overlay follows active lease sync and restarts dnsmasq only on change'
+
+# ------------------------------------------------------------------
+# Kea as the DHCP server: it replicates its leases itself, so nothing of
+# lease-sync runs, and what dnsmasq needs for lease sync is not asked for.
+KEA_DHCP4_BIN="$BIN_DIR/kea-dhcp4"
+KEA_DHCP6_BIN="$BIN_DIR/kea-dhcp6"
+rm -f "$KEA_DHCP4_BIN" "$KEA_DHCP6_BIN"
+
+write_config
+refute 'dnsmasq is the backend unless said otherwise' ha_dhcp_backend_is_kea
+write_config backend=dnsmasq
+expect 'lease sync is wanted with the dnsmasq backend named' ha_lease_sync_wanted
+configure_dnsmasq
+expect 'the overlay is there before the change to Kea' [ -s "$OVERLAY" ]
+before="$(restarts)"
+
+POOL_FORCE=0
+write_config backend=kea
+expect 'the backend is kea' ha_dhcp_backend_is_kea
+refute 'lease sync is not wanted with Kea' ha_lease_sync_wanted
+refute 'lease sync is not active with Kea' ha_lease_sync_active
+expect 'file sync is still wanted with Kea' ha_owsync_wanted
+expect 'validation passes without the dhcp force of lease sync' ha_validate_config
+refute 'no missing force is reported' logged "force must be '1'"
+expect 'the unused lease_sync switch is mentioned' logged "lease_sync is not used with dhcp_backend 'kea'"
+expect 'a missing Kea is reported' logged 'neither kea-dhcp4 nor kea-dhcp6 is installed'
+expect 'a dnsmasq pool on the VIP interface is reported' \
+	logged "dnsmasq still answers DHCPv4 on interface 'br-lan' (dhcp.lan)"
+refute 'a pool on an interface without VIP is not' logged '(dhcp.guest)'
+POOL_FORCE=1
+generate
+refute 'no lease-sync.conf is written with Kea' [ -e "$RUN_DIR/lease-sync.conf" ]
+expect 'owsync.conf is still written with Kea' [ -s "$RUN_DIR/owsync.conf" ]
+configure_dnsmasq
+refute 'the overlay is removed with Kea' [ -e "$OVERLAY" ]
+expect 'dnsmasq restarts once for the removed overlay' [ "$(restarts)" = "$((before + 1))" ]
+echo 'ok - with Kea nothing of lease-sync runs and its dnsmasq needs are not checked'
+
+printf '#!/bin/sh\n' > "$KEA_DHCP6_BIN"
+chmod +x "$KEA_DHCP6_BIN"
+POOL_DHCPV4=disabled
+write_config backend=kea lease_sync=0
+expect 'validation passes' ha_validate_config
+refute 'an installed Kea daemon is not reported missing' logged 'neither kea-dhcp4 nor kea-dhcp6'
+refute 'a pool with DHCPv4 off is not reported' logged 'still answers DHCPv4'
+refute 'a lease_sync switch that is off is not mentioned' logged 'lease_sync is not used'
+POOL_DHCPV4=
+POOL_IGNORE=1
+write_config backend=kea
+ha_validate_config
+refute 'an ignored pool is not reported' logged 'still answers DHCPv4'
+POOL_IGNORE=
+rm -f "$KEA_DHCP6_BIN"
+echo 'ok - with Kea only what is really in the way is reported'
+
+write_config backend=kea authoritative=1
+refute 'an authoritative dnsmasq is no conflict with Kea' ha_dhcp_authoritative_conflict
+ha_validate_config
+refute 'and is not reported' logged 'dnsmasq is authoritative'
+write_config backend=kea key= dhcp_group=0
+expect 'Kea without file sync needs no key' ha_validate_config
+write_config backend=kea key=
+refute 'file sync still needs its key with Kea' ha_validate_config
+echo 'ok - with Kea the authoritative warning is off and the key is asked for file sync only'
+
+write_config backend=isc
+refute 'an unknown backend fails validation' ha_validate_config
+expect 'the unknown backend is named' logged "dhcp_backend 'isc' is not supported"
+echo 'ok - an unknown DHCP backend is refused'
 
 echo 'All ha-cluster sync gating tests passed.'
