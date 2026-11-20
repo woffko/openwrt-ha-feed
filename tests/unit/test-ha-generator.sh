@@ -91,6 +91,8 @@ cat > "$FAKE_ROOT/lib/functions/network.sh" <<'EOF'
 network_get_device() {
 	local destination="$1"
 	local requested_interface="$2"
+	# NETIFD_SILENT: the interface is not up, netifd has no device for it
+	[ -z "${NETIFD_SILENT:-}" ] || return 1
 	eval "$destination='$requested_interface'"
 }
 EOF
@@ -259,5 +261,65 @@ expect_validation_failure unknown_instance 'unknown managed VRRP instance is rej
 expect_validation_failure missing_instance 'dataplane check without a managed instance is rejected'
 expect_validation_failure unknown_track 'unknown explicit track_script is rejected'
 expect_validation_failure relative_command 'relative custom command is rejected'
+
+# ------------------------------------------------------------------
+# The device of a logical interface: netifd's once the interface is up,
+# the one the network config names while it is not
+NETWORK_TYPE=interface
+NETWORK_DEVICE=br-lan
+uci() {
+	case "$*" in
+		"-q get network.lan") [ -n "$NETWORK_TYPE" ] && echo "$NETWORK_TYPE" ;;
+		"-q get network.lan.device") [ -n "$NETWORK_DEVICE" ] && echo "$NETWORK_DEVICE" ;;
+		*) return 1 ;;
+	esac
+}
+resolved() {
+	device=untouched
+	ha_resolve_device device "$1"
+}
+
+resolved lan
+[ "$device" = "lan" ]
+NETIFD_SILENT=1
+resolved lan
+[ "$device" = "br-lan" ]
+echo 'ok - the device comes from netifd, and from the network config while the interface is not up'
+
+for NETWORK_DEVICE in '' '@wan' 'eth0 eth1'; do
+	if resolved lan; then
+		echo "FAIL - device '$NETWORK_DEVICE' of the network config was taken" >&2
+		exit 1
+	fi
+	[ "$device" = "untouched" ]
+done
+NETWORK_DEVICE=br-lan
+NETWORK_TYPE=device
+if resolved lan; then
+	echo 'FAIL - a section that is no interface was taken' >&2
+	exit 1
+fi
+NETWORK_TYPE=interface
+if resolved br-lan; then
+	echo 'FAIL - a name without a section was resolved' >&2
+	exit 1
+fi
+[ "$device" = "untouched" ]
+echo 'ok - without a device of its own in the network config the name is left to the caller'
+
+write_config valid
+set +eu
+ha_generate_keepalived_conf
+generate_status=$?
+set -eu
+[ "$generate_status" -eq 0 ]
+grep -q '^    interface br-lan$' "$CONF"
+if grep -q '^    interface lan$' "$CONF"; then
+	echo 'FAIL - an instance kept the logical interface name' >&2
+	exit 1
+fi
+grep -q ' dev br-lan$' "$CONF"
+echo 'ok - with the interface not up yet the keepalived config names the device'
+unset NETIFD_SILENT
 
 echo 'All ha-cluster generator tests passed.'

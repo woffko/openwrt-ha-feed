@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r5, `luci-app-ha-cluster` 2.0.0-r4,
+packages are `ha-cluster` 2.0.0-r6, `luci-app-ha-cluster` 2.0.0-r4,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -50,6 +50,12 @@ upgrading a node.
   guarding Router Advertisements. ha-cluster neither runs nor configures
   Kea: its high availability is set up in Kea. See
   [Kea as the DHCP Server](ha-cluster/README.md#kea-as-the-dhcp-server).
+- The device of a logical interface is taken from the network config
+  while netifd has not brought the interface up. ha-cluster starts at boot
+  right after netifd; when it came first, the logical name (`lan`) went
+  into the keepalived config in place of the device (`br-lan`), keepalived
+  waited for a device of that name, and the node stayed in FAULT until
+  ha-cluster was restarted. A config that names devices was not affected.
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
