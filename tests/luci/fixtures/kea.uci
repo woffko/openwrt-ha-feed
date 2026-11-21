@@ -4,6 +4,7 @@ config global 'config'
 	option sync_method 'owsync'
 	option encryption_key '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
 	option dhcp_backend 'kea'
+	option firewall '0'
 
 config vrrp_instance 'main'
 	option vrid '64'

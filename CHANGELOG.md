@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r9, `luci-app-ha-cluster` 2.0.0-r6,
+packages are `ha-cluster` 2.0.0-r10, `luci-app-ha-cluster` 2.0.0-r7,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -79,8 +79,9 @@ upgrading a node.
   like any rule, for VRRP on the devices of the instances and, from the
   addresses of the nodes, for owsync, lease-sync, the listeners of Kea's
   high availability and ping. Every node writes the same rules, so a
-  synced firewall config stays right. `firewall '0'` turns this off. See
-  [Firewall](ha-cluster/README.md#firewall).
+  synced firewall config stays right. `firewall '0'` turns this off, and
+  `/etc/init.d/ha-cluster firewall` brings the rules up to date without
+  touching a daemon. See [Firewall](ha-cluster/README.md#firewall).
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
@@ -90,6 +91,7 @@ upgrading a node.
 - "DHCP Server" on the General page, for `dhcp_backend`; with Kea the
   Status page lists the Kea DHCP daemons, with what each says about its
   sockets and its high availability.
+- "Firewall Rules" on the General page, for `firewall`.
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a

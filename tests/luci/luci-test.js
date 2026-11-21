@@ -476,6 +476,15 @@ const ACTIONS = [
 		await select(p, field('config', 'dhcp_backend'), 'dnsmasq');
 		await saveMain(p);
 	}],
+	// On without the option; written only when its meaning changes
+	['general-firewall-rules-off', 'full', 'simple', async p => {
+		await setCheckbox(p, field('config', 'firewall'), false);
+		await saveMain(p);
+	}],
+	['general-firewall-rules-on', 'kea', 'simple', async p => {
+		await setCheckbox(p, field('config', 'firewall'), true);
+		await saveMain(p);
+	}],
 	['vrrp-instance-add', 'full', 'keepalived-advanced', async p => {
 		await addNamed(p, 'vrrp_instance', 'guest');
 		await fill(p, field('guest', 'vrid'), '20');

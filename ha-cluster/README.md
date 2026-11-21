@@ -380,7 +380,8 @@ What ha-cluster does not do for Kea:
 - It does not choose the ports of Kea's HA listeners: they are in the
   `"url"`s of Kea's config. It opens them for the nodes, see
   [Firewall](#firewall), and learns of a changed port at its next start or
-  reload: reload ha-cluster after changing the URLs.
+  reload, or when told: run `/etc/init.d/ha-cluster firewall` after
+  applying changed URLs in Kea.
 - It does not sync Kea's configuration: owsync works inside `/etc/config`,
   and Kea keeps its files in `/etc/kea`.
 - It does not stop dnsmasq from answering DHCP. Take the pools of the
@@ -546,9 +547,16 @@ How the rules are kept:
   `bind_address` is set, rules written earlier are left as they are; if
   there are none yet, none are written and a warning says so. Setting
   `bind_address` avoids the question.
-- `option firewall '0'` in the `config` section removes the rules and
-  leaves the firewall to you. With a synced firewall config, set it alike
-  on all nodes.
+- `option firewall '0'` in the `config` section ("Firewall Rules" on the
+  General page of LuCI) removes the rules and leaves the firewall to you.
+  With a synced firewall config, set it alike on all nodes.
+- `/etc/init.d/ha-cluster firewall` brings the rules up to date and does
+  nothing else: no daemon is started, stopped or signalled, whether the
+  service runs or not, and nothing happens for a cluster that is switched
+  off. It is what to call when something outside the config of ha-cluster
+  changed what the rules must say, such as the ports of Kea's high
+  availability; `reload` would start a service that was stopped on
+  purpose.
 
 Tried on pairs of OpenWrt 25.12.6 x86_64 guests with the LAN between the
 nodes in a zone with `input 'REJECT'`. Without the rules both nodes were

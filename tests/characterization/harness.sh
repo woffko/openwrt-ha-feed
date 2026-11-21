@@ -164,6 +164,7 @@ case "$mode" in
 			case "$STEP2" in
 				reload) reload_service ;;
 				stop) stop ;;
+				firewall) firewall ;;
 			esac
 			echo "rc=$?"
 			observe

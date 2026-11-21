@@ -153,6 +153,13 @@ return view.extend({
 		o.value('unicast', _('Unicast'));
 		o.default = 'multicast';
 
+		// What the nodes need from each other, kept by the backend as
+		// ordinary rules in the firewall config. On unless switched off:
+		// a config without the option keeps the rules
+		o = s.option(form.Flag, 'firewall', _('Firewall Rules'),
+			_('Keep the rules the cluster needs from its peers in the firewall configuration: VRRP on the interfaces of the instances and, from the addresses of the nodes, the ports of configuration sync, lease sync and the high availability of Kea, and ping. The rules are named HA-Cluster-… and show under Network → Firewall → Traffic Rules. When this is off they are removed and the firewall is yours to set up. Set it the same on every node.'));
+		boolFlag(o, true);
+
 		var vrrpOnlyHelp = _('Tick for a router that does not run ha-cluster, for example a non-OpenWrt VRRP router. It is excluded from configuration and lease sync.') + ' ' +
 			(transport === 'unicast'
 				? _('In unicast mode keepalived still sends it VRRP adverts.')
