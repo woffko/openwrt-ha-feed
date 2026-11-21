@@ -128,6 +128,8 @@ ha-cluster|daemon.err|Failed to apply configuration
 (absent)
 == /etc/ha-cluster/service_states
 (absent)
+== firewall rules of the cluster
+(none)
 == rc.d
 K01keepalived
 K10lease-sync

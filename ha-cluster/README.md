@@ -143,6 +143,12 @@ They add to the list above when a node runs this fork's packages.
   VIPs, else `fe80::5`. Advertisements from any other source address are
   dropped, so a section without that address on its interface advertises
   nothing: give it a link-local VIP.
+- **Firewall rules.** At its first start with this release ha-cluster adds
+  rules named `HA-Cluster-...` to `/etc/config/firewall` and reloads the
+  firewall, see [Firewall](#firewall). A cluster that works today already
+  has what these rules allow, so nothing changes for its traffic; rules of
+  your own for VRRP, owsync or lease-sync can go afterwards. Set
+  `firewall '0'` before the upgrade to keep the firewall config as it is.
 - **Advanced section.** Settings in an unnamed `config advanced` section
   were ignored by the 1.0.x backend and take effect once the section is
   named: check that they are the same on every node, `lease_sync_port`
@@ -204,7 +210,7 @@ without it ha-cluster refuses to start. Plain mode is an explicit choice,
 these settings must be set identically on every node:
 
 - `encryption_key`, `vrrp_transport`, `lease_sync`, `sync_port`,
-  `sync_dir`
+  `sync_dir`, `firewall`
 - the sync groups and exclusions
 - `lease_sync_port` (advanced)
 - for each VRRP instance: `vrid`, `advert_int`, `auth_type`, `auth_pass`,
@@ -367,9 +373,10 @@ What ha-cluster does not do for Kea:
   high-availability hook in Kea on every node, with the peers' addresses on
   the link the nodes sync over. The signal described above is the one thing
   it does to a running Kea.
-- It opens no ports in the firewall, for Kea no more than for VRRP, owsync
-  or lease-sync. The ports of Kea's HA listeners must be reachable from the
-  peer.
+- It does not choose the ports of Kea's HA listeners: they are in the
+  `"url"`s of Kea's config. It opens them for the nodes, see
+  [Firewall](#firewall), and learns of a changed port at its next start or
+  reload: reload ha-cluster after changing the URLs.
 - It does not sync Kea's configuration: owsync works inside `/etc/config`,
   and Kea keeps its files in `/etc/kea`.
 - It does not stop dnsmasq from answering DHCP. Take the pools of the
@@ -483,6 +490,77 @@ package keeps its lease files in `/var/lib/kea`, which is in RAM: after a
 reboot a node has the leases its partner sends it, and after both nodes
 were down at once there are none, as with dnsmasq's lease file.
 
+## Firewall
+
+Only in this fork. The nodes of a cluster talk to each other, and a
+firewall zone that rejects input stops them: without VRRP adverts every node
+becomes MASTER, without their ports owsync, lease-sync and Kea's high
+availability see no peer. ha-cluster keeps what the cluster needs as
+ordinary rules in `/etc/config/firewall`. They are named `HA-Cluster-...`
+(sections `ha_cluster_...`) and show wherever rules show: LuCI under
+*Network → Firewall → Traffic Rules*, `uci show firewall`, and, with their
+packet counters, `nft list chain inet fw4 input`.
+
+| Rule | Lets in | From |
+|------|---------|------|
+| `HA-Cluster-VRRP-<device>` | VRRP (protocol 112), and AH (51) where an instance on that device uses `auth_type 'ah'` | anyone on the device of the instance: the adverts come from the nodes' addresses on that device, which the config does not name |
+| `HA-Cluster-owsync` | TCP `sync_port`, when owsync has work | the nodes that sync |
+| `HA-Cluster-lease-sync` | UDP `lease_sync_port`, when lease-sync has work | the nodes that sync |
+| `HA-Cluster-Kea-HA` | TCP, the ports of the `"url"`s in the config of each enabled Kea DHCP daemon, with `dhcp_backend 'kea'` | the nodes that sync |
+| `HA-Cluster-ping` | ICMP and ICMPv6 echo requests, which the status uses to see a peer | all nodes |
+
+"The nodes" are the peers' addresses and this node's own address towards
+each peer: the peer's `source_address`, else `bind_address`, else the one
+the kernel routes with. With both in every rule, every node writes the same
+rules, and a firewall config that owsync carries from node to node is right
+on each of them. The rules accept from any zone (`src '*'`).
+
+What the clients need (DHCP, DNS, Router Advertisements) is not in these
+rules: that is the business of the zone the clients are in, as it is
+without a cluster.
+
+How the rules are kept:
+
+- They are written at every start and reload of ha-cluster, and only when
+  they differ from what the config holds; the firewall is reloaded when
+  they were written, or when they are in the config and not in the loaded
+  ruleset (as after owsync brought the config from another node).
+- They are rules of ha-cluster: a change made to one by hand, or another
+  section named `ha_cluster_...`, is undone at the next start. Rules of
+  your own under other names are left alone, and so are changes you have
+  staged and not yet applied: ha-cluster commits its rules on their own.
+- Before the firewall is reloaded with new rules it is checked
+  (`fw4 check`); if the check fails the rules are taken out again and an
+  error is logged, since a config firewall4 cannot load would keep the
+  whole firewall from loading.
+- `/etc/init.d/ha-cluster stop` leaves them in place while the node is
+  still part of the cluster (Kea's high availability and the peer's ping
+  do not stop with ha-cluster). They are removed when the node leaves: HA
+  disabled in the config, the service disabled, or the package removed.
+- When this node's own address towards a peer is not known, which happens
+  at boot before the interface is up if neither `source_address` nor
+  `bind_address` is set, rules written earlier are left as they are; if
+  there are none yet, none are written and a warning says so. Setting
+  `bind_address` avoids the question.
+- `option firewall '0'` in the `config` section removes the rules and
+  leaves the firewall to you. With a synced firewall config, set it alike
+  on all nodes.
+
+Tried on pairs of OpenWrt 25.12.6 x86_64 guests with the LAN between the
+nodes in a zone with `input 'REJECT'`. Without the rules both nodes were
+VRRP MASTER, each saw its peer as offline, and two Kea servers that had to
+connect anew were both `partner-down`; with the rules one MASTER, the peer
+online, Kea in `hot-standby`. With dnsmasq and lease-sync, and the dhcp and
+the firewall config synced by owsync: a change to the dhcp config reached
+the other node, the firewall config stayed the same file on both, a
+datagram to the port of lease-sync was let in from a node and rejected from
+a client, and a rebooted node came back as BACKUP with the rules loaded by
+the firewall itself and nothing written again.
+
+A connection that is already open goes on when the rules are taken away:
+the firewall accepts established flows before it looks at any rule. What
+the rules decide is whether the nodes can connect anew.
+
 ## UCI Configuration
 
 All configuration lives in `/etc/config/ha-cluster`.
@@ -502,6 +580,7 @@ All configuration lives in `/etc/config/ha-cluster`.
 | `sync_port` | int | `4321` | owsync TCP port |
 | `sync_dir` | string | `/etc/config` | Directory to synchronize |
 | `bind_address` | string | | Local IP for sync traffic (use real IP, not VIP) |
+| `firewall` | bool | `1` | Keep the rules the cluster needs from its peers in `/etc/config/firewall` (rules named `HA-Cluster-...`); `0` removes them. See [Firewall](#firewall) |
 
 ### VRRP Instances (`config vrrp_instance '<name>'`)
 

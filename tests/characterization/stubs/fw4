@@ -1,0 +1,9 @@
+#!/bin/sh
+# Stands in for firewall4's command (FW4_BIN of the library): records the
+# call in $CHAR_LOG. "check" fails when $FAKE_FW4_CHECK_FAILS is set, as
+# with a config firewall4 cannot load.
+echo "fw4|$*" >> "${CHAR_LOG:-/dev/null}"
+case " $* " in
+	*" check "*) [ -z "$FAKE_FW4_CHECK_FAILS" ] || exit 1 ;;
+esac
+exit 0

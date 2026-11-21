@@ -125,6 +125,7 @@ ha-cluster|daemon.info|Keepalived configuration generated at /var/run/ha-cluster
 ha-cluster|daemon.warning|Config sync enabled but owsync is not installed
 ha-cluster|daemon.warning|DHCP lease sync enabled but lease-sync is not installed
 ha-cluster|daemon.info|HA cluster configuration applied successfully
+ha-cluster|daemon.warning|Firewall rules of the cluster not written: this node's own address towards 172.30.0.11 is not known. Set bind_address, or source_address of the peer, or reload ha-cluster once the interface is up
 ha-cluster|daemon.info|Starting keepalived daemon
 == ls /var/run/ha-cluster
 keepalived.conf
@@ -169,6 +170,8 @@ vrrp_instance main {
 service_states
 == /etc/ha-cluster/service_states
 keepalived=1
+== firewall rules of the cluster
+(none)
 == rc.d
 K10lease-sync
 K10owsync

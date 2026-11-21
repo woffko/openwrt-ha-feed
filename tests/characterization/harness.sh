@@ -39,6 +39,8 @@ CHAR=/char
 export PATH="$CHAR/stubs:$PATH"
 export CHAR_LOG=/tmp/char.log
 : > "$CHAR_LOG"
+# firewall4 is not run here: its command is recorded
+export FW4_BIN="$CHAR/stubs/fw4"
 
 cp "$CHAR/base-ha-cluster" /etc/config/ha-cluster
 cp "$CHAR/base-dhcp" /etc/config/dhcp
@@ -123,6 +125,10 @@ observe() {
 	show_file "$confdir/$HA_DNSMASQ_OVERLAY_NAME"
 	show_dir /etc/ha-cluster
 	show_file /etc/ha-cluster/service_states
+	echo "== firewall rules of the cluster"
+	uci -q show firewall | grep '^firewall\.ha_cluster_' || echo "(none)"
+	# What else a case wants to be seen
+	command -v case_after >/dev/null && case_after
 	echo "== rc.d"
 	ls /etc/rc.d | grep -E 'keepalived|owsync|lease-sync|ha-cluster' || echo "(none)"
 }
@@ -138,6 +144,9 @@ case "$mode" in
 		uci export ha-cluster
 
 		load_init
+
+		# What a case sets up after the config was committed
+		command -v case_before_start >/dev/null && case_before_start
 
 		echo "== start_service"
 		start_service

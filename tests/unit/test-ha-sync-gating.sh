@@ -751,6 +751,184 @@ KEA4_PIDS=
 KEA4_SECTION=
 echo 'ok - Kea is asked to reload only for a device that is another one than at its last ifup'
 
+# ------------------------------------------------------------------
+# The ports of Kea's high availability, from the "url"s of its config
+KEA4_SECTION=service
+KEA4_DISABLED=0
+kea_conf '{ "name": "a", "url": "http://192.0.2.1:8001/", "role": "primary" }, { "name": "b", "url": "http://192.0.2.2:8001/" }' \
+	'  "url" : "https://[2001:db8::2]:8443/ha",' \
+	'  // "url": "http://192.0.2.9:9999/",' \
+	'# "url": "http://192.0.2.9:9998/",' \
+	'  "url": "http://192.0.2.3/",' \
+	'  "library-url": "http://192.0.2.4:7777/",' \
+	'  "url": "http://192.0.2.5:123456/"'
+ports="$(ha_kea_ha_ports | tr '\n' ' ')"
+[ "$ports" = "8001 8443 " ] || fail "ports of the Kea config: '$ports'"
+
+KEA6_SECTION=service
+printf '%s\n' '"url": "http://192.0.2.1:8002/",' '"url": "http://192.0.2.2:8001/"' > "$KEA_CONF_DIR/kea-dhcp6.conf"
+ports="$(ha_kea_ha_ports | tr '\n' ' ')"
+[ "$ports" = "8001 8002 8443 " ] || fail "ports of both Kea configs: '$ports'"
+KEA4_DISABLED=1
+ports="$(ha_kea_ha_ports | tr '\n' ' ')"
+[ "$ports" = "8001 8002 " ] || fail "ports with kea-dhcp4 disabled: '$ports'"
+KEA4_DISABLED=0
+rm -f "$KEA_CONF_DIR/kea-dhcp4.conf" "$KEA_CONF_DIR/kea-dhcp6.conf"
+[ -z "$(ha_kea_ha_ports)" ] || fail 'ports without a Kea config'
+KEA6_SECTION=
+echo 'ok - the ports of Kea high availability are those of the urls in the config of each enabled daemon'
+
+# ------------------------------------------------------------------
+# What the firewall must let in, as a description of rules. netifd answers
+# nothing here: an interface is the device it is named as
+mkdir -p "$FAKE_ROOT/lib/functions"
+printf 'network_get_device() { return 1; }\n' > "$FAKE_ROOT/lib/functions/network.sh"
+OWN_BY_ROUTE=
+ip() {
+	[ -n "$OWN_BY_ROUTE" ] || return 1
+	echo "$4 dev eth0 src $OWN_BY_ROUTE uid 0"
+}
+rules() {
+	ha_firewall_rules > "$TEST_ROOT/rules" 2>/dev/null
+}
+has() {
+	grep -qxF -- "$1" "$TEST_ROOT/rules"
+}
+lacks() {
+	! grep -qF -- "$1" "$TEST_ROOT/rules"
+}
+shown() {
+	_ha_fw_as_shown < "$TEST_ROOT/rules" > "$TEST_ROOT/shown"
+	grep -qxF -- "$1" "$TEST_ROOT/shown"
+}
+
+# A Kea config with ports lies about; with dnsmasq as the DHCP server it
+# opens nothing
+KEA4_SECTION=service
+kea_conf '"url": "http://192.0.2.1:8001/",'
+write_config
+add_option peer1 source_address 192.0.2.1
+expect 'the rules can be described' rules
+expect 'VRRP on the device of the instance' has 'O|ha_cluster_vrrp_1|device|lan'
+expect 'named after it' has 'O|ha_cluster_vrrp_1|name|HA-Cluster-VRRP-lan'
+expect 'coming in' has 'O|ha_cluster_vrrp_1|direction|in'
+expect 'protocol 112' has 'L|ha_cluster_vrrp_1|proto|112'
+expect 'no AH without an instance that uses it' lacks '|proto|51'
+expect 'owsync from this node' has 'L|ha_cluster_owsync|src_ip|192.0.2.1'
+expect 'and from the peer' has 'L|ha_cluster_owsync|src_ip|192.0.2.2'
+expect 'on its port' has 'L|ha_cluster_owsync|dest_port|4321'
+expect 'over TCP' has 'L|ha_cluster_owsync|proto|tcp'
+expect 'lease-sync over UDP' has 'L|ha_cluster_lease_sync|proto|udp'
+expect 'on its port' has 'L|ha_cluster_lease_sync|dest_port|5378'
+expect 'ping from the peer' has 'L|ha_cluster_ping|src_ip|192.0.2.2'
+expect 'as an echo request' has 'L|ha_cluster_ping|icmp_type|echo-request'
+expect 'no rule for Kea with dnsmasq' lacks 'ha_cluster_kea'
+KEA4_SECTION=
+rm -f "$KEA_CONF_DIR/kea-dhcp4.conf"
+expect 'every rule accepts' has 'O|ha_cluster_owsync|target|ACCEPT'
+expect 'from any zone' has 'O|ha_cluster_owsync|src|*'
+expect 'a list reads as uci shows it' shown "ha_cluster_owsync.src_ip='192.0.2.1' '192.0.2.2'"
+expect 'an option too' shown "ha_cluster_owsync.name='HA-Cluster-owsync'"
+expect 'and a section' shown 'ha_cluster_owsync=rule'
+
+add_option config sync_port 4444
+add_option advanced lease_sync_port 5555
+rules
+expect 'the configured port of owsync' has 'L|ha_cluster_owsync|dest_port|4444'
+expect 'the configured port of lease-sync' has 'L|ha_cluster_lease_sync|dest_port|5555'
+
+write_config lease_sync=0 dhcp_group=0
+add_option peer1 source_address 192.0.2.1
+rules
+expect 'no rule for owsync without work for it' lacks 'ha_cluster_owsync'
+expect 'no rule for lease-sync without work for it' lacks 'ha_cluster_lease_sync'
+expect 'ping stays' has 'L|ha_cluster_ping|src_ip|192.0.2.2'
+
+write_config vrrp_only=1
+add_option peer1 source_address 192.0.2.1
+rules
+expect 'a peer that only speaks VRRP gets no sync rule' lacks 'ha_cluster_owsync'
+expect 'and is pinged' has 'L|ha_cluster_ping|src_ip|192.0.2.2'
+
+# A peer that syncs next to one that only speaks VRRP
+write_config
+add_option peer1 source_address 192.0.2.1
+add_option box TYPE peer
+add_option box address 192.0.2.3
+add_option box source_address 192.0.2.1
+add_option box vrrp_only 1
+rules
+expect 'the peer that syncs is in the sync rules' has 'L|ha_cluster_owsync|src_ip|192.0.2.2'
+refute 'the VRRP-only peer is not in the rule of owsync' has 'L|ha_cluster_owsync|src_ip|192.0.2.3'
+refute 'nor in that of lease-sync' has 'L|ha_cluster_lease_sync|src_ip|192.0.2.3'
+expect 'and is pinged like the other' has 'L|ha_cluster_ping|src_ip|192.0.2.3'
+
+# Kea as the DHCP server: its ports, and no lease-sync
+KEA4_SECTION=service
+kea_conf '"url": "http://192.0.2.1:8001/",' '"url": "http://192.0.2.2:8001/"'
+write_config backend=kea
+add_option peer1 source_address 192.0.2.1
+rules
+expect 'the port of Kea high availability' has 'L|ha_cluster_kea|dest_port|8001'
+expect 'from the nodes' has 'L|ha_cluster_kea|src_ip|192.0.2.2'
+expect 'no rule for lease-sync with Kea' lacks 'ha_cluster_lease_sync'
+rm -f "$KEA_CONF_DIR/kea-dhcp4.conf"
+rules
+expect 'no Kea rule without a port' lacks 'ha_cluster_kea'
+KEA4_SECTION=
+
+# More instances, one of them with AH, next to 'main' on 'lan': a rule per
+# device, the devices in the order of their names
+write_config
+add_option one TYPE vrrp_instance
+add_option one interface eth1
+add_option one auth_type AH
+add_option two TYPE vrrp_instance
+add_option two interface br-lan
+add_option three TYPE vrrp_instance
+add_option three interface eth1
+add_option peer1 source_address 192.0.2.1
+rules
+expect 'devices sorted by name' has 'O|ha_cluster_vrrp_1|device|br-lan'
+expect 'each once' has 'O|ha_cluster_vrrp_2|device|eth1'
+expect 'the last one' has 'O|ha_cluster_vrrp_3|device|lan'
+expect 'no further rule for a device named twice' lacks 'ha_cluster_vrrp_4'
+expect 'AH on the device whose instance uses it' has 'L|ha_cluster_vrrp_2|proto|51'
+refute 'and not on another' has 'L|ha_cluster_vrrp_1|proto|51'
+refute 'nor on the third' has 'L|ha_cluster_vrrp_3|proto|51'
+
+# This node's own address: source_address of the peer, bind_address, the
+# kernel's route; without any the rules are not described
+write_config
+add_option config bind_address 192.0.2.7
+rules
+expect 'bind_address is this node' has 'L|ha_cluster_owsync|src_ip|192.0.2.7'
+write_config
+OWN_BY_ROUTE=192.0.2.9
+rules
+expect 'the address the kernel routes with is this node' has 'L|ha_cluster_owsync|src_ip|192.0.2.9'
+OWN_BY_ROUTE=
+write_config
+refute 'without an own address the rules are not described' rules
+[ "$_ha_fw_own_unknown" = " 192.0.2.2" ] || fail "the peer without an own address is not named: '$_ha_fw_own_unknown'"
+
+# Values that would not be an address, a device or a port make no rule
+write_config peer=node2.example
+add_option bad TYPE vrrp_instance
+add_option bad interface 'br-lan; drop'
+rules
+expect 'a peer named by a host name gets no rule' lacks 'node2.example'
+expect 'and a device that is no device name none' lacks 'drop'
+expect 'both are reported' logged "'node2.example' is no IP address"
+expect 'both are reported' logged "is no device name"
+write_config
+add_option peer1 source_address 192.0.2.1
+add_option config sync_port '4321; drop'
+rules
+expect 'a port that is no number makes no rule' lacks 'ha_cluster_owsync'
+unset -f ip
+echo 'ok - the firewall rules of the cluster are described from the instances, the peers and the daemons that have work'
+
 write_config backend=isc
 refute 'an unknown backend fails validation' ha_validate_config
 expect 'the unknown backend is named' logged "dhcp_backend 'isc' is not supported"

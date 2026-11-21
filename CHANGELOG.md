@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r7, `luci-app-ha-cluster` 2.0.0-r6,
+packages are `ha-cluster` 2.0.0-r8, `luci-app-ha-cluster` 2.0.0-r6,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -73,6 +73,13 @@ upgrading a node.
     before its interface is up never listens;
   - a `nodes` call that names the nodes alike on every node and gives
     their addresses, for setting up Kea's HA.
+- The cluster's own traffic is let through the firewall by ha-cluster:
+  rules named `HA-Cluster-...` in `/etc/config/firewall`, visible in LuCI
+  like any rule, for VRRP on the devices of the instances and, from the
+  addresses of the nodes, for owsync, lease-sync, the listeners of Kea's
+  high availability and ping. Every node writes the same rules, so a
+  synced firewall config stays right. `firewall '0'` turns this off. See
+  [Firewall](ha-cluster/README.md#firewall).
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
