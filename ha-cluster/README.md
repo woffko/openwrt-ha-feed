@@ -353,11 +353,15 @@ Kea by broadcast and multicast on the LAN, not through the VIP.
   it logs a failed reconfiguration and keeps the config it had.
 - **It reports Kea in the cluster status**, and calls the cluster
   `DEGRADED` when Kea is the reason, see below.
-- **It checks two things in the config of each enabled Kea DHCP daemon**
+- **It checks three things in the config of each enabled Kea DHCP daemon**
   (`/etc/kea/kea-dhcp4.conf`, `kea-dhcp6.conf`) at every start, and logs a
-  warning for each that is missing; neither stops the cluster:
+  warning for each that is missing; none stops the cluster:
   - the high-availability hook (`libdhcp_ha`): without it, and without a
     shared lease database, the leases stay on the node that gave them;
+  - a port in every `"url"` of the hook. Kea takes `http://192.168.50.2/`
+    as valid, then listens on a port the kernel picks and connects to port
+    0 of its partner: such a pair never meets, and there is no port to
+    open in the firewall;
   - `"service-sockets-max-retries"` in `interfaces-config`, with a number
     above zero. A Kea that cannot open a socket at its start, as at boot
     when it starts before the interface is up or before the IPv6

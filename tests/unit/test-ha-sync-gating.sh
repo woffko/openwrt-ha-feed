@@ -520,6 +520,33 @@ write_config backend=kea
 ha_validate_config
 refute 'a line with // inside a value is not taken for a comment' logged 'kea-dhcp4.conf'
 
+# Every url of the hook needs a port: Kea accepts one without and then
+# cannot be found by its partner
+kea_conf "$RETRIES" "$HOOK" '"url": "http://192.0.2.1:8001/",' '{ "name": "b", "url": "http://[2001:db8::2]:8001/" }'
+write_config backend=kea
+ha_validate_config
+refute 'urls with a port are not reported' logged 'without a port'
+
+kea_conf "$RETRIES" "$HOOK" '"url": "http://192.0.2.1:8001/",' '"url": "http://192.0.2.2/"'
+write_config backend=kea
+ha_validate_config
+expect 'a url without a port is reported, and named' logged "has the url 'http://192.0.2.2/' without a port"
+
+kea_conf "$RETRIES" "$HOOK" '"url": "http://[2001:db8::8001]/"'
+write_config backend=kea
+ha_validate_config
+expect 'the end of an IPv6 address is not taken for a port' logged "has the url 'http://[2001:db8::8001]/' without a port"
+
+kea_conf "$RETRIES" "$HOOK" '"url": "http://192.0.2.2"'
+write_config backend=kea
+ha_validate_config
+expect 'nor is a port assumed for a url that ends with the address' logged "has the url 'http://192.0.2.2' without a port"
+
+kea_conf "$RETRIES" "$HOOK" '  // "url": "http://192.0.2.2/",' '"url": "http://192.0.2.2:8001"'
+write_config backend=kea
+ha_validate_config
+refute 'a url in a comment is not looked at' logged 'without a port'
+
 rm -f "$KEA_CONF_DIR/kea-dhcp4.conf"
 write_config backend=kea
 ha_validate_config

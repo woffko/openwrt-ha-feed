@@ -1787,16 +1787,17 @@ ha_stop_firewall() {
 }
 
 # Usage: _ha_check_kea_daemon_conf dhcp4|dhcp6
-# Two things a Kea server of a cluster needs in its config file and that
+# Three things a Kea server of a cluster needs in its config file and that
 # only show when they are missed: the high-availability hook, without which
-# its leases stay on this node, and retries for its sockets, without which
-# a Kea started before the interface is up, as at boot, never listens.
+# its leases stay on this node; a port in every "url" of that hook; and
+# retries for its sockets, without which a Kea started before the interface
+# is up, as at boot, never listens.
 # The file is the user's (or luci-app-kea's): warnings only. Lines that are
 # only a comment are skipped.
 _ha_check_kea_daemon_conf() {
 	local daemon="$1"
 	local conf="$KEA_CONF_DIR/kea-$daemon.conf"
-	local text
+	local text url
 
 	ha_kea_daemon_enabled "$daemon" || return 0
 	[ -r "$conf" ] || {
@@ -1809,6 +1810,16 @@ _ha_check_kea_daemon_conf() {
 
 	printf '%s\n' "$text" | grep -q 'libdhcp_ha' ||
 		ha_log_warning "$conf does not load Kea's high-availability hook: unless its lease database is shared, the leases of kea-$daemon stay on this node"
+
+	# Kea takes a url without a port as valid: its listener then gets a port
+	# of the kernel's choosing and its partner connects to port 0 (Kea 3.0.4,
+	# src/lib/http/url.cc and the listener in ha_service.cc). No such port can
+	# be opened in the firewall either.
+	url="$(printf '%s\n' "$text" | grep -o '"url"[[:space:]]*:[[:space:]]*"[^"]*"' |
+		grep -v ':[0-9]\{1,5\}\(/[^"]*\)\{0,1\}"$' | head -n 1 |
+		sed 's/^"url"[[:space:]]*:[[:space:]]*"\(.*\)"$/\1/')"
+	[ -z "$url" ] ||
+		ha_log_warning "$conf has the url '$url' without a port: Kea does not listen on a port its partner can find, and ha-cluster cannot open one in the firewall. Give every url of Kea's high availability a port"
 
 	printf '%s\n' "$text" | grep -q '"service-sockets-max-retries"[[:space:]]*:[[:space:]]*[1-9]' ||
 		ha_log_warning "$conf sets no service-sockets-max-retries: a kea-$daemon started before its interface is up, as at boot, does not listen and does not try again"
