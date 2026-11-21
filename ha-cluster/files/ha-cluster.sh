@@ -188,6 +188,34 @@ ha_has_sync_peer() {
 	[ "$_ha_sync_peer_count" -gt 0 ]
 }
 
+# Usage: ha_resolve_device <destination variable> <logical interface>
+# The device of a logical interface. netifd knows it once the interface is
+# up; before that, as when the service starts at boot ahead of netifd, the
+# device the network config names for the interface is taken. Without it the
+# logical name itself went into the keepalived config, and keepalived waited
+# for a device of that name for good.
+# Fails, with the variable untouched, for a name that is no logical
+# interface: the caller then takes the name for a device.
+ha_resolve_device() {
+	local __ha_dev=""
+
+	. "${HA_CLUSTER_ROOT}/lib/functions/network.sh"
+	if network_get_device __ha_dev "$2" 2>/dev/null && [ -n "$__ha_dev" ]; then
+		eval "$1=\$__ha_dev"
+		return 0
+	fi
+
+	[ "$(uci -q get "network.$2")" = "interface" ] || return 1
+	__ha_dev="$(uci -q get "network.$2.device")"
+	case "$__ha_dev" in
+		# Nothing named, several devices, or an alias of another interface
+		''|*' '*|@*) return 1 ;;
+	esac
+
+	eval "$1=\$__ha_dev"
+	return 0
+}
+
 _ha_include_count=0
 _ha_count_include() {
 	_ha_include_count=$((_ha_include_count + 1))
@@ -353,7 +381,7 @@ _ha_write_vrrp_instance_options() {
 		echo "    track_interface {" >> "$KEEPALIVED_CONF"
 		for iface in $track_ifaces; do
 			local resolved_iface
-			if network_get_device resolved_iface "$iface" 2>/dev/null; then
+			if ha_resolve_device resolved_iface "$iface"; then
 				ha_log_debug "VIP $label: resolved track_interface '$iface' to device '$resolved_iface'"
 				echo "        $resolved_iface" >> "$KEEPALIVED_CONF"
 			else
@@ -416,9 +444,8 @@ _ha_collect_vip_for_instance() {
 	[ -z "$vip_address" ] && [ -z "$vip_address6" ] && { ha_log_warning "VIP $vip_section has no address (IPv4 or IPv6)"; return 1; }
 
 	# Resolve interface name
-	. "${HA_CLUSTER_ROOT}/lib/functions/network.sh"
 	local vip_iface_resolved
-	if network_get_device vip_iface_resolved "$vip_interface_logical" 2>/dev/null; then
+	if ha_resolve_device vip_iface_resolved "$vip_interface_logical"; then
 		ha_log_debug "VIP $vip_section: resolved interface '$vip_interface_logical' to device '$vip_iface_resolved'"
 	else
 		vip_iface_resolved="$vip_interface_logical"
@@ -526,8 +553,7 @@ ha_generate_vrrp_group() {
 	[ -z "$vrid" ] && { ha_log_warning "vrrp_instance $section has no VRID"; return 1; }
 
 	# Resolve primary interface
-	. "${HA_CLUSTER_ROOT}/lib/functions/network.sh"
-	if network_get_device interface "$interface_logical" 2>/dev/null; then
+	if ha_resolve_device interface "$interface_logical"; then
 		ha_log_debug "vrrp_instance $section: resolved interface '$interface_logical' to device '$interface'"
 	else
 		interface="$interface_logical"
