@@ -1,0 +1,26 @@
+== nodes rc=0
+{
+    "dhcp_backend": "kea",
+    "node": {
+        "name": "ha-172-30-0-12",
+        "label": "ha-char",
+        "address": "172.30.0.12",
+        "priority": 150,
+        "kea_role": "standby"
+    },
+    "peers": [
+        {
+            "name": "ha-172-30-0-11",
+            "label": "node2",
+            "address": "172.30.0.11",
+            "vrrp_only": false,
+            "kea_role": "primary"
+        },
+        {
+            "name": "ha-172-30-0-1",
+            "label": "switch",
+            "address": "172.30.0.1",
+            "vrrp_only": true
+        }
+    ]
+}

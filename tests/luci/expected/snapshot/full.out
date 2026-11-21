@@ -30,6 +30,8 @@ config.node_priority [CBI.Value] Priority: value=150 (placeholder "100")
   help: VRRP priority (1-255). Higher priority becomes MASTER.
 config.vrrp_transport [CBI.ListValue] VRRP Transport: select=unicast {multicast,unicast}
   help: Multicast is the default. Use unicast when multicast is unavailable on the network. Unicast adverts go to the peers below, from the first Source Address set: this fits only failover groups on the peers' network; another group sets its own unicast addresses in Advanced VRRP.
+config.firewall [CBI.FlagValue] Firewall Rules: [x]
+  help: Keep the rules the cluster needs from its peers in the firewall configuration: VRRP on the interfaces of the instances and, from the addresses of the nodes, the ports of configuration sync, lease sync and the high availability of Kea, and ping. The rules are named HA-Cluster-… and show under Network → Firewall → Traffic Rules. When this is off they are removed and the firewall is yours to set up. Set it the same on every node.
 h3: Peer Routers
 Other routers of the cluster. Configuration and lease sync run with every peer not marked VRRP only. In unicast mode, VRRP adverts are sent to every peer listed here, except for failover groups with their own unicast peers.
 | Peer | Role | 
@@ -57,6 +59,8 @@ config._group_dhcp [CBI.FlagValue] DHCP and DNS: [x]
 config._group_firewall [CBI.FlagValue] Firewall: [x]
   help: /etc/config/firewall: zones, rules, port forwards. Review the rules before enabling: they apply to every node.
 h3: DHCP Leases
+config.dhcp_backend [CBI.ListValue] DHCP Server: select=dnsmasq {dnsmasq,kea}
+  help: The server that gives out the leases on the cluster interfaces. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, which are made in Kea on every node. The IPv6 guard then leaves DHCPv6 to Kea and keeps guarding Router Advertisements.
 config.lease_sync [CBI.FlagValue] Real-time Lease Sync: [x]
   help: Replicates DHCP leases between nodes so that clients keep their address after a failover. Independent of the DHCP configuration sync above.
 ==== simple modal peer1
@@ -295,7 +299,7 @@ h4: High Availability - Advanced Config Sync - openvpn
 openvpn.enabled [CBI.FlagValue] Enable Sync: [x]
   help: Enable synchronization for this group.
 openvpn.config_files [CBI.DynamicList] Files/Directories to Sync: item=openvpn item=/etc/openvpn/keys
-  help: UCI names (e.g., "openvpn") or absolute paths (e.g., "/etc/openvpn/keys").
+  help: Names of files in /etc/config (e.g., "openvpn"), or a pattern such as "openvpn*". Configuration sync covers /etc/config only: a path that starts with "/" syncs nothing, and the backend warns about it.
 <button> Dismiss
 <button> Save
 ==== owsync-advanced modal mwan3
@@ -303,7 +307,7 @@ h4: High Availability - Advanced Config Sync - mwan3
 mwan3.enabled [CBI.FlagValue] Enable Sync: [ ]
   help: Enable synchronization for this group.
 mwan3.config_files [CBI.DynamicList] Files/Directories to Sync: item=mwan3
-  help: UCI names (e.g., "openvpn") or absolute paths (e.g., "/etc/openvpn/keys").
+  help: Names of files in /etc/config (e.g., "openvpn"), or a pattern such as "openvpn*". Configuration sync covers /etc/config only: a path that starts with "/" syncs nothing, and the backend warns about it.
 <button> Dismiss
 <button> Save
 ==== owsync-advanced modal ipsec
@@ -311,7 +315,7 @@ h4: High Availability - Advanced Config Sync - ipsec
 ipsec.enabled [CBI.FlagValue] Enable Sync: [x]
   help: Enable synchronization for this group.
 ipsec.config_files [CBI.DynamicList] Files/Directories to Sync: item=ipsec
-  help: UCI names (e.g., "openvpn") or absolute paths (e.g., "/etc/openvpn/keys").
+  help: Names of files in /etc/config (e.g., "openvpn"), or a pattern such as "openvpn*". Configuration sync covers /etc/config only: a path that starts with "/" syncs nothing, and the backend warns about it.
 <button> Dismiss
 <button> Save
 ==== lease-sync-advanced

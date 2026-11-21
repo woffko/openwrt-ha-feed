@@ -40,12 +40,273 @@ keepalived_roles() {
 	done
 }
 
+# Usage: nodes_collect_peer <peer section> (ha-cluster config loaded)
+# One line per peer with an address: address|own address|label|vrrp_only
+_nodes_peers=""
+nodes_collect_peer() {
+	local section="$1"
+	local address source label vrrp_only
+
+	config_get address "$section" address ""
+	[ -n "$address" ] || return 0
+	config_get source "$section" source_address ""
+	config_get label "$section" name "$section"
+	config_get_bool vrrp_only "$section" vrrp_only 0
+
+	_nodes_peers="${_nodes_peers}${address}|$(ha_own_address_for "$address" "$source")|${label}|${vrrp_only}
+"
+}
+
+# Usage: nodes_role <node id>
+# The part suggested for the node in Kea's hot-standby: the first id in
+# sort order is the primary. Every node sorts the same ids ($_nodes_sorted)
+# and so finds the same parts, without knowing the others' VRRP priority.
+nodes_role() {
+	local position
+
+	[ -n "$1" ] || return 0
+	position=$(printf '%s\n' "$_nodes_sorted" | grep -n -x -F "$1" | head -n 1 | cut -d: -f1)
+	case "$position" in
+		1) echo "primary" ;;
+		2) echo "standby" ;;
+		'') ;;
+		*) echo "backup" ;;
+	esac
+}
+
+# A program that prints a Kea daemon's answer to status-get, given the
+# control socket as its argument, in place of the ucode below (for tests)
+KEA_STATUS_GET="${KEA_STATUS_GET:-}"
+
+# Asks the Kea daemon behind the control socket $KEA_SOCKET for its status.
+# Gives up two seconds after the question, so that a Kea that does not answer
+# cannot hold up the status of the cluster.
+KEA_STATUS_UCODE='
+import * as socket from "socket";
+
+let s = socket.create(socket.AF_UNIX, socket.SOCK_STREAM);
+
+if (!s || !s.connect({ family: socket.AF_UNIX, path: getenv("KEA_SOCKET") }))
+	exit(1);
+
+s.send("{\"command\":\"status-get\"}");
+
+let answer = "";
+
+for (let tries = 0; tries < 20; tries++) {
+	if (!length(socket.poll(100, s)))
+		continue;
+
+	let chunk = s.recv(16384);
+
+	if (!length(chunk))
+		break;
+
+	answer += chunk;
+
+	try { json(answer); break; } catch (e) {}
+}
+
+print(answer);
+'
+
+# Usage: kea_status_get dhcp4|dhcp6
+# Prints Kea's answer to status-get, or nothing: the daemon has no control
+# socket under the name the Kea package gives it, the ucode socket module
+# (ucode-mod-socket) is not installed, or no answer came.
+kea_status_get() {
+	local socket="$KEA_RUN_DIR/kea${1#dhcp}-ctrl-socket"
+
+	if [ -n "$KEA_STATUS_GET" ]; then
+		"$KEA_STATUS_GET" "$socket" 2>/dev/null
+		return 0
+	fi
+
+	[ -S "$socket" ] || return 0
+	KEA_SOCKET="$socket" ucode -e "$KEA_STATUS_UCODE" 2>/dev/null
+}
+
+# Usage: kea_cluster_device <vip or vrrp_instance section>
+# (ha-cluster config loaded)
+# Adds the device of the section's interface to $_kea_cluster_devices, the
+# devices the cluster has an instance or a VIP on.
+_kea_cluster_devices=""
+kea_cluster_device() {
+	local logical device
+
+	config_get logical "$1" interface ""
+	[ -n "$logical" ] || return 0
+	ha_resolve_device device "$logical" || device="$logical"
+	case " $_kea_cluster_devices " in
+		*" $device "*) return 0 ;;
+	esac
+	_kea_cluster_devices="$_kea_cluster_devices $device"
+}
+
+# Usage: kea_cluster_socket_error <Kea's socket errors, one per line>
+# Prints the first error that names a device of the cluster, and fails when
+# none does. Kea calls its sockets "failed" or "retrying" as soon as one of
+# them is not open, on whatever interface its config lists (one without an
+# address, with "*" every interface of the node), and goes on listening on
+# the others. Each error names its interface: "the interface eth0 is down",
+# "failed to open socket on interface br-lan, reason: ...".
+kea_cluster_socket_error() {
+	local errors="$1" device pattern line
+
+	for device in $_kea_cluster_devices; do
+		pattern="interface $(printf '%s' "$device" | sed 's/[][\.*^$+?(){}|]/\\&/g')([^A-Za-z0-9._-]|\$)"
+		line="$(printf '%s\n' "$errors" | grep -m 1 -E -e "$pattern")" || continue
+		printf '%s\n' "$line"
+		return 0
+	done
+	return 1
+}
+
+# Usage: kea_probe dhcp4|dhcp6 <daemon name>
+# Looks at one Kea daemon and leaves what it found in kea_<daemon>_* (the
+# daemon being dhcp4 or dhcp6):
+#   enabled        1 when the Kea init script starts it
+#   pid            its process, empty when it does not run
+#   sockets        ready, retrying or failed, as Kea says: failed and
+#                  retrying mean that at least one socket is not open
+#   sockets_error  the reason Kea gives for a device of the cluster, else
+#                  the first reason it gives
+#   ha_mode        hot-standby, load-balancing, passive-backup; empty: no HA
+#   ha_state, ha_role, ha_in_touch, ha_partner_state
+#   problem        empty, or what keeps this node from being a full member
+#                  of the DHCP pair: stopped, not-listening, ha-terminated,
+#                  partner-down
+# A daemon that is not enabled has no problem, whatever its state. Sockets
+# that are not ready are a problem when Kea names a device of the cluster
+# ($_kea_cluster_devices) as the reason, or names none at all.
+kea_probe() {
+	local daemon="$1" name="$2"
+	local enabled=0 pid answer problem="" errors cluster_error deaf=0
+	local kea_sockets="" kea_sockets_error="" kea_ha_mode="" kea_ha_state="" kea_ha_role=""
+	local kea_ha_in_touch="" kea_ha_partner_state=""
+
+	ha_kea_daemon_enabled "$daemon" && enabled=1
+
+	# No -x: BusyBox pgrep matches the path the daemon was started with,
+	# so an exact match on the bare name finds nothing
+	pid=$(pgrep -o "$name" 2>/dev/null)
+
+	if [ -n "$pid" ]; then
+		answer="$(kea_status_get "$daemon")"
+		[ -n "$answer" ] && eval "$(printf '%s' "$answer" | jsonfilter \
+			-e 'kea_sockets=@.arguments.sockets.status' \
+			-e 'kea_ha_mode=@.arguments["high-availability"][0]["ha-mode"]' \
+			-e 'kea_ha_state=@.arguments["high-availability"][0]["ha-servers"].local.state' \
+			-e 'kea_ha_role=@.arguments["high-availability"][0]["ha-servers"].local.role' \
+			-e 'kea_ha_in_touch=@.arguments["high-availability"][0]["ha-servers"].remote["in-touch"]' \
+			-e 'kea_ha_partner_state=@.arguments["high-availability"][0]["ha-servers"].remote["last-state"]' \
+			2>/dev/null)"
+	fi
+
+	if [ -n "$kea_sockets" ] && [ "$kea_sockets" != "ready" ]; then
+		errors="$(printf '%s' "$answer" | jsonfilter -e '@.arguments.sockets.errors[*]' 2>/dev/null)"
+		if [ -z "$errors" ]; then
+			deaf=1
+		elif cluster_error="$(kea_cluster_socket_error "$errors")"; then
+			deaf=1
+			kea_sockets_error="$cluster_error"
+		else
+			kea_sockets_error="$(printf '%s\n' "$errors" | head -n 1)"
+		fi
+	fi
+
+	if [ "$enabled" -eq 1 ]; then
+		if [ -z "$pid" ]; then
+			problem="stopped"
+		elif [ "$deaf" -eq 1 ]; then
+			problem="not-listening"
+		elif [ "$kea_ha_state" = "terminated" ]; then
+			problem="ha-terminated"
+		elif [ "$kea_ha_state" = "partner-down" ]; then
+			problem="partner-down"
+		fi
+	fi
+
+	eval "kea_${daemon}_enabled=\$enabled"
+	eval "kea_${daemon}_pid=\$pid"
+	eval "kea_${daemon}_sockets=\$kea_sockets"
+	eval "kea_${daemon}_sockets_error=\$kea_sockets_error"
+	eval "kea_${daemon}_ha_mode=\$kea_ha_mode"
+	eval "kea_${daemon}_ha_state=\$kea_ha_state"
+	eval "kea_${daemon}_ha_role=\$kea_ha_role"
+	eval "kea_${daemon}_ha_in_touch=\$kea_ha_in_touch"
+	eval "kea_${daemon}_ha_partner_state=\$kea_ha_partner_state"
+	eval "kea_${daemon}_problem=\$problem"
+}
+
+# Usage: kea_service <daemon: dhcp4|dhcp6> <daemon name> <binary>
+# Adds the daemon to the "services" object from what kea_probe found.
+# ha-cluster does not run Kea, so the daemon is never required: the entry
+# says whether it is there, runs, listens, and how its own high availability
+# is doing.
+kea_service() {
+	local daemon="$1" name="$2" binary="$3"
+	local pid start_time uptime_jiffies uptime_sec=0
+	local enabled sockets sockets_error ha_mode ha_state ha_role ha_in_touch ha_partner_state problem
+
+	eval "enabled=\$kea_${daemon}_enabled"
+	eval "pid=\$kea_${daemon}_pid"
+	eval "sockets=\$kea_${daemon}_sockets"
+	eval "sockets_error=\$kea_${daemon}_sockets_error"
+	eval "ha_mode=\$kea_${daemon}_ha_mode"
+	eval "ha_state=\$kea_${daemon}_ha_state"
+	eval "ha_role=\$kea_${daemon}_ha_role"
+	eval "ha_in_touch=\$kea_${daemon}_ha_in_touch"
+	eval "ha_partner_state=\$kea_${daemon}_ha_partner_state"
+	eval "problem=\$kea_${daemon}_problem"
+
+	json_add_object "$name"
+	json_add_boolean required 0
+	json_add_boolean enabled "${enabled:-0}"
+	if [ -x "$binary" ]; then
+		json_add_boolean installed 1
+	else
+		json_add_boolean installed 0
+	fi
+
+	if [ -n "$pid" ]; then
+		start_time=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+		if [ -n "$start_time" ]; then
+			uptime_jiffies=$(awk '{print $1 * 100}' /proc/uptime 2>/dev/null)
+			uptime_sec=$(awk "BEGIN{print int(($uptime_jiffies - $start_time) / 100)}")
+		fi
+		json_add_boolean running 1
+		json_add_int pid "$pid"
+		json_add_int uptime "$uptime_sec"
+	else
+		json_add_boolean running 0
+		json_add_int pid 0
+		json_add_int uptime 0
+	fi
+
+	[ -n "$sockets" ] && json_add_string sockets "$sockets"
+	[ -n "$sockets_error" ] && json_add_string sockets_error "$sockets_error"
+	if [ -n "$ha_mode" ]; then
+		json_add_object ha
+		json_add_string mode "$ha_mode"
+		json_add_string state "$ha_state"
+		json_add_string role "$ha_role"
+		[ -n "$ha_in_touch" ] && json_add_boolean partner_in_touch "$ha_in_touch"
+		[ -n "$ha_partner_state" ] && json_add_string partner_state "$ha_partner_state"
+		json_close_object
+	fi
+	[ -n "$problem" ] && json_add_string problem "$problem"
+	json_close_object
+}
+
 case "$1" in
 	list)
 		json_init
 		json_add_object "generate_key"
 		json_close_object
 		json_add_object "status"
+		json_close_object
+		json_add_object "nodes"
 		json_close_object
 		json_add_object "apply"
 		json_close_object
@@ -83,6 +344,9 @@ case "$1" in
 				lease_sync_wanted=0
 
 				ha_enabled=$(get_bool "$(uci -q get ha-cluster.config.enabled)" 0)
+
+				dhcp_backend=$(uci -q get ha-cluster.config.dhcp_backend)
+				dhcp_backend=${dhcp_backend:-dnsmasq}
 
 				if [ "$ha_enabled" != "1" ]; then
 					cluster_state="STOPPED"
@@ -160,9 +424,10 @@ case "$1" in
 					config_last_sync=$(date -r "$owsync_db" +%s 2>/dev/null || echo 0)
 				fi
 
+				# The lease file of dnsmasq says nothing about the leases of Kea
 				leasefile=$(uci -q get dhcp.@dnsmasq[0].leasefile)
 				leasefile=${leasefile:-/tmp/dhcp.leases}
-				if [ -f "$leasefile" ]; then
+				if [ "$dhcp_backend" != "kea" ] && [ -f "$leasefile" ]; then
 					lease_last_sync=$(date -r "$leasefile" +%s 2>/dev/null || echo 0)
 				fi
 
@@ -211,16 +476,33 @@ case "$1" in
 				done
 				json_close_array
 
+				# Kea is not run by ha-cluster and so is never what makes the
+				# cluster faulty; but a cluster whose DHCP server is down, deaf
+				# or alone on this node is not healthy either
+				kea_problem=0
+				if [ "$dhcp_backend" = "kea" ]; then
+					config_load ha-cluster
+					_kea_cluster_devices=""
+					config_foreach kea_cluster_device vrrp_instance
+					config_foreach kea_cluster_device vip
+					kea_probe dhcp4 kea-dhcp4
+					kea_probe dhcp6 kea-dhcp6
+					[ -n "$kea_dhcp4_problem$kea_dhcp6_problem" ] && kea_problem=1
+				fi
+
 				if [ "$ha_enabled" != "1" ]; then
 					cluster_state="STOPPED"
 				elif [ "$services_ok" -eq 0 ]; then
 					cluster_state="FAULTY"
 				elif [ "$peers_online" -lt "$peers_total" ] && [ "$peers_total" -gt 0 ]; then
 					cluster_state="DEGRADED"
+				elif [ "$kea_problem" -eq 1 ]; then
+					cluster_state="DEGRADED"
 				elif [ "$services_ok" -eq 1 ]; then
 					cluster_state="HEALTHY"
 				fi
 				json_add_string state "$cluster_state"
+				json_add_string dhcp_backend "$dhcp_backend"
 
 
 				json_add_object services
@@ -298,6 +580,11 @@ case "$1" in
 				fi
 				json_close_object
 
+				if [ "$dhcp_backend" = "kea" ]; then
+					kea_service dhcp4 kea-dhcp4 "$KEA_DHCP4_BIN"
+					kea_service dhcp6 kea-dhcp6 "$KEA_DHCP6_BIN"
+				fi
+
 				json_close_object
 
 				json_add_object sync
@@ -305,6 +592,71 @@ case "$1" in
 				json_add_int lease_last_sync "$lease_last_sync"
 				json_close_object
 
+				json_dump
+				;;
+
+			# The nodes of the cluster as a DHCP server pair needs them: a
+			# name for each that is the same on every node, the address its
+			# partner reaches it at, and who would be Kea's primary. For a
+			# tool that sets up Kea's high availability; nothing here is
+			# written anywhere.
+			nodes)
+				config_load ha-cluster
+				config_get node_priority config node_priority "100"
+				dhcp_backend=$(ha_dhcp_backend)
+
+				_nodes_peers=""
+				config_foreach nodes_collect_peer peer
+
+				# This node's address towards the first peer it syncs with,
+				# else towards the first peer
+				own_address=$(printf '%s' "$_nodes_peers" | awk -F'|' '$4 == 0 && $2 != "" { print $2; exit }')
+				[ -n "$own_address" ] ||
+					own_address=$(printf '%s' "$_nodes_peers" | awk -F'|' '$2 != "" { print $2; exit }')
+
+				own_id=""
+				_nodes_sorted=""
+				if [ -n "$own_address" ]; then
+					own_id=$(ha_node_id "$own_address")
+					_nodes_sorted=$( {
+						echo "$own_id"
+						printf '%s' "$_nodes_peers" | awk -F'|' '$4 == 0 { print $1 }' |
+							while read -r peer_address; do ha_node_id "$peer_address"; done
+					} | LC_ALL=C sort -u)
+				fi
+
+				json_init
+				json_add_string dhcp_backend "$dhcp_backend"
+				json_add_object node
+				json_add_string name "$own_id"
+				json_add_string label "$(cat /proc/sys/kernel/hostname)"
+				json_add_string address "$own_address"
+				json_add_int priority "$node_priority"
+				role=$(nodes_role "$own_id")
+				[ -n "$role" ] && json_add_string kea_role "$role"
+				json_close_object
+
+				json_add_array peers
+				oldifs="$IFS"
+				IFS='
+'
+				for line in $_nodes_peers; do
+					IFS='|' read -r peer_address own_for_peer peer_label peer_vrrp_only <<EOF
+$line
+EOF
+					peer_id=$(ha_node_id "$peer_address")
+					json_add_object
+					json_add_string name "$peer_id"
+					json_add_string label "$peer_label"
+					json_add_string address "$peer_address"
+					json_add_boolean vrrp_only "$peer_vrrp_only"
+					# A VRRP-only peer is not among the sorted names
+					role=$(nodes_role "$peer_id")
+					[ -n "$role" ] && json_add_string kea_role "$role"
+					json_close_object
+				done
+				IFS="$oldifs"
+				json_close_array
 				json_dump
 				;;
 

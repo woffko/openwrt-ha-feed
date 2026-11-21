@@ -1,0 +1,20 @@
+== nodes rc=0
+{
+    "dhcp_backend": "dnsmasq",
+    "node": {
+        "name": "ha-fd00-172-30--10",
+        "label": "ha-char",
+        "address": "fd00:172:30::10",
+        "priority": 100,
+        "kea_role": "primary"
+    },
+    "peers": [
+        {
+            "name": "ha-fd00-172-30--11",
+            "label": "node2",
+            "address": "fd00:172:30::11",
+            "vrrp_only": false,
+            "kea_role": "standby"
+        }
+    ]
+}

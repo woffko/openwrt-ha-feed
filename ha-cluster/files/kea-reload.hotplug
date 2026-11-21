@@ -1,0 +1,19 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+#
+# With Kea as the DHCP server of the cluster: when netifd has brought an
+# interface up on a device that is another one than at its last ifup, a Kea
+# daemon that listens on it reads its config again. Kea does not notice that
+# a device was made anew and would go on running without hearing a request.
+# See ha_kea_device_up.
+
+[ "$ACTION" = "ifup" ] || exit 0
+[ -n "$DEVICE" ] || exit 0
+[ "$(uci -q get ha-cluster.config.dhcp_backend)" = "kea" ] || exit 0
+
+. /lib/functions.sh
+. /usr/lib/ha-cluster/ha-cluster.sh
+
+config_load ha-cluster
+ha_kea_device_up "$INTERFACE" "$DEVICE"
+exit 0

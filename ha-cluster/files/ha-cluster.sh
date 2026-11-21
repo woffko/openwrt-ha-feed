@@ -17,6 +17,19 @@ OWSYNC_CONF="${HA_CLUSTER_RUN_DIR}/owsync.conf"
 LEASE_SYNC_CONF="${HA_CLUSTER_RUN_DIR}/lease-sync.conf"
 OWSYNC_BIN="${OWSYNC_BIN:-/usr/bin/owsync}"
 LEASE_SYNC_BIN="${LEASE_SYNC_BIN:-/usr/sbin/lease-sync}"
+KEA_DHCP4_BIN="${KEA_DHCP4_BIN:-/usr/sbin/kea-dhcp4}"
+KEA_DHCP6_BIN="${KEA_DHCP6_BIN:-/usr/sbin/kea-dhcp6}"
+KEA_CONF_DIR="${KEA_CONF_DIR:-/etc/kea}"
+KEA_RUN_DIR="${KEA_RUN_DIR:-/var/run/kea}"
+HA_PROC_DIR="${HA_PROC_DIR:-/proc}"
+HA_SYS_NET_DIR="${HA_SYS_NET_DIR:-/sys/class/net}"
+# The index each device had when netifd last brought its interface up
+HA_KEA_DEVICE_DIR="${HA_CLUSTER_RUN_DIR}/kea-devices"
+FW4_BIN="${FW4_BIN:-/sbin/fw4}"
+# The changes ha-cluster makes to /etc/config/firewall are staged here, apart
+# from what a user has pending in the usual place, and committed on their own
+HA_FIREWALL_SAVEDIR="${HA_CLUSTER_RUN_DIR}/uci-firewall"
+HA_FIREWALL_LOCK="${HA_FIREWALL_LOCK:-/var/lock/ha-cluster-firewall.lock}"
 HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
@@ -216,6 +229,32 @@ ha_resolve_device() {
 	return 0
 }
 
+# Usage: ha_node_id <address>
+# A name for a node that every node of the cluster derives alike: from the
+# address the node is reached at by its peers. Kea wants the same server
+# names in the config of both servers.
+ha_node_id() {
+	printf 'ha-%s\n' "$(printf '%s' "$1" | tr '.:' '--')"
+}
+
+# Usage: ha_own_address_for <peer address> <source_address of that peer>
+# (ha-cluster config loaded)
+# This node's own address as that peer reaches it: the source address set
+# for the peer, else bind_address, else the one the kernel routes with.
+# Never a VIP as long as one of the first two is set.
+ha_own_address_for() {
+	local peer="$1" source="$2" bind
+
+	if [ -z "$source" ]; then
+		config_get bind config bind_address ""
+		source="$bind"
+	fi
+	[ -n "$source" ] ||
+		source="$(ip -o route get "$peer" 2>/dev/null | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n 1)"
+
+	printf '%s\n' "$source"
+}
+
 _ha_include_count=0
 _ha_count_include() {
 	_ha_include_count=$((_ha_include_count + 1))
@@ -239,10 +278,29 @@ ha_owsync_wanted() {
 	[ "$_ha_include_count" -gt 0 ] && ha_has_sync_peer
 }
 
+# Usage: ha_dhcp_backend (ha-cluster config loaded)
+# Prints the DHCP server whose leases the cluster keeps in step: dnsmasq,
+# with lease-sync, or kea. Kea replicates its leases itself through its
+# high-availability hook, which is configured in Kea, not here.
+ha_dhcp_backend() {
+	local backend
+
+	config_get backend config dhcp_backend "dnsmasq"
+	printf '%s\n' "$backend"
+}
+
+# Usage: ha_dhcp_backend_is_kea (ha-cluster config loaded)
+ha_dhcp_backend_is_kea() {
+	[ "$(ha_dhcp_backend)" = "kea" ]
+}
+
 # Usage: ha_lease_sync_wanted (ha-cluster config loaded)
-# Lease sync is enabled and has a peer to sync with.
+# Lease sync is enabled and has a peer to sync with. Never with Kea, whose
+# leases lease-sync cannot read or write.
 ha_lease_sync_wanted() {
 	local lease_sync
+
+	ha_dhcp_backend_is_kea && return 1
 
 	config_get_bool lease_sync config lease_sync 0
 	[ "$lease_sync" -eq 1 ] && ha_has_sync_peer
@@ -468,9 +526,26 @@ _ha_collect_vip_for_instance() {
 			''|*[!0-9]*) ha_log_error "VIP $vip_section: prefix6 must be a number (got: $vip_prefix6)"; return 1 ;;
 		esac
 		[ "$vip_prefix6" -lt 1 ] || [ "$vip_prefix6" -gt 128 ] && { ha_log_error "VIP $vip_section: prefix6 must be 1-128 (got: $vip_prefix6)"; return 1; }
-		_ha_vip_v6_addrs="${_ha_vip_v6_addrs}        ${vip_address6}/${vip_prefix6} dev ${vip_iface_resolved}
+		# keepalived wants the first IPv6 address of an instance to be
+		# link-local (RFC 5798): those go first, the others keep the order
+		# of their sections
+		if is_link_local_ipv6 "$vip_address6"; then
+			_ha_vip_v6_addrs="        ${vip_address6}/${vip_prefix6} dev ${vip_iface_resolved}
+${_ha_vip_v6_addrs}"
+		else
+			_ha_vip_v6_addrs="${_ha_vip_v6_addrs}        ${vip_address6}/${vip_prefix6} dev ${vip_iface_resolved}
 "
+		fi
 	fi
+}
+
+# Usage: is_link_local_ipv6 <address>
+# fe80::/10
+is_link_local_ipv6() {
+	case "$1" in
+		[Ff][Ee][89AaBb]?:*) return 0 ;;
+	esac
+	return 1
 }
 
 # Usage: _ha_ip_family "addr" -> "4" or "6"
@@ -1155,6 +1230,18 @@ ha_validate_config() {
 		ha_log_warning "No peers configured - HA will not function"
 	}
 
+	# Which DHCP server the cluster works with
+	local dhcp_backend
+	dhcp_backend="$(ha_dhcp_backend)"
+	case "$dhcp_backend" in
+		dnsmasq) ;;
+		kea) ha_check_kea_backend ;;
+		*)
+			ha_log_error "dhcp_backend '$dhcp_backend' is not supported (only 'dnsmasq' and 'kea')"
+			errors=$((errors + 1))
+			;;
+	esac
+
 	# When lease sync is active, VIP interfaces need dhcp.*.force=1
 	# so that dnsmasq initializes DHCP (required for ubus add_lease).
 	# Without it, the BACKUP node cannot receive synced leases.
@@ -1173,6 +1260,9 @@ ha_validate_config() {
 		ha_sync_encryption_mode "$encryption_key" || errors=$((errors + 1))
 	fi
 
+	# Entries of a sync group that owsync never matches
+	config_foreach _ha_check_sync_group_entries sync_group
+
 	# Warn only: /etc/config/dhcp belongs to the user
 	if ha_dhcp_authoritative_conflict; then
 		ha_log_warning "dnsmasq is authoritative while several nodes serve DHCP: they NAK each other's clients"
@@ -1180,6 +1270,42 @@ ha_validate_config() {
 	fi
 
 	return $errors
+}
+
+# Usage: _ha_check_sync_group_entries <sync_group section>
+# owsync syncs files inside /etc/config only: it matches each entry of a
+# group against the names of the files there, relative to it, and refuses
+# a path that starts with a slash. An entry like /etc/config/apcontroller or
+# /root/.ssh therefore syncs nothing, with no word from owsync. Warn only:
+# the entry may have been written that way for years, and nothing worse
+# happens than before.
+_ha_check_sync_group_entries() {
+	local section="$1"
+	local enabled
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+	_ha_sync_group_checked="$section"
+	config_list_foreach "$section" config_files _ha_check_sync_group_entry
+}
+
+_ha_sync_group_checked=""
+_ha_check_sync_group_entry() {
+	local entry="$1" name
+
+	# A relative entry with a slash may name a file in a directory below
+	# /etc/config, which owsync does sync
+	case "$entry" in
+		/*) ;;
+		*) return 0 ;;
+	esac
+
+	name="${entry#/etc/config/}"
+	if [ "$name" != "$entry" ] && [ -n "$name" ] && [ "${name#*/}" = "$name" ]; then
+		ha_log_warning "sync_group $_ha_sync_group_checked: '$entry' syncs nothing, owsync takes names inside /etc/config: write it as '$name'"
+	else
+		ha_log_warning "sync_group $_ha_sync_group_checked: '$entry' syncs nothing, owsync syncs only files inside /etc/config"
+	fi
 }
 
 _ha_dnsmasq_authoritative=0
@@ -1197,6 +1323,9 @@ _ha_check_dnsmasq_authoritative() {
 # server-id.
 ha_dhcp_authoritative_conflict() {
 	local group_type group_enabled group_files
+
+	# dnsmasq hands out no leases when Kea does
+	ha_dhcp_backend_is_kea && return 1
 
 	if ! ha_lease_sync_active; then
 		[ -x "$OWSYNC_BIN" ] || return 1
@@ -1216,6 +1345,601 @@ ha_dhcp_authoritative_conflict() {
 		config_foreach _ha_check_dnsmasq_authoritative dnsmasq
 		[ "$_ha_dnsmasq_authoritative" -eq 1 ]
 	)
+}
+
+# Usage: ha_check_kea_backend (ha-cluster config loaded)
+# What does not fit dhcp_backend 'kea'. Warnings only: Kea and
+# /etc/config/dhcp belong to the user, and VRRP works whatever they hold.
+ha_check_kea_backend() {
+	local lease_sync
+
+	[ -x "$KEA_DHCP4_BIN" ] || [ -x "$KEA_DHCP6_BIN" ] ||
+		ha_log_warning "dhcp_backend is 'kea' but neither kea-dhcp4 nor kea-dhcp6 is installed"
+
+	config_get_bool lease_sync config lease_sync 0
+	[ "$lease_sync" -eq 1 ] &&
+		ha_log "lease_sync is not used with dhcp_backend 'kea': Kea replicates its leases itself"
+
+	_ha_kea_pools_checked=""
+	config_foreach _ha_check_kea_dnsmasq_pool vip
+
+	_ha_check_kea_daemon_conf dhcp4
+	_ha_check_kea_daemon_conf dhcp6
+}
+
+# Usage: ha_kea_daemon_enabled dhcp4|dhcp6
+# The Kea init script starts the daemon: its section in /etc/config/kea is
+# there and not disabled.
+ha_kea_daemon_enabled() {
+	local disabled
+
+	[ "$(uci -q get "kea.$1")" = "service" ] || return 1
+	disabled="$(uci -q get "kea.$1.disabled")"
+	case "$disabled" in
+		1|on|true|yes|enabled) return 1 ;;
+	esac
+	return 0
+}
+
+# Usage: ha_kea_conf_names_device dhcp4|dhcp6 <device>
+# The daemon's config names the device, alone or with an address after a
+# slash, or every device ("*"). Lines that are only a comment are skipped.
+ha_kea_conf_names_device() {
+	local conf="$KEA_CONF_DIR/kea-$1.conf"
+
+	[ -r "$conf" ] || return 1
+	grep -v -e '^[[:space:]]*//' -e '^[[:space:]]*#' "$conf" |
+		grep -q -F -e "\"$2\"" -e "\"$2/" -e '"*"'
+}
+
+# Usage: _ha_kea_catches_hup <pid>
+# The process has a handler for SIGHUP: the lowest bit of the mask of caught
+# signals in its status.
+_ha_kea_catches_hup() {
+	case "$(sed -n 's/^SigCgt:[[:space:]]*//p' "$HA_PROC_DIR/$1/status" 2>/dev/null)" in
+		*[13579bdfBDF]) return 0 ;;
+	esac
+	return 1
+}
+
+# Usage: _ha_kea_reload <daemon name> <pid> <logical interface> <device>
+# Kea reads its config again on SIGHUP. A Kea in its first moments has no
+# handler for the signal yet and would be ended by it, and those moments are,
+# at boot, when the interfaces come up: the signal is sent once the process
+# catches it, and given up after ten seconds without.
+_ha_kea_reload() {
+	local name="$1" pid="$2" logical="$3" device="$4"
+	local tries=0
+
+	until _ha_kea_catches_hup "$pid"; do
+		[ -d "$HA_PROC_DIR/$pid" ] || return 0
+		tries=$((tries + 1))
+		if [ "$tries" -gt 10 ]; then
+			ha_log_warning "Interface '$logical' ($device) is up, but $name (pid $pid) takes no reload signal: restart Kea if it does not answer on $device"
+			return 0
+		fi
+		sleep 1
+	done
+
+	kill -HUP "$pid" 2>/dev/null || return 0
+	ha_log_info "Interface '$logical' ($device) is up: $name told to read its config again, to listen on the device as it is now"
+}
+
+# Usage: ha_kea_device_up <logical interface> <device>
+# (ha-cluster config loaded)
+# netifd has brought an interface up. Kea opens its DHCP sockets on the
+# devices as they are when it reads its config and does not follow them.
+# After netifd has made a device anew (ifdown and ifup, a network restart)
+# Kea runs, calls its sockets ready, and hears nothing; its partner still
+# reaches it and so does not take over, and the clients on that device lose
+# their leases. Reading the config again makes Kea open its sockets on the
+# device as it is now.
+# Only with Kea as the DHCP server of a cluster that is switched on, and only
+# for a daemon whose config names the device. The wait for a daemon that has
+# just started is left in the background: netifd's other handlers go on.
+#
+# Reading the config again is not free: it applies whatever the file holds
+# by now, and Kea's high availability starts over. So it is asked for only
+# when the device is another one than at its last ifup, which its index
+# tells: an interface that comes back on the device it had, as after a lost
+# carrier, leaves Kea's sockets as they were. The first ifup after boot
+# finds no index remembered and counts as a new device: Kea may have started
+# before it.
+ha_kea_device_up() {
+	local logical="$1" device="$2"
+	local enabled daemon pid index
+
+	config_get_bool enabled config enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+	ha_dhcp_backend_is_kea || return 0
+
+	# A name that is no device has no index either
+	case "$device" in
+		*/*|.|..) return 0 ;;
+	esac
+	index="$(cat "$HA_SYS_NET_DIR/$device/ifindex" 2>/dev/null || true)"
+	[ -n "$index" ] || return 0
+	[ "$(cat "$HA_KEA_DEVICE_DIR/$device" 2>/dev/null || true)" = "$index" ] && return 0
+	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" "$HA_KEA_DEVICE_DIR" 2>/dev/null || return 0
+	printf '%s\n' "$index" > "$HA_KEA_DEVICE_DIR/$device"
+
+	for daemon in dhcp4 dhcp6; do
+		ha_kea_conf_names_device "$daemon" "$device" || continue
+		for pid in $(pidof "kea-$daemon" 2>/dev/null); do
+			_ha_kea_reload "kea-$daemon" "$pid" "$logical" "$device" &
+		done
+	done
+}
+
+# Usage: ha_kea_ha_ports
+# The ports of the listeners of Kea's high availability: the port of every
+# "url" in the config of each enabled Kea DHCP daemon, one per line, each
+# once. Lines that are only a comment are skipped.
+ha_kea_ha_ports() {
+	local daemon conf
+
+	for daemon in dhcp4 dhcp6; do
+		ha_kea_daemon_enabled "$daemon" || continue
+		conf="$KEA_CONF_DIR/kea-$daemon.conf"
+		[ -r "$conf" ] || continue
+		grep -v -e '^[[:space:]]*//' -e '^[[:space:]]*#' "$conf" |
+			grep -o '"url"[[:space:]]*:[[:space:]]*"[^"]*"' |
+			sed -n 's/.*"https\{0,1\}:\/\/[^"/]*:\([0-9]\{1,5\}\)\(\/[^"]*\)\{0,1\}"$/\1/p'
+	done | sort -n -u
+}
+
+# The rules ha-cluster keeps in /etc/config/firewall are ordinary rule
+# sections named ha_cluster_*, with names that start with HA-Cluster-: they
+# show in LuCI and in "uci show firewall" like any rule. They are described
+# first as lines of
+#   S|section|type      O|section|option|value      L|section|option|value
+# (L: one value of a list), from which both the text to compare with what
+# the config holds and the commands to write it are made.
+
+# Usage: _ha_fw_sorted <words>
+# The words, each once, in an order every node arrives at.
+_ha_fw_sorted() {
+	local word
+
+	for word in $1; do
+		printf '%s\n' "$word"
+	done | LC_ALL=C sort -u | tr '\n' ' '
+}
+
+_ha_fw_devices=""
+_ha_fw_ah_devices=""
+# Usage: _ha_fw_instance <vrrp_instance section> (ha-cluster config loaded)
+_ha_fw_instance() {
+	local section="$1"
+	local logical device auth_type
+
+	config_get logical "$section" interface ""
+	[ -n "$logical" ] || return 0
+	ha_resolve_device device "$logical" || device="$logical"
+	case "$device" in
+		*[!A-Za-z0-9._@-]*)
+			ha_log_warning "vrrp_instance $section: '$device' is no device name; no firewall rule for its VRRP"
+			return 0
+			;;
+	esac
+	_ha_fw_devices="$_ha_fw_devices $device"
+
+	config_get auth_type "$section" auth_type "none"
+	case "$auth_type" in
+		ah|AH) _ha_fw_ah_devices="$_ha_fw_ah_devices $device" ;;
+	esac
+}
+
+_ha_fw_nodes=""
+_ha_fw_sync_nodes=""
+_ha_fw_own_unknown=""
+# Usage: _ha_fw_peer <peer section> (ha-cluster config loaded)
+# Collects the addresses of the nodes: of the peer, and this node's own
+# towards it. With both in the rules every node writes the same rules, and
+# a firewall config that owsync carries from node to node stays right on
+# each of them.
+_ha_fw_peer() {
+	local section="$1"
+	local address source own vrrp_only
+
+	config_get address "$section" address ""
+	[ -n "$address" ] || return 0
+	case "$address" in
+		*[!0-9A-Fa-f:.]*)
+			ha_log_warning "peer $section: '$address' is no IP address; no firewall rule for this peer"
+			return 0
+			;;
+	esac
+	config_get source "$section" source_address ""
+	config_get_bool vrrp_only "$section" vrrp_only 0
+
+	own="$(ha_own_address_for "$address" "$source")"
+	case "$own" in
+		''|*[!0-9A-Fa-f:.]*)
+			_ha_fw_own_unknown="$_ha_fw_own_unknown $address"
+			return 0
+			;;
+	esac
+
+	_ha_fw_nodes="$_ha_fw_nodes $address $own"
+	[ "$vrrp_only" -eq 1 ] || _ha_fw_sync_nodes="$_ha_fw_sync_nodes $address $own"
+}
+
+# Usage: _ha_fw_rule <section> <name> <protocols> <ports> <source addresses>
+# Prints the description of one rule that accepts, from any zone, the
+# protocols on the ports from the addresses. Nothing without addresses.
+_ha_fw_rule() {
+	local section="$1" name="$2" protocols="$3" ports="$4" sources="$5"
+	local word
+
+	[ -n "$sources" ] || return 0
+	for word in $ports; do
+		case "$word" in
+			*[!0-9]*) return 0 ;;
+		esac
+	done
+
+	echo "S|$section|rule"
+	echo "O|$section|name|$name"
+	echo "O|$section|src|*"
+	for word in $protocols; do
+		echo "L|$section|proto|$word"
+	done
+	for word in $sources; do
+		echo "L|$section|src_ip|$word"
+	done
+	for word in $ports; do
+		echo "L|$section|dest_port|$word"
+	done
+	echo "O|$section|target|ACCEPT"
+}
+
+# Usage: ha_firewall_rules (ha-cluster config loaded)
+# Prints the description of what this node must accept for the cluster to
+# work, whatever the zones say:
+# - VRRP on the device of each instance, and AH next to it where an instance
+#   on that device authenticates with it. The adverts come from the peers'
+#   addresses on those devices, which the config does not name, so the
+#   device is the limit;
+# - from the addresses of the nodes that sync: the port of owsync and the
+#   port of lease-sync, each when that daemon has work, and with Kea as the
+#   DHCP server the ports of the listeners of its high availability;
+# - from the addresses of all nodes: ping, which the status uses.
+# What the clients need (DHCP, DNS) is the business of the zones, as it is
+# without a cluster.
+# Fails, having set _ha_fw_own_unknown, when this node's own address towards
+# a peer is not known: rules without it would be wrong on the other node.
+ha_firewall_rules() {
+	local device port ports nodes sync_nodes section index=0 word
+
+	_ha_fw_devices=""
+	_ha_fw_ah_devices=""
+	config_foreach _ha_fw_instance vrrp_instance
+
+	_ha_fw_nodes=""
+	_ha_fw_sync_nodes=""
+	_ha_fw_own_unknown=""
+	config_foreach _ha_fw_peer peer
+	[ -z "$_ha_fw_own_unknown" ] || return 1
+	nodes="$(_ha_fw_sorted "$_ha_fw_nodes")"
+	sync_nodes="$(_ha_fw_sorted "$_ha_fw_sync_nodes")"
+
+	for device in $(_ha_fw_sorted "$_ha_fw_devices"); do
+		index=$((index + 1))
+		section="ha_cluster_vrrp_$index"
+		echo "S|$section|rule"
+		echo "O|$section|name|HA-Cluster-VRRP-$device"
+		echo "O|$section|src|*"
+		echo "O|$section|device|$device"
+		echo "O|$section|direction|in"
+		echo "L|$section|proto|112"
+		case " $_ha_fw_ah_devices " in
+			*" $device "*) echo "L|$section|proto|51" ;;
+		esac
+		echo "O|$section|target|ACCEPT"
+	done
+
+	if ha_owsync_wanted; then
+		config_get port config sync_port "4321"
+		_ha_fw_rule ha_cluster_owsync "HA-Cluster-owsync" tcp "$port" "$sync_nodes"
+	fi
+
+	if ha_lease_sync_wanted; then
+		config_get port advanced lease_sync_port "5378"
+		_ha_fw_rule ha_cluster_lease_sync "HA-Cluster-lease-sync" udp "$port" "$sync_nodes"
+	fi
+
+	if ha_dhcp_backend_is_kea; then
+		ports="$(ha_kea_ha_ports | tr '\n' ' ')"
+		[ -n "${ports% }" ] &&
+			_ha_fw_rule ha_cluster_kea "HA-Cluster-Kea-HA" tcp "${ports% }" "$sync_nodes"
+	fi
+
+	if [ -n "$nodes" ]; then
+		section="ha_cluster_ping"
+		echo "S|$section|rule"
+		echo "O|$section|name|HA-Cluster-ping"
+		echo "O|$section|src|*"
+		echo "O|$section|proto|icmp"
+		echo "L|$section|icmp_type|echo-request"
+		for word in $nodes; do
+			echo "L|$section|src_ip|$word"
+		done
+		echo "O|$section|target|ACCEPT"
+	fi
+	return 0
+}
+
+# Usage: _ha_fw_uci <uci arguments>
+_ha_fw_uci() {
+	uci -t "$HA_FIREWALL_SAVEDIR" "$@"
+}
+
+# Usage: _ha_fw_as_shown (the description on stdin)
+# The description as "uci show firewall" prints these sections, without the
+# leading "firewall.".
+_ha_fw_as_shown() {
+	awk -F'|' '
+		function flush() { if (line != "") { print line; line = "" } }
+		$1 == "S" { flush(); print $2 "=" $3 }
+		$1 == "O" { flush(); print $2 "." $3 "=\047" $4 "\047" }
+		$1 == "L" {
+			key = $2 "." $3
+			if (line != "" && key == linekey) {
+				line = line " \047" $4 "\047"
+			} else {
+				flush()
+				line = key "=\047" $4 "\047"
+				linekey = key
+			}
+		}
+		END { flush() }'
+}
+
+# Usage: _ha_fw_in_config
+# The rules of ha-cluster as the firewall config holds them, in the same
+# form.
+_ha_fw_in_config() {
+	_ha_fw_uci -q show firewall 2>/dev/null | sed -n 's/^firewall\.\(ha_cluster_[A-Za-z0-9_]*[.=].*\)$/\1/p'
+}
+
+# Usage: _ha_fw_delete_sections
+# Stages the removal of every rule of ha-cluster.
+_ha_fw_delete_sections() {
+	local section
+
+	for section in $(_ha_fw_in_config | sed -n 's/^\(ha_cluster_[A-Za-z0-9_]*\)=.*/\1/p'); do
+		_ha_fw_uci -q delete "firewall.$section"
+	done
+}
+
+# Usage: _ha_fw_loaded <rule names, one per line>
+# The loaded ruleset of firewall4 has every one of these rules. A config
+# that owsync brought from another node is not loaded by anybody.
+_ha_fw_loaded() {
+	local loaded name
+
+	loaded="$(nft list chain inet fw4 input 2>/dev/null)" || return 1
+	while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		case "$loaded" in
+			*"\"!fw4: $name\""*) ;;
+			*) return 1 ;;
+		esac
+	done <<EOF
+$1
+EOF
+	return 0
+}
+
+# Usage: _ha_fw_reload
+# Fails when the firewall is not loaded; then there is nothing to reload.
+_ha_fw_reload() {
+	[ -x "$FW4_BIN" ] || return 0
+	"$FW4_BIN" -q reload >/dev/null 2>&1 ||
+		ha_log_debug "firewall4 was not reloaded (it is not loaded)"
+	return 0
+}
+
+# Usage: _ha_fw_locked <function> [arguments]
+# One writer of the firewall config at a time. The start and the reload of
+# the service, a stop, and the "firewall" command, which rc.common runs
+# outside the lock it takes for start and stop, may meet, and they stage
+# their changes in the same directory: two at once would write each list
+# twice. The lock is held on a descriptor, so a writer that dies leaves
+# none behind. Without a place for the lock file the function runs anyway.
+_ha_fw_locked() {
+	mkdir -p "${HA_FIREWALL_LOCK%/*}" 2>/dev/null
+	if ( : > "$HA_FIREWALL_LOCK" ) 2>/dev/null; then
+		{
+			flock -x 9 2>/dev/null
+			"$@"
+		} 9>"$HA_FIREWALL_LOCK"
+	else
+		"$@"
+	fi
+}
+
+# Usage: ha_remove_firewall
+# Takes the rules of ha-cluster out of the firewall config.
+ha_remove_firewall() {
+	_ha_fw_locked _ha_remove_firewall
+}
+
+_ha_remove_firewall() {
+	[ -n "$(_ha_fw_in_config)" ] || return 0
+
+	mkdir -p "$HA_FIREWALL_SAVEDIR" 2>/dev/null || return 0
+	_ha_fw_delete_sections
+	_ha_fw_uci commit firewall || return 0
+	ha_log_info "Firewall rules of the cluster removed from /etc/config/firewall"
+	_ha_fw_reload
+}
+
+# Usage: ha_apply_firewall (ha-cluster config loaded)
+# Makes the firewall config hold the rules the cluster needs, and firewall4
+# load them. The config is written only when the rules differ from what it
+# holds; firewall4 is reloaded when it was written, or when the rules are
+# in the config and not in the loaded ruleset. With option firewall '0' the
+# rules are removed and the firewall is the user's alone.
+ha_apply_firewall() {
+	_ha_fw_locked _ha_apply_firewall
+}
+
+_ha_apply_firewall() {
+	local wanted description wanted_rules kind section option value names
+
+	# No firewall config: no firewall4 to open anything in
+	uci -q show firewall >/dev/null 2>&1 || return 0
+
+	config_get_bool wanted config firewall 1
+	if [ "$wanted" -eq 0 ]; then
+		_ha_remove_firewall
+		return 0
+	fi
+
+	# This node's own address is asked of the kernel when the config does not
+	# give it, and the kernel does not know it before the interface is up, as
+	# at boot. Rules written at an earlier start are right until the config
+	# changes, and are left alone.
+	description="$(ha_firewall_rules)" || {
+		_ha_fw_own_unknown=""
+		ha_firewall_rules >/dev/null
+		names="$(_ha_fw_in_config | sed -n "s/^[A-Za-z0-9_]*\.name='\(.*\)'$/\1/p")"
+		if [ -n "$names" ]; then
+			ha_log_info "Firewall rules of the cluster left as they are: this node's own address towards$_ha_fw_own_unknown is not known yet"
+			_ha_fw_loaded "$names" || _ha_fw_reload
+		else
+			ha_log_warning "Firewall rules of the cluster not written: this node's own address towards$_ha_fw_own_unknown is not known. Set bind_address, or source_address of the peer, or reload ha-cluster once the interface is up"
+		fi
+		return 0
+	}
+	wanted_rules="$(printf '%s\n' "$description" | _ha_fw_as_shown)"
+	names="$(printf '%s\n' "$description" | sed -n 's/^O|[^|]*|name|//p')"
+
+	if [ "$wanted_rules" = "$(_ha_fw_in_config)" ]; then
+		[ -z "$names" ] || _ha_fw_loaded "$names" || {
+			ha_log_info "Firewall rules of the cluster are in /etc/config/firewall and not loaded: reloading the firewall"
+			_ha_fw_reload
+		}
+		return 0
+	fi
+
+	mkdir -p "$HA_FIREWALL_SAVEDIR" 2>/dev/null || return 0
+	_ha_fw_delete_sections
+	# For tests: time for another writer to step in, were it not held off
+	[ -z "${HA_FIREWALL_HOLD:-}" ] || sleep "$HA_FIREWALL_HOLD"
+	while IFS='|' read -r kind section option value; do
+		case "$kind" in
+			S) _ha_fw_uci set "firewall.$section=$option" ;;
+			O) _ha_fw_uci set "firewall.$section.$option=$value" ;;
+			L) _ha_fw_uci add_list "firewall.$section.$option=$value" ;;
+		esac
+	done <<EOF
+$description
+EOF
+	_ha_fw_uci commit firewall || {
+		ha_log_error "Firewall rules of the cluster could not be written to /etc/config/firewall"
+		return 0
+	}
+	ha_log_info "Firewall rules of the cluster written to /etc/config/firewall (rules named HA-Cluster-...)"
+
+	# A config firewall4 cannot load would keep the whole firewall from
+	# loading, now and at boot
+	if [ -x "$FW4_BIN" ] && ! "$FW4_BIN" -q check >/dev/null 2>&1; then
+		_ha_fw_delete_sections
+		_ha_fw_uci commit firewall
+		ha_log_error "firewall4 does not pass its check with the rules of ha-cluster: they are taken out again; open what the cluster needs from its peers yourself"
+		return 0
+	fi
+	_ha_fw_reload
+}
+
+# Usage: ha_stop_firewall
+# As with the IPv6 guard: a node that only stops is still a member, and what
+# does not stop with ha-cluster (Kea and its high availability, the peer's
+# ping) still needs the rules. They go when the node leaves the cluster.
+ha_stop_firewall() {
+	local enabled
+
+	config_load ha-cluster
+	config_get_bool enabled config enabled 0
+
+	if [ "$enabled" -eq 1 ] && ha_service_enabled; then
+		return 0
+	fi
+
+	ha_remove_firewall
+}
+
+# Usage: _ha_check_kea_daemon_conf dhcp4|dhcp6
+# Three things a Kea server of a cluster needs in its config file and that
+# only show when they are missed: the high-availability hook, without which
+# its leases stay on this node; a port in every "url" of that hook; and
+# retries for its sockets, without which a Kea started before the interface
+# is up, as at boot, never listens.
+# The file is the user's (or luci-app-kea's): warnings only. Lines that are
+# only a comment are skipped.
+_ha_check_kea_daemon_conf() {
+	local daemon="$1"
+	local conf="$KEA_CONF_DIR/kea-$daemon.conf"
+	local text url
+
+	ha_kea_daemon_enabled "$daemon" || return 0
+	[ -r "$conf" ] || {
+		ha_log_warning "kea-$daemon is enabled but $conf is missing"
+		return 0
+	}
+
+	# grep fails when every line is a comment: that is an answer, not an error
+	text="$(grep -v -e '^[[:space:]]*//' -e '^[[:space:]]*#' "$conf" || true)"
+
+	printf '%s\n' "$text" | grep -q 'libdhcp_ha' ||
+		ha_log_warning "$conf does not load Kea's high-availability hook: unless its lease database is shared, the leases of kea-$daemon stay on this node"
+
+	# Kea takes a url without a port as valid: its listener then gets a port
+	# of the kernel's choosing and its partner connects to port 0 (Kea 3.0.4,
+	# src/lib/http/url.cc and the listener in ha_service.cc). No such port can
+	# be opened in the firewall either.
+	url="$(printf '%s\n' "$text" | grep -o '"url"[[:space:]]*:[[:space:]]*"[^"]*"' |
+		grep -v ':[0-9]\{1,5\}\(/[^"]*\)\{0,1\}"$' | head -n 1 |
+		sed 's/^"url"[[:space:]]*:[[:space:]]*"\(.*\)"$/\1/')"
+	[ -z "$url" ] ||
+		ha_log_warning "$conf has the url '$url' without a port: Kea does not listen on a port its partner can find, and ha-cluster cannot open one in the firewall. Give every url of Kea's high availability a port"
+
+	printf '%s\n' "$text" | grep -q '"service-sockets-max-retries"[[:space:]]*:[[:space:]]*[1-9]' ||
+		ha_log_warning "$conf sets no service-sockets-max-retries: a kea-$daemon started before its interface is up, as at boot, does not listen and does not try again"
+}
+
+# A dnsmasq pool on a VIP interface that still answers DHCPv4: two servers
+# on one node would answer the same clients
+_ha_kea_pools_checked=""
+_ha_check_kea_dnsmasq_pool() {
+	local section="$1"
+	local vip_enabled interface pool pool_interface ignore dhcpv4
+
+	config_get_bool vip_enabled "$section" enabled 1
+	[ "$vip_enabled" -eq 0 ] && return 0
+
+	config_get interface "$section" interface ""
+	[ -z "$interface" ] && return 0
+
+	echo "$_ha_kea_pools_checked" | grep -qw "$interface" && return 0
+	_ha_kea_pools_checked="$_ha_kea_pools_checked $interface"
+
+	# Only type=dhcp sections: dnsmasq sections also have an 'interface' option
+	for pool in $(uci show dhcp 2>/dev/null | grep '=dhcp$' | cut -d. -f2 | cut -d= -f1); do
+		pool_interface=$(uci -q get "dhcp.$pool.interface")
+		[ "$pool_interface" = "$interface" ] || continue
+
+		ignore=$(uci -q get "dhcp.$pool.ignore")
+		dhcpv4=$(uci -q get "dhcp.$pool.dhcpv4")
+		[ "$ignore" = "1" ] && continue
+		[ "$dhcpv4" = "disabled" ] && continue
+
+		ha_log_warning "dnsmasq still answers DHCPv4 on interface '$interface' (dhcp.$pool) while dhcp_backend is 'kea'"
+		ha_log_warning "Set dhcp.$pool.dhcpv4='disabled' to keep its router advertisements, or dhcp.$pool.ignore='1'"
+	done
 }
 
 _ha_dhcp_force_checked=""

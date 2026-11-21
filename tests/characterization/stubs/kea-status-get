@@ -1,0 +1,9 @@
+#!/bin/sh
+# Stands in for the question to a Kea control socket (KEA_STATUS_GET of the
+# status backend): answers with the fixture named for the daemon, or with
+# nothing, as when the daemon cannot be asked.
+case "$1" in
+	*/kea4-ctrl-socket) [ -n "$FAKE_KEA4_STATUS" ] && cat "$FAKE_KEA4_STATUS" ;;
+	*/kea6-ctrl-socket) [ -n "$FAKE_KEA6_STATUS" ] && cat "$FAKE_KEA6_STATUS" ;;
+esac
+exit 0

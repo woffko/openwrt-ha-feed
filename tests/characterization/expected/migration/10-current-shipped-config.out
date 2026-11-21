@@ -17,10 +17,19 @@ config global 'config'
 	#option sync_encryption '1'
 	# DHCP lease sync (lease-sync and dnsmasq-ha packages)
 	option lease_sync '1'
+	# DHCP server on the cluster interfaces: dnsmasq | kea. With kea,
+	# lease-sync does not run (Kea replicates its leases itself; set up its
+	# high availability in Kea, on every node), the dhcp force check is
+	# skipped, and the IPv6 guard leaves DHCPv6 to Kea
+	#option dhcp_backend 'dnsmasq'
 
 	# This node's own address for owsync and lease-sync, so that the VIP is
 	# never used as source; empty = all addresses
 	#option bind_address ''
+	# Keep what the cluster needs from its peers (VRRP, owsync, lease-sync,
+	# Kea's HA ports, ping) as rules named HA-Cluster-... in
+	# /etc/config/firewall; '0' removes them and leaves the firewall to you
+	#option firewall '1'
 
 # VIPs of the same instance fail over together.
 # VRID 1-127 (with multicast VRRP, VRID+128 is used by the IPv6 instance).
@@ -137,10 +146,19 @@ config global 'config'
 	#option sync_encryption '1'
 	# DHCP lease sync (lease-sync and dnsmasq-ha packages)
 	option lease_sync '1'
+	# DHCP server on the cluster interfaces: dnsmasq | kea. With kea,
+	# lease-sync does not run (Kea replicates its leases itself; set up its
+	# high availability in Kea, on every node), the dhcp force check is
+	# skipped, and the IPv6 guard leaves DHCPv6 to Kea
+	#option dhcp_backend 'dnsmasq'
 
 	# This node's own address for owsync and lease-sync, so that the VIP is
 	# never used as source; empty = all addresses
 	#option bind_address ''
+	# Keep what the cluster needs from its peers (VRRP, owsync, lease-sync,
+	# Kea's HA ports, ping) as rules named HA-Cluster-... in
+	# /etc/config/firewall; '0' removes them and leaves the firewall to you
+	#option firewall '1'
 
 # VIPs of the same instance fail over together.
 # VRID 1-127 (with multicast VRRP, VRID+128 is used by the IPv6 instance).

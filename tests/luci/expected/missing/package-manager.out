@@ -8,6 +8,8 @@ config.node_priority [CBI.Value] Priority: value=150 (placeholder "100")
   help: VRRP priority (1-255). Higher priority becomes MASTER.
 config.vrrp_transport [CBI.ListValue] VRRP Transport: select=unicast {multicast,unicast}
   help: Multicast is the default. Use unicast when multicast is unavailable on the network. Unicast adverts go to the peers below, from the first Source Address set: this fits only failover groups on the peers' network; another group sets its own unicast addresses in Advanced VRRP.
+config.firewall [CBI.FlagValue] Firewall Rules: [x]
+  help: Keep the rules the cluster needs from its peers in the firewall configuration: VRRP on the interfaces of the instances and, from the addresses of the nodes, the ports of configuration sync, lease sync and the high availability of Kea, and ping. The rules are named HA-Cluster-… and show under Network → Firewall → Traffic Rules. When this is off they are removed and the firewall is yours to set up. Set it the same on every node.
 h3: Peer Routers
 Other routers of the cluster. Configuration and lease sync run with every peer not marked VRRP only. In unicast mode, VRRP adverts are sent to every peer listed here, except for failover groups with their own unicast peers.
 | Peer | Role | 
@@ -32,6 +34,8 @@ config._generate_key [CBI.ButtonValue] Generate New Key: button "Generate New Ke
 h3: Configuration Files
 config._owsync_missing [CBI.DummyValue] : text "owsync is not installed. Install the owsync package to synchronize configuration files. The 4 enabled sync groups in the configuration will apply once it is installed."
 h3: DHCP Leases
+config.dhcp_backend [CBI.ListValue] DHCP Server: select=dnsmasq {dnsmasq,kea}
+  help: The server that gives out the leases on the cluster interfaces. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, which are made in Kea on every node. The IPv6 guard then leaves DHCPv6 to Kea and keeps guarding Router Advertisements.
 config._lease_sync_missing [CBI.DummyValue] : text "lease-sync is not installed. Install the lease-sync and dnsmasq-ha packages to synchronize DHCP leases. Lease sync is on in the configuration and will start once they are installed."
 ==== simple modal peer1
 h4: High Availability - General

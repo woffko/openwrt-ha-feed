@@ -583,17 +583,23 @@ reconcile_ra_output_rules() {
 }
 
 reconcile_all() {
-	local backup_ifaces source_rules
+	local backup_ifaces dhcpv6_ifaces source_rules
 
 	prune_states
 	EFFECTIVE_STATES="$(effective_states)"
 	backup_ifaces="$(collect_backup_ifaces)"
 	source_rules="$(collect_ra_source_rules)"
 
+	# Kea decides by itself which node answers DHCPv6, whatever VRRP says:
+	# dropping the requests on a BACKUP could silence the one server that
+	# is to answer. Router Advertisements stay guarded.
+	dhcpv6_ifaces="$backup_ifaces"
+	[ "$(uci -q get ha-cluster.config.dhcp_backend)" = "kea" ] && dhcpv6_ifaces=""
+
 	ensure_dhcpv6_table || return 1
 	ensure_ra_table || return 1
 
-	reconcile_set "$DHCPV6_TABLE" "$backup_ifaces" "DHCPv6" || return 1
+	reconcile_set "$DHCPV6_TABLE" "$dhcpv6_ifaces" "DHCPv6" || return 1
 	reconcile_set "$RA_TABLE" "$backup_ifaces" "RA" || return 1
 	reconcile_ra_output_rules "$source_rules" || return 1
 }

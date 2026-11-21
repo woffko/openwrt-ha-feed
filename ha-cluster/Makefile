@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=5
+PKG_RELEASE:=12
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -59,6 +59,11 @@ define Package/ha-cluster/install
 	$(INSTALL_BIN) ./files/ipv6-backup-guard.hotplug $(1)/usr/lib/ha-cluster/ipv6-backup-guard
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/keepalived
 	$(INSTALL_BIN) ./files/ipv6-backup-guard.hotplug $(1)/etc/hotplug.d/keepalived/20-ipv6-backup-guard
+
+	# With Kea as the DHCP server: Kea reads its config again when an
+	# interface it listens on has come up
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
+	$(INSTALL_BIN) ./files/kea-reload.hotplug $(1)/etc/hotplug.d/iface/60-ha-cluster-kea
 
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/ha-cluster.uci-defaults $(1)/etc/uci-defaults/60_ha-cluster-sync-model

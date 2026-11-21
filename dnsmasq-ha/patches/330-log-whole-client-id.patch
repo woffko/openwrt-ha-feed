@@ -1,0 +1,29 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] dnsmasq-ha: log the whole DHCPv6 client id of an injected lease
+
+parse_hex() writes a NUL over the first separator of the string it
+parses, so the log line of add_lease printed the client id as
+"client_id=00" whatever the DUID. Print it from the parsed bytes
+instead. The lease itself was always right.
+
+--- a/src/ubus.c
++++ b/src/ubus.c
+@@ -453,8 +453,16 @@
+       hwaddr_str[hw_len * 3 - 1] = '\0';
+       snprintf(lease_id_str, sizeof(lease_id_str), "%s", hwaddr_str);
+     }
+-  else if (client_id && *client_id)
+-    snprintf(lease_id_str, sizeof(lease_id_str), "client_id=%s", client_id);
++  else if (clid_len > 0)
++    {
++      /* From the parsed bytes: parse_hex() cut the string at its first
++	 separator, which left "client_id=00" in the log */
++      size_t pos = snprintf(lease_id_str, sizeof(lease_id_str), "client_id=");
++
++      for (i = 0; i < clid_len && pos + 3 < sizeof(lease_id_str); i++)
++	pos += snprintf(lease_id_str + pos, sizeof(lease_id_str) - pos,
++			i ? ":%02x" : "%02x", clid_bin[i]);
++    }
+   else
+     snprintf(lease_id_str, sizeof(lease_id_str), "no-mac");
+ 

@@ -153,6 +153,13 @@ return view.extend({
 		o.value('unicast', _('Unicast'));
 		o.default = 'multicast';
 
+		// What the nodes need from each other, kept by the backend as
+		// ordinary rules in the firewall config. On unless switched off:
+		// a config without the option keeps the rules
+		o = s.option(form.Flag, 'firewall', _('Firewall Rules'),
+			_('Keep the rules the cluster needs from its peers in the firewall configuration: VRRP on the interfaces of the instances and, from the addresses of the nodes, the ports of configuration sync, lease sync and the high availability of Kea, and ping. The rules are named HA-Cluster-… and show under Network → Firewall → Traffic Rules. When this is off they are removed and the firewall is yours to set up. Set it the same on every node.'));
+		boolFlag(o, true);
+
 		var vrrpOnlyHelp = _('Tick for a router that does not run ha-cluster, for example a non-OpenWrt VRRP router. It is excluded from configuration and lease sync.') + ' ' +
 			(transport === 'unicast'
 				? _('In unicast mode keepalived still sends it VRRP adverts.')
@@ -502,9 +509,12 @@ return view.extend({
 		// The backend refuses to start without a valid key as soon as a sync
 		// daemon has work, unless this switch is off: plaintext is a choice,
 		// not a fallback. Same rule here, on the saved configuration.
+		// With Kea as the DHCP server lease-sync never runs: Kea replicates
+		// its leases itself
+		var keaBackend = uci.get('ha-cluster', 'config', 'dhcp_backend') === 'kea';
 		var syncHasWork = uci.sections('ha-cluster', 'peer').some(function(peer) {
 			return !getBool(peer.vrrp_only, false) && !!peer.address;
-		}) && (getBool(uci.get('ha-cluster', 'config', 'lease_sync'), false) ||
+		}) && ((!keaBackend && getBool(uci.get('ha-cluster', 'config', 'lease_sync'), false)) ||
 			uci.sections('ha-cluster', 'sync_group').some(function(group) {
 				return getBool(group.enabled, true) && L.toArray(group.config_files).length > 0;
 			}));
@@ -615,12 +625,14 @@ return view.extend({
 		var hintUnderDhcp = owsyncInstalled && hasSyncPeer && dhcpGroup != null &&
 			dhcpGroup['.type'] === 'sync_group' && groupEnabled(dhcpGroup) &&
 			dhcpFiles.length > 0;
-		var leaseSyncActive = leaseSyncInstalled && hasSyncPeer &&
+		var leaseSyncActive = !keaBackend && leaseSyncInstalled && hasSyncPeer &&
 			getBool(uci.get('ha-cluster', 'config', 'lease_sync'), false);
 		var dhcpAuthoritative = uci.sections('dhcp', 'dnsmasq').some(function(dnsmasq) {
 			return getBool(dnsmasq.authoritative, false);
 		});
-		var authoritativeConflict = getBool(uci.get('ha-cluster', 'config', 'enabled'), false) &&
+		// dnsmasq hands out no leases when Kea does
+		var authoritativeConflict = !keaBackend &&
+			getBool(uci.get('ha-cluster', 'config', 'enabled'), false) &&
 			dhcpAuthoritative && (hintUnderDhcp || leaseSyncActive);
 		var authoritativeHint = function() {
 			if (!authoritativeConflict)
@@ -680,10 +692,28 @@ return view.extend({
 
 		s = m.section(form.NamedSection, 'config', 'global', _('DHCP Leases'));
 
+		// Written only when it changes: a config without the option means
+		// dnsmasq and stays without it
+		o = s.option(form.ListValue, 'dhcp_backend', _('DHCP Server'),
+			_('The server that gives out the leases on the cluster interfaces. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, which are made in Kea on every node. The IPv6 guard then leaves DHCPv6 to Kea and keeps guarding Router Advertisements.'));
+		o.value('dnsmasq', _('dnsmasq (leases replicated by lease-sync)'));
+		o.value('kea', _('Kea (replicates its leases itself)'));
+		o.cfgvalue = function(section_id) {
+			return uci.get('ha-cluster', section_id, 'dhcp_backend') || 'dnsmasq';
+		};
+		o.write = function(section_id, value) {
+			if (this.cfgvalue(section_id) !== value)
+				uci.set('ha-cluster', section_id, 'dhcp_backend', value);
+		};
+		o.remove = function() {};
+
 		if (leaseSyncInstalled) {
 			o = s.option(form.Flag, 'lease_sync', _('Real-time Lease Sync'),
 				_('Replicates DHCP leases between nodes so that clients keep their address after a failover. Independent of the DHCP configuration sync above.'));
 			o.rmempty = false;
+			// Kept while Kea is chosen, for the day dnsmasq is chosen again
+			o.depends('dhcp_backend', 'dnsmasq');
+			o.retain = true;
 			o.cfgvalue = function(section_id) {
 				return getBool(uci.get('ha-cluster', section_id, 'lease_sync'), false) ? '1' : '0';
 			};
@@ -693,6 +723,7 @@ return view.extend({
 			};
 		} else {
 			o = s.option(form.DummyValue, '_lease_sync_missing');
+			o.depends('dhcp_backend', 'dnsmasq');
 			o.renderWidget = function(section_id) {
 				return installHint(_('lease-sync is not installed. Install the <code>lease-sync</code> and <code>dnsmasq-ha</code> packages to synchronize DHCP leases.') +
 					(getBool(uci.get('ha-cluster', section_id, 'lease_sync'), false)

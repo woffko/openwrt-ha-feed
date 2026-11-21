@@ -12,6 +12,7 @@
         }
     ],
     "state": "HEALTHY",
+    "dhcp_backend": "dnsmasq",
     "services": {
         "keepalived": {
             "required": true,

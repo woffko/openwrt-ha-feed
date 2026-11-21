@@ -145,6 +145,7 @@ ha-cluster|daemon.info|Generating lease-sync configuration
 ha-cluster|daemon.info|lease-sync will use AES-256-GCM encryption
 ha-cluster|daemon.info|lease-sync configuration generated at /var/run/ha-cluster/lease-sync.conf
 ha-cluster|daemon.info|HA cluster configuration applied successfully
+ha-cluster|daemon.warning|Firewall rules of the cluster not written: this node's own address towards 172.30.0.11 is not known. Set bind_address, or source_address of the peer, or reload ha-cluster once the interface is up
 ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 ha-cluster|daemon.info|Starting lease-sync daemon
@@ -240,6 +241,8 @@ service_states
 keepalived=0
 owsync=1
 lease-sync=0
+== firewall rules of the cluster
+(none)
 == rc.d
 K01keepalived
 K10lease-sync

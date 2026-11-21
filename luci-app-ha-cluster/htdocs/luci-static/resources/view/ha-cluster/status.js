@@ -103,6 +103,61 @@ return view.extend({
 		]);
 	},
 
+	// A Kea daemon: ha-cluster does not run it, the row says what it finds
+	renderKeaRow: function(name, serviceInfo) {
+		var isRunning = (serviceInfo && serviceInfo.running) || false;
+		var isInstalled = (serviceInfo && serviceInfo.installed) || false;
+		var pid = (isRunning && serviceInfo.pid) || '-';
+		var uptime = (isRunning && this.formatUptime(serviceInfo.uptime)) || '-';
+
+		var problem = (serviceInfo && serviceInfo.problem) || '';
+		var ha = (serviceInfo && serviceInfo.ha) || null;
+
+		var statusBadge;
+		if (isRunning)
+			statusBadge = E('span', { 'class': 'label success' }, _('Running'));
+		else if (problem === 'stopped')
+			// Enabled in Kea's own config, so the cluster has no DHCP here
+			statusBadge = E('span', { 'class': 'label important' }, _('Stopped'));
+		else if (isInstalled)
+			statusBadge = E('span', { 'class': 'label' }, _('Stopped'));
+		else
+			statusBadge = E('span', { 'class': 'label' }, _('Not installed'));
+
+		// What a running Kea says about itself: whether it listens, and
+		// where its own high availability stands. Nothing is added when it
+		// could not be asked.
+		var status = [ statusBadge ];
+		var problems = {
+			'not-listening': _('Not listening'),
+			'ha-terminated': _('Kea HA terminated'),
+			'partner-down': _('Partner down')
+		};
+
+		// The reason Kea gives for sockets that are not open is the tooltip
+		if (isRunning && problems[problem])
+			status.push(' ', E('span', {
+				'class': 'label important',
+				'title': (problem === 'not-listening' && serviceInfo.sockets_error) || null
+			}, problems[problem]));
+
+		if (isRunning && ha) {
+			var text = _('Kea HA: %s (%s)').format(ha.state || '?', ha.role || '?');
+			if (ha.partner_in_touch === false)
+				text += ', ' + _('partner not in touch');
+			status.push(' ', E('span', {}, text));
+		} else if (isRunning && serviceInfo.sockets) {
+			status.push(' ', E('span', {}, _('No Kea HA')));
+		}
+
+		return E('tr', { 'class': 'tr' }, [
+			E('td', { 'class': 'td left', 'data-title': _('Service') }, name),
+			E('td', { 'class': 'td left', 'data-title': _('Status') }, status),
+			E('td', { 'class': 'td left', 'data-title': _('PID') }, String(pid)),
+			E('td', { 'class': 'td left', 'data-title': _('Uptime') }, uptime)
+		]);
+	},
+
 	formatLastSync: function(serviceInfo, installed, timestamp) {
 		if (serviceInfo && serviceInfo.required)
 			return this.formatRelativeTime(timestamp);
@@ -114,6 +169,8 @@ return view.extend({
 	renderStatus: function(data, owsyncInstalled, leaseSyncInstalled) {
 		var status = data || {};
 		var services = status.services || {};
+		// Kea replicates its leases itself and lease-sync does not run
+		var keaBackend = status.dhcp_backend === 'kea';
 
 		var clusterState = status.state || 'UNKNOWN';
 		var nodeRole = status.role || 'UNKNOWN';
@@ -207,8 +264,9 @@ return view.extend({
 						]),
 						E('tr', { 'class': 'tr' }, [
 							E('td', { 'class': 'td left' }, _('Lease Sync')),
-							E('td', { 'class': 'td left' },
-								this.formatLastSync(services['lease-sync'], leaseSyncInstalled, syncStatus.lease_last_sync))
+							E('td', { 'class': 'td left' }, keaBackend
+								? _('By Kea')
+								: this.formatLastSync(services['lease-sync'], leaseSyncInstalled, syncStatus.lease_last_sync))
 						])
 					])
 				])
@@ -226,7 +284,10 @@ return view.extend({
 					this.renderServiceRow('keepalived', services.keepalived, true),
 					this.renderServiceRow('owsync', services.owsync, owsyncInstalled),
 					this.renderServiceRow('lease-sync', services['lease-sync'], leaseSyncInstalled)
-				])
+				].concat(keaBackend ? [
+					this.renderKeaRow('kea-dhcp4', services['kea-dhcp4']),
+					this.renderKeaRow('kea-dhcp6', services['kea-dhcp6'])
+				] : []))
 			]),
 
 			E('h3', {}, _('Peer Status')),

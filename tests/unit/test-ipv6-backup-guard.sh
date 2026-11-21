@@ -380,4 +380,23 @@ expect 'without an answer from netifd the network config decides' blocked ha_clu
 rm -rf "$TEST_ROOT/lib/functions"
 echo 'ok - the blocked device is the one netifd reports, else the one of the network config'
 
+# ------------------------------------------------------------------
+# Kea as the DHCP server decides by itself which node answers DHCPv6:
+# only Router Advertisements are guarded then
+unset FAKE_NETIFD_DEVICE
+write_uci 'fd00::1'
+echo "ha-cluster.config.dhcp_backend='kea'" >> "$UCI_STATE"
+write_keepalived_conf main main_v6
+reset_state
+guard main_v6 BACKUP
+expect 'Router Advertisements are still blocked on a BACKUP' blocked ha_cluster_ra
+refute 'DHCPv6 is not blocked on a BACKUP with Kea' blocked ha_cluster_dhcpv6
+expect 'the DHCPv6 set is emptied' grep -Fxq 'CALL: flush set inet ha_cluster_dhcpv6 backup_ifaces' "$NFT_LOG"
+
+write_uci 'fd00::1'
+reconcile
+expect 'DHCPv6 is blocked again once dnsmasq is the DHCP server' blocked ha_cluster_dhcpv6
+expect 'Router Advertisements stay blocked' blocked ha_cluster_ra
+echo 'ok - with Kea the guard leaves DHCPv6 alone and keeps Router Advertisements'
+
 echo 'All IPv6 BACKUP guard tests passed.'

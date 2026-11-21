@@ -14,8 +14,8 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r5, `luci-app-ha-cluster` 2.0.0-r3,
-`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
+packages are `ha-cluster` 2.0.0-r12, `luci-app-ha-cluster` 2.0.0-r8,
+`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
 
@@ -44,18 +44,67 @@ upgrading a node.
   disabled, or the package removed.
 - The upgrade script puts the guard handler of the installed release
   back after a sysupgrade that kept `/etc/hotplug.d/keepalived/`.
+- `dhcp_backend 'kea'`: ISC Kea as the DHCP server of the cluster
+  interfaces. lease-sync does not run, the checks that only its dnsmasq
+  side needs are skipped, and the guard leaves DHCPv6 to Kea while it keeps
+  guarding Router Advertisements. ha-cluster neither runs nor configures
+  Kea: its high availability is set up in Kea. See
+  [Kea as the DHCP Server](ha-cluster/README.md#kea-as-the-dhcp-server).
 - The device of a logical interface is taken from the network config
   while netifd has not brought the interface up. ha-cluster starts at boot
   right after netifd; when it came first, the logical name (`lan`) went
   into the keepalived config in place of the device (`br-lan`), keepalived
   waited for a device of that name, and the node stayed in FAULT until
   ha-cluster was restarted. A config that names devices was not affected.
+- With `dhcp_backend 'kea'`, help for Kea's own high availability:
+  - a Kea DHCP daemon is told to read its config again when an interface
+    has come up on a device it listens on and the device is not the one
+    it was. Kea does not notice that netifd made a device anew (`ifdown`
+    and `ifup`, a network restart): it goes on running, calls its sockets
+    ready and hears nothing, while its partner still reaches it and does
+    not take over;
+  - the status reports, for each Kea DHCP daemon, whether it is enabled,
+    whether its DHCP sockets are open, and the state of its high
+    availability, and the cluster is `DEGRADED` when an enabled daemon is
+    stopped, not listening on a device of the cluster, alone
+    (`partner-down`) or has ended its HA;
+  - warnings at start for a Kea config without the high-availability hook,
+    for a `"url"` of that hook without a port, with which the two servers
+    never find each other, and for a config without socket retries, with
+    which a Kea that starts before its interface is up never listens;
+  - a `nodes` call that names the nodes alike on every node and gives
+    their addresses, for setting up Kea's HA.
+- The cluster's own traffic is let through the firewall by ha-cluster:
+  rules named `HA-Cluster-...` in `/etc/config/firewall`, visible in LuCI
+  like any rule, for VRRP on the devices of the instances and, from the
+  addresses of the nodes, for owsync, lease-sync, the listeners of Kea's
+  high availability and ping. Every node writes the same rules, so a
+  synced firewall config stays right. `firewall '0'` turns this off, and
+  `/etc/init.d/ha-cluster firewall` brings the rules up to date without
+  touching a daemon. See [Firewall](ha-cluster/README.md#firewall).
+- A warning at start for each entry of a sync group that starts with a
+  slash: owsync syncs only the files of `/etc/config` and matches entries
+  against their names there, so `/etc/config/apcontroller` or
+  `/root/.ssh` sync nothing, silently. An entry under `/etc/config` is
+  named with what to write instead. Nothing is changed in the config.
+- Link-local IPv6 VIPs are written first in an instance: keepalived
+  wants the first IPv6 address to be link-local, and warned when the
+  sections came in another order.
+- `/etc/init.d/ha-cluster start` and `reload` fail when the start fails
+  (a config that does not validate); they returned 0 with no daemon
+  running, and LuCI's apply reported success.
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
   `sync_encryption`.
 - Dataplane health checks on the Keepalived (Advanced) page.
 - The peer address is passed to ping after `--`.
+- "DHCP Server" on the General page, for `dhcp_backend`; with Kea the
+  Status page lists the Kea DHCP daemons, with what each says about its
+  sockets and its high availability.
+- "Firewall Rules" on the General page, for `firewall`.
+- The help of a sync group's files no longer offers absolute paths,
+  which owsync never syncs.
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a
@@ -72,7 +121,9 @@ upgrading a node.
   the frame size before the handshake, peer file states validated, and a
   fix for the crash when a tombstone expires.
 - dnsmasq-ha: DHCPv6 leases carry the client DUID over ubus; the
-  dhcp-script forwards only `NAME=value` lines to hotplug.
+  dhcp-script forwards only `NAME=value` lines to hotplug. The log line
+  of an injected DHCPv6 lease shows the whole client id; it showed its
+  first byte.
 
 ### Tests
 - `tests/unit`: host-side tests, no container needed.

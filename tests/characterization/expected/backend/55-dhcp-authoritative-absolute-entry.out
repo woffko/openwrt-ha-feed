@@ -127,6 +127,7 @@ reload_trigger [ha-cluster]
 == log
 ha-cluster|daemon.info|Starting HA cluster
 ha-cluster|daemon.info|Applying HA cluster configuration
+ha-cluster|daemon.warning|sync_group dhcp: '/etc/config/dhcp' syncs nothing, owsync takes names inside /etc/config: write it as 'dhcp'
 ha-cluster|daemon.warning|dnsmasq is authoritative while several nodes serve DHCP: they NAK each other's clients
 ha-cluster|daemon.warning|Set authoritative '0' in /etc/config/dhcp on every node
 ha-cluster|daemon.info|Taking over service management from standalone init scripts
@@ -139,6 +140,7 @@ ha-cluster|daemon.info|Keepalived configuration generated at /var/run/ha-cluster
 ha-cluster|daemon.info|Generating owsync configuration
 ha-cluster|daemon.info|owsync configuration generated at /var/run/ha-cluster/owsync.conf
 ha-cluster|daemon.info|HA cluster configuration applied successfully
+ha-cluster|daemon.warning|Firewall rules of the cluster not written: this node's own address towards 172.30.0.11 is not known. Set bind_address, or source_address of the peer, or reload ha-cluster once the interface is up
 ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 == ls /var/run/ha-cluster
@@ -216,6 +218,8 @@ service_states
 keepalived=1
 owsync=1
 lease-sync=1
+== firewall rules of the cluster
+(none)
 == rc.d
 K91ha-cluster
 S25ha-cluster
@@ -251,6 +255,7 @@ ha-cluster|daemon.info|Keepalived configuration generated at /var/run/ha-cluster
 ha-cluster|daemon.info|Generating owsync configuration
 ha-cluster|daemon.info|owsync configuration generated at /var/run/ha-cluster/owsync.conf
 ha-cluster|daemon.info|HA cluster configuration applied successfully
+ha-cluster|daemon.warning|Firewall rules of the cluster not written: this node's own address towards 172.30.0.11 is not known. Set bind_address, or source_address of the peer, or reload ha-cluster once the interface is up
 ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 == ls /var/run/ha-cluster
@@ -328,6 +333,8 @@ service_states
 keepalived=1
 owsync=1
 lease-sync=1
+== firewall rules of the cluster
+(none)
 == rc.d
 K91ha-cluster
 S25ha-cluster

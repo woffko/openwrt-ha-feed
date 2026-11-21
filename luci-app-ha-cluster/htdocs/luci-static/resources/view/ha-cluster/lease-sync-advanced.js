@@ -39,7 +39,10 @@ return view.extend({
 		var m, s, o;
 
 		m = new form.Map('ha-cluster', _('High Availability - Advanced Lease Sync'),
-			_('Tuning for high-churn environments, unreliable networks, or troubleshooting.'));
+			_('Tuning for high-churn environments, unreliable networks, or troubleshooting.') +
+			// The settings stay editable: they apply again with dnsmasq
+			(uci.get('ha-cluster', 'config', 'dhcp_backend') === 'kea'
+				? ' ' + _('Not in use: Kea is the DHCP server and replicates its leases itself.') : ''));
 
 		s = m.section(form.TypedSection, 'advanced', _('Lease-Sync Tuning'),
 			_('Default values work for most deployments.'));

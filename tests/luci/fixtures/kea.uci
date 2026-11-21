@@ -1,0 +1,33 @@
+config global 'config'
+	option enabled '1'
+	option node_priority '100'
+	option sync_method 'owsync'
+	option encryption_key '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
+	option dhcp_backend 'kea'
+	option firewall '0'
+
+config vrrp_instance 'main'
+	option vrid '64'
+	option interface 'lan'
+	option nopreempt '1'
+
+config vip
+	option vrrp_instance 'main'
+	option interface 'lan'
+	option address '192.168.50.254'
+	option netmask '255.255.255.0'
+	option address6 'fd00:192:168:50::254'
+	option prefix6 '64'
+
+config peer
+	option name 'router2'
+	option address '192.168.50.11'
+	option source_address '192.168.50.10'
+
+config service 'dhcp'
+	option enabled '1'
+	option sync_leases '1'
+	list config_files 'dhcp'
+
+config advanced 'advanced'
+	option lease_sync_interval '60'

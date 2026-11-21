@@ -8,6 +8,9 @@ STOP=91
 
 USE_PROCD=1
 
+EXTRA_COMMANDS="firewall"
+EXTRA_HELP="	firewall	Bring the rules of the cluster in the firewall config up to date"
+
 HA_CLUSTER_LIB="${IPKG_INSTROOT}/usr/lib/ha-cluster/ha-cluster.sh"
 [ -r "$HA_CLUSTER_LIB" ] || HA_CLUSTER_LIB="/usr/lib/ha-cluster/ha-cluster.sh"
 . "$HA_CLUSTER_LIB"
@@ -38,13 +41,18 @@ start_service() {
 	# default BusyBox of OpenWrt has no such applet.
 	[ -d "$HA_CLUSTER_RUN_DIR" ] && [ -O "$HA_CLUSTER_RUN_DIR" ] || {
 		ha_log_error "$HA_CLUSTER_RUN_DIR is not owned by root; refusing to start"
+		HA_START_FAILED=1
 		return 1
 	}
 
 	ha_apply_config || {
 		ha_log_error "Failed to apply configuration"
+		HA_START_FAILED=1
 		return 1
 	}
+
+	# What the peers must reach on this node, as rules in the firewall config
+	ha_apply_firewall
 
 	ha_log_info "Starting keepalived daemon"
 	procd_open_instance keepalived
@@ -85,9 +93,13 @@ start_service() {
 	return 0
 }
 
-# Runs after start_service, on start and on reload
+# Runs after start_service, on start and on reload. rc.common gives its
+# return code as that of "start" and "reload": a start that failed
+# (validation, the run directory) fails them too, for LuCI's apply and for
+# whoever reloads by hand. Before, both returned 0 with no daemon running.
 service_started() {
 	ha_reconcile_ipv6_guard
+	[ -z "${HA_START_FAILED:-}" ]
 }
 
 stop_service() {
@@ -114,6 +126,9 @@ service_stopped() {
 	# for a node that leaves the cluster
 	ha_stop_ipv6_guard
 
+	# Kept for a node that only stops, removed for one that leaves
+	ha_stop_firewall
+
 	ha_release_dnsmasq
 
 	ha_manage_services "release"
@@ -133,6 +148,7 @@ reload_service() {
 		if [ "$enabled" -eq 1 ]; then
 			ha_log_info "Service not running, performing full start"
 			start
+			return
 		fi
 		return 0
 	fi
@@ -152,4 +168,23 @@ reload_service() {
 
 service_triggers() {
 	procd_add_reload_trigger "ha-cluster"
+}
+
+# /etc/init.d/ha-cluster firewall
+# Brings the rules of the cluster in /etc/config/firewall up to date and
+# touches nothing else: no daemon is started, stopped or signalled, whether
+# the service runs or not. For what changes outside the config of
+# ha-cluster, such as the ports of Kea's high availability: "reload" would
+# start a service that was stopped on purpose.
+# Nothing happens for a cluster that is switched off: its rules went when
+# it was switched off.
+firewall() {
+	local enabled
+
+	config_load ha-cluster
+	config_get_bool enabled config enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+
+	ha_log_init
+	ha_apply_firewall
 }

@@ -146,6 +146,7 @@ ha-cluster|daemon.info|Keepalived configuration generated at /var/run/ha-cluster
 ha-cluster|daemon.info|Generating owsync configuration
 ha-cluster|daemon.info|owsync configuration generated at /var/run/ha-cluster/owsync.conf
 ha-cluster|daemon.info|HA cluster configuration applied successfully
+ha-cluster|daemon.warning|Firewall rules of the cluster not written: this node's own address towards 172.30.0.11 is not known. Set bind_address, or source_address of the peer, or reload ha-cluster once the interface is up
 ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 == ls /var/run/ha-cluster
@@ -224,6 +225,8 @@ service_states
 keepalived=1
 owsync=1
 lease-sync=1
+== firewall rules of the cluster
+(none)
 == rc.d
 K91ha-cluster
 S25ha-cluster
@@ -257,6 +260,7 @@ ha-cluster|daemon.info|Keepalived configuration generated at /var/run/ha-cluster
 ha-cluster|daemon.info|Generating owsync configuration
 ha-cluster|daemon.info|owsync configuration generated at /var/run/ha-cluster/owsync.conf
 ha-cluster|daemon.info|HA cluster configuration applied successfully
+ha-cluster|daemon.warning|Firewall rules of the cluster not written: this node's own address towards 172.30.0.11 is not known. Set bind_address, or source_address of the peer, or reload ha-cluster once the interface is up
 ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 == ls /var/run/ha-cluster
@@ -334,6 +338,8 @@ service_states
 keepalived=1
 owsync=1
 lease-sync=1
+== firewall rules of the cluster
+(none)
 == rc.d
 K91ha-cluster
 S25ha-cluster
