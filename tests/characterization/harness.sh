@@ -165,6 +165,9 @@ case "$mode" in
 				reload) reload_service ;;
 				stop) stop ;;
 				firewall) firewall ;;
+				# The init script as procd runs it, through rc.common: only
+				# its return code is of interest (procd is not there)
+				init-reload) sh /etc/rc.common /etc/init.d/ha-cluster reload >/dev/null 2>&1 ;;
 			esac
 			echo "rc=$?"
 			observe

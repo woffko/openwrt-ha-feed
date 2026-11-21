@@ -526,9 +526,26 @@ _ha_collect_vip_for_instance() {
 			''|*[!0-9]*) ha_log_error "VIP $vip_section: prefix6 must be a number (got: $vip_prefix6)"; return 1 ;;
 		esac
 		[ "$vip_prefix6" -lt 1 ] || [ "$vip_prefix6" -gt 128 ] && { ha_log_error "VIP $vip_section: prefix6 must be 1-128 (got: $vip_prefix6)"; return 1; }
-		_ha_vip_v6_addrs="${_ha_vip_v6_addrs}        ${vip_address6}/${vip_prefix6} dev ${vip_iface_resolved}
+		# keepalived wants the first IPv6 address of an instance to be
+		# link-local (RFC 5798): those go first, the others keep the order
+		# of their sections
+		if is_link_local_ipv6 "$vip_address6"; then
+			_ha_vip_v6_addrs="        ${vip_address6}/${vip_prefix6} dev ${vip_iface_resolved}
+${_ha_vip_v6_addrs}"
+		else
+			_ha_vip_v6_addrs="${_ha_vip_v6_addrs}        ${vip_address6}/${vip_prefix6} dev ${vip_iface_resolved}
 "
+		fi
 	fi
+}
+
+# Usage: is_link_local_ipv6 <address>
+# fe80::/10
+is_link_local_ipv6() {
+	case "$1" in
+		[Ff][Ee][89AaBb]?:*) return 0 ;;
+	esac
+	return 1
 }
 
 # Usage: _ha_ip_family "addr" -> "4" or "6"
@@ -1243,6 +1260,9 @@ ha_validate_config() {
 		ha_sync_encryption_mode "$encryption_key" || errors=$((errors + 1))
 	fi
 
+	# Entries of a sync group that owsync never matches
+	config_foreach _ha_check_sync_group_entries sync_group
+
 	# Warn only: /etc/config/dhcp belongs to the user
 	if ha_dhcp_authoritative_conflict; then
 		ha_log_warning "dnsmasq is authoritative while several nodes serve DHCP: they NAK each other's clients"
@@ -1250,6 +1270,42 @@ ha_validate_config() {
 	fi
 
 	return $errors
+}
+
+# Usage: _ha_check_sync_group_entries <sync_group section>
+# owsync syncs files inside /etc/config only: it matches each entry of a
+# group against the names of the files there, relative to it, and refuses
+# a path that starts with a slash. An entry like /etc/config/apcontroller or
+# /root/.ssh therefore syncs nothing, with no word from owsync. Warn only:
+# the entry may have been written that way for years, and nothing worse
+# happens than before.
+_ha_check_sync_group_entries() {
+	local section="$1"
+	local enabled
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+	_ha_sync_group_checked="$section"
+	config_list_foreach "$section" config_files _ha_check_sync_group_entry
+}
+
+_ha_sync_group_checked=""
+_ha_check_sync_group_entry() {
+	local entry="$1" name
+
+	# A relative entry with a slash may name a file in a directory below
+	# /etc/config, which owsync does sync
+	case "$entry" in
+		/*) ;;
+		*) return 0 ;;
+	esac
+
+	name="${entry#/etc/config/}"
+	if [ "$name" != "$entry" ] && [ -n "$name" ] && [ "${name#*/}" = "$name" ]; then
+		ha_log_warning "sync_group $_ha_sync_group_checked: '$entry' syncs nothing, owsync takes names inside /etc/config: write it as '$name'"
+	else
+		ha_log_warning "sync_group $_ha_sync_group_checked: '$entry' syncs nothing, owsync syncs only files inside /etc/config"
+	fi
 }
 
 _ha_dnsmasq_authoritative=0

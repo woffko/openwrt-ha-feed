@@ -299,7 +299,7 @@ h4: High Availability - Advanced Config Sync - openvpn
 openvpn.enabled [CBI.FlagValue] Enable Sync: [x]
   help: Enable synchronization for this group.
 openvpn.config_files [CBI.DynamicList] Files/Directories to Sync: item=openvpn item=/etc/openvpn/keys
-  help: UCI names (e.g., "openvpn") or absolute paths (e.g., "/etc/openvpn/keys").
+  help: Names of files in /etc/config (e.g., "openvpn"), or a pattern such as "openvpn*". Configuration sync covers /etc/config only: a path that starts with "/" syncs nothing, and the backend warns about it.
 <button> Dismiss
 <button> Save
 ==== owsync-advanced modal mwan3
@@ -307,7 +307,7 @@ h4: High Availability - Advanced Config Sync - mwan3
 mwan3.enabled [CBI.FlagValue] Enable Sync: [ ]
   help: Enable synchronization for this group.
 mwan3.config_files [CBI.DynamicList] Files/Directories to Sync: item=mwan3
-  help: UCI names (e.g., "openvpn") or absolute paths (e.g., "/etc/openvpn/keys").
+  help: Names of files in /etc/config (e.g., "openvpn"), or a pattern such as "openvpn*". Configuration sync covers /etc/config only: a path that starts with "/" syncs nothing, and the backend warns about it.
 <button> Dismiss
 <button> Save
 ==== owsync-advanced modal ipsec
@@ -315,7 +315,7 @@ h4: High Availability - Advanced Config Sync - ipsec
 ipsec.enabled [CBI.FlagValue] Enable Sync: [x]
   help: Enable synchronization for this group.
 ipsec.config_files [CBI.DynamicList] Files/Directories to Sync: item=ipsec
-  help: UCI names (e.g., "openvpn") or absolute paths (e.g., "/etc/openvpn/keys").
+  help: Names of files in /etc/config (e.g., "openvpn"), or a pattern such as "openvpn*". Configuration sync covers /etc/config only: a path that starts with "/" syncs nothing, and the backend warns about it.
 <button> Dismiss
 <button> Save
 ==== lease-sync-advanced

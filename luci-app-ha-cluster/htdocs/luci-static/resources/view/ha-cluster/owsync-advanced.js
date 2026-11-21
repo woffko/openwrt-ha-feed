@@ -217,10 +217,12 @@ return view.extend({
 				uci.set('ha-cluster', section_id, 'enabled', value);
 		};
 
+		// owsync syncs the files of /etc/config only and matches each entry
+		// against their names there: an absolute path matches nothing
 		o = s.option(form.DynamicList, 'config_files', _('Files/Directories to Sync'),
-			_('UCI names (e.g., "openvpn") or absolute paths (e.g., "/etc/openvpn/keys").'));
+			_('Names of files in /etc/config (e.g., "openvpn"), or a pattern such as "openvpn*". Configuration sync covers /etc/config only: a path that starts with "/" syncs nothing, and the backend warns about it.'));
 		o.datatype = 'string';
-		o.placeholder = 'openvpn or /etc/openvpn/keys';
+		o.placeholder = 'openvpn';
 		o.modalonly = true;
 
 		s = m.section(form.TypedSection, 'exclude', _('Exclusions'),

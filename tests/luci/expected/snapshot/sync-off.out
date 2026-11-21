@@ -176,7 +176,7 @@ h4: High Availability - Advanced Config Sync - openvpn
 openvpn.enabled [CBI.FlagValue] Enable Sync: [ ]
   help: Enable synchronization for this group.
 openvpn.config_files [CBI.DynamicList] Files/Directories to Sync: item=openvpn
-  help: UCI names (e.g., "openvpn") or absolute paths (e.g., "/etc/openvpn/keys").
+  help: Names of files in /etc/config (e.g., "openvpn"), or a pattern such as "openvpn*". Configuration sync covers /etc/config only: a path that starts with "/" syncs nothing, and the backend warns about it.
 <button> Dismiss
 <button> Save
 ==== lease-sync-advanced

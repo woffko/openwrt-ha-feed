@@ -14,8 +14,8 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r11, `luci-app-ha-cluster` 2.0.0-r7,
-`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
+packages are `ha-cluster` 2.0.0-r12, `luci-app-ha-cluster` 2.0.0-r8,
+`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
 
@@ -82,6 +82,17 @@ upgrading a node.
   synced firewall config stays right. `firewall '0'` turns this off, and
   `/etc/init.d/ha-cluster firewall` brings the rules up to date without
   touching a daemon. See [Firewall](ha-cluster/README.md#firewall).
+- A warning at start for each entry of a sync group that starts with a
+  slash: owsync syncs only the files of `/etc/config` and matches entries
+  against their names there, so `/etc/config/apcontroller` or
+  `/root/.ssh` sync nothing, silently. An entry under `/etc/config` is
+  named with what to write instead. Nothing is changed in the config.
+- Link-local IPv6 VIPs are written first in an instance: keepalived
+  wants the first IPv6 address to be link-local, and warned when the
+  sections came in another order.
+- `/etc/init.d/ha-cluster start` and `reload` fail when the start fails
+  (a config that does not validate); they returned 0 with no daemon
+  running, and LuCI's apply reported success.
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
@@ -92,6 +103,8 @@ upgrading a node.
   Status page lists the Kea DHCP daemons, with what each says about its
   sockets and its high availability.
 - "Firewall Rules" on the General page, for `firewall`.
+- The help of a sync group's files no longer offers absolute paths,
+  which owsync never syncs.
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a
@@ -108,7 +121,9 @@ upgrading a node.
   the frame size before the handshake, peer file states validated, and a
   fix for the crash when a tombstone expires.
 - dnsmasq-ha: DHCPv6 leases carry the client DUID over ubus; the
-  dhcp-script forwards only `NAME=value` lines to hotplug.
+  dhcp-script forwards only `NAME=value` lines to hotplug. The log line
+  of an injected DHCPv6 lease shows the whole client id; it showed its
+  first byte.
 
 ### Tests
 - `tests/unit`: host-side tests, no container needed.

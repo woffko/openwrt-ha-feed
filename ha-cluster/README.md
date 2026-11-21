@@ -661,7 +661,7 @@ Each section lists files synced by owsync.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool | `1` | Enable sync for this group |
-| `config_files` | list | | UCI config names or paths to sync |
+| `config_files` | list | | Names of files in `/etc/config` to sync (e.g. `dhcp`), patterns allowed. owsync syncs nothing outside `/etc/config`: an entry that starts with `/` matches nothing, and ha-cluster warns about it at start |
 
 ### Exclusions (`config exclude`)
 

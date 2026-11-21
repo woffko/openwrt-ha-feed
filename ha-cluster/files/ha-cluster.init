@@ -41,11 +41,13 @@ start_service() {
 	# default BusyBox of OpenWrt has no such applet.
 	[ -d "$HA_CLUSTER_RUN_DIR" ] && [ -O "$HA_CLUSTER_RUN_DIR" ] || {
 		ha_log_error "$HA_CLUSTER_RUN_DIR is not owned by root; refusing to start"
+		HA_START_FAILED=1
 		return 1
 	}
 
 	ha_apply_config || {
 		ha_log_error "Failed to apply configuration"
+		HA_START_FAILED=1
 		return 1
 	}
 
@@ -91,9 +93,13 @@ start_service() {
 	return 0
 }
 
-# Runs after start_service, on start and on reload
+# Runs after start_service, on start and on reload. rc.common gives its
+# return code as that of "start" and "reload": a start that failed
+# (validation, the run directory) fails them too, for LuCI's apply and for
+# whoever reloads by hand. Before, both returned 0 with no daemon running.
 service_started() {
 	ha_reconcile_ipv6_guard
+	[ -z "${HA_START_FAILED:-}" ]
 }
 
 stop_service() {
@@ -142,6 +148,7 @@ reload_service() {
 		if [ "$enabled" -eq 1 ]; then
 			ha_log_info "Service not running, performing full start"
 			start
+			return
 		fi
 		return 0
 	fi
