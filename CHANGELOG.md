@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r12, `luci-app-ha-cluster` 2.0.0-r8,
+packages are `ha-cluster` 2.0.0-r12, `luci-app-ha-cluster` 2.0.0-r9,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -105,6 +105,11 @@ upgrading a node.
 - "Firewall Rules" on the General page, for `firewall`.
 - The help of a sync group's files no longer offers absolute paths,
   which owsync never syncs.
+- Removing a VRRP instance on the Advanced VRRP page takes it out of the
+  health checks that track it, and is refused while a dataplane check
+  tracks nothing else; removing a health check takes it out of the
+  instances' Track Scripts. A name left behind failed the backend's
+  validation, and the cluster did not start.
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a

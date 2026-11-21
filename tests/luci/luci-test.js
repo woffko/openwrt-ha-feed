@@ -530,6 +530,21 @@ const ACTIONS = [
 			await modalSave(p);
 		}
 	}],
+	// Removing an instance takes it out of the checks that track it, and
+	// is refused while a dataplane check tracks nothing else
+	['vrrp-instance-remove-tracked', 'checks', 'keepalived-advanced', async p => {
+		await p.click('#cbi-ha-cluster-vrrp_instance [data-sid="main"] .cbi-button-remove');
+		await settle(p);
+	}],
+	['vrrp-instance-remove-refused', 'checks', 'keepalived-advanced', async p => {
+		await p.click('#cbi-ha-cluster-vrrp_instance [data-sid="vpn"] .cbi-button-remove');
+		await settle(p);
+	}],
+	// Removing a check takes it out of the instances' Track Scripts
+	['vrrp-script-remove-tracked', 'checks', 'keepalived-advanced', async p => {
+		await p.click('#cbi-ha-cluster-script [data-sid="check_cmd"] .cbi-button-remove');
+		await settle(p);
+	}],
 	['vrrp-script-add', 'full', 'keepalived-advanced', async p => {
 		await addNamed(p, 'script', 'check_dns');
 		await fill(p, field('check_dns', 'script'), '/usr/bin/nslookup openwrt.org 127.0.0.1');
