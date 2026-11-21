@@ -1,0 +1,4 @@
+staged:
+remove main
+remove dp_both vrrp_instance
+list-add dp_both vrrp_instance vpn

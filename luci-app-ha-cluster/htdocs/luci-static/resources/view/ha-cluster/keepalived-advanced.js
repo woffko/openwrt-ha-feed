@@ -243,6 +243,35 @@ return view.extend({
 		s.addremove = true;
 		s.sortable = true;
 		s.nodescriptions = true;
+
+		// A health check that names a removed instance fails the backend's
+		// validation, and the cluster no longer starts. The instance leaves
+		// the lists of the checks with it; a dataplane check that tracks
+		// only this instance would be left with none, which is no valid
+		// check either: then the removal is refused and says why.
+		s.handleRemove = function(section_id, ev) {
+			var checks = uci.sections('ha-cluster', 'script');
+			var blocking = checks.filter(function(check) {
+				var list = L.toArray(check.vrrp_instance);
+				return (check.check_type || 'command') === 'dataplane' &&
+					list.length > 0 && list.every(function(name) { return name === section_id; });
+			});
+
+			if (blocking.length) {
+				ui.addNotification(null, E('p', _('The instance "%s" is the only one the dataplane check "%s" tracks. Edit or remove that check first.')
+					.format(section_id, blocking.map(function(check) { return check['.name']; }).join('", "'))), 'warning');
+				return Promise.resolve();
+			}
+
+			checks.forEach(function(check) {
+				var list = L.toArray(check.vrrp_instance);
+				var kept = list.filter(function(name) { return name !== section_id; });
+				if (kept.length !== list.length)
+					uci.set('ha-cluster', check['.name'], 'vrrp_instance', kept.length ? kept : null);
+			});
+
+			return form.GridSection.prototype.handleRemove.apply(this, [ section_id, ev ]);
+		};
 		s.tab('general', _('General'));
 		s.tab('timing', _('Timing'));
 		s.tab('auth', _('Authentication'));
@@ -420,6 +449,19 @@ return view.extend({
 		s.anonymous = false;
 		s.addremove = true;
 		s.sortable = true;
+
+		// An instance that tracks a removed check by name fails the backend's
+		// validation: the check leaves the Track Scripts of every instance
+		s.handleRemove = function(section_id, ev) {
+			uci.sections('ha-cluster', 'vrrp_instance').forEach(function(instance) {
+				var list = L.toArray(instance.track_script);
+				var kept = list.filter(function(name) { return name !== section_id; });
+				if (kept.length !== list.length)
+					uci.set('ha-cluster', instance['.name'], 'track_script', kept.length ? kept : null);
+			});
+
+			return form.GridSection.prototype.handleRemove.apply(this, [ section_id, ev ]);
+		};
 
 		o = s.option(form.DummyValue, '_check_summary', _('Check'));
 		o.cfgvalue = function(section_id) {

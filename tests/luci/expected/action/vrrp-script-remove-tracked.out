@@ -1,0 +1,4 @@
+staged:
+remove main track_script
+remove vpn track_script
+remove check_cmd
