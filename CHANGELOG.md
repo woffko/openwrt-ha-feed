@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r10, `luci-app-ha-cluster` 2.0.0-r7,
+packages are `ha-cluster` 2.0.0-r11, `luci-app-ha-cluster` 2.0.0-r7,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r3. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.

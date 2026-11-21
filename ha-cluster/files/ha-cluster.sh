@@ -29,6 +29,7 @@ FW4_BIN="${FW4_BIN:-/sbin/fw4}"
 # The changes ha-cluster makes to /etc/config/firewall are staged here, apart
 # from what a user has pending in the usual place, and committed on their own
 HA_FIREWALL_SAVEDIR="${HA_CLUSTER_RUN_DIR}/uci-firewall"
+HA_FIREWALL_LOCK="${HA_FIREWALL_LOCK:-/var/lock/ha-cluster-firewall.lock}"
 HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
@@ -1684,9 +1685,32 @@ _ha_fw_reload() {
 	return 0
 }
 
+# Usage: _ha_fw_locked <function> [arguments]
+# One writer of the firewall config at a time. The start and the reload of
+# the service, a stop, and the "firewall" command, which rc.common runs
+# outside the lock it takes for start and stop, may meet, and they stage
+# their changes in the same directory: two at once would write each list
+# twice. The lock is held on a descriptor, so a writer that dies leaves
+# none behind. Without a place for the lock file the function runs anyway.
+_ha_fw_locked() {
+	mkdir -p "${HA_FIREWALL_LOCK%/*}" 2>/dev/null
+	if ( : > "$HA_FIREWALL_LOCK" ) 2>/dev/null; then
+		{
+			flock -x 9 2>/dev/null
+			"$@"
+		} 9>"$HA_FIREWALL_LOCK"
+	else
+		"$@"
+	fi
+}
+
 # Usage: ha_remove_firewall
 # Takes the rules of ha-cluster out of the firewall config.
 ha_remove_firewall() {
+	_ha_fw_locked _ha_remove_firewall
+}
+
+_ha_remove_firewall() {
 	[ -n "$(_ha_fw_in_config)" ] || return 0
 
 	mkdir -p "$HA_FIREWALL_SAVEDIR" 2>/dev/null || return 0
@@ -1703,6 +1727,10 @@ ha_remove_firewall() {
 # in the config and not in the loaded ruleset. With option firewall '0' the
 # rules are removed and the firewall is the user's alone.
 ha_apply_firewall() {
+	_ha_fw_locked _ha_apply_firewall
+}
+
+_ha_apply_firewall() {
 	local wanted description wanted_rules kind section option value names
 
 	# No firewall config: no firewall4 to open anything in
@@ -1710,7 +1738,7 @@ ha_apply_firewall() {
 
 	config_get_bool wanted config firewall 1
 	if [ "$wanted" -eq 0 ]; then
-		ha_remove_firewall
+		_ha_remove_firewall
 		return 0
 	fi
 
@@ -1743,6 +1771,8 @@ ha_apply_firewall() {
 
 	mkdir -p "$HA_FIREWALL_SAVEDIR" 2>/dev/null || return 0
 	_ha_fw_delete_sections
+	# For tests: time for another writer to step in, were it not held off
+	[ -z "${HA_FIREWALL_HOLD:-}" ] || sleep "$HA_FIREWALL_HOLD"
 	while IFS='|' read -r kind section option value; do
 		case "$kind" in
 			S) _ha_fw_uci set "firewall.$section=$option" ;;
