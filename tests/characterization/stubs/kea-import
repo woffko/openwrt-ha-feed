@@ -2,6 +2,15 @@
 # Stands in for luci-app-kea's import-dnsmasq (KEA_IMPORT_BIN): prints the
 # fixture $FAKE_KEA_IMPORT and exits with $FAKE_KEA_IMPORT_RC (0). Each call
 # is recorded in /tmp/fake-kea-import.log.
+# With --leases (dnsmasq's active leases into a running Kea): prints
+# $FAKE_KEA_LEASES and exits with $FAKE_KEA_LEASES_RC, by default 2 (an
+# unknown argument, as for luci-app-kea before 0.15.0); recorded in
+# /tmp/fake-kea-leases.log.
+if [ "${1:-}" = "--leases" ]; then
+	echo "import-dnsmasq $*" >> /tmp/fake-kea-leases.log
+	[ -n "${FAKE_KEA_LEASES:-}" ] && cat "$FAKE_KEA_LEASES"
+	exit "${FAKE_KEA_LEASES_RC:-2}"
+fi
 echo "import-dnsmasq $*" >> /tmp/fake-kea-import.log
 [ -n "$FAKE_KEA_IMPORT" ] && cat "$FAKE_KEA_IMPORT"
 exit "${FAKE_KEA_IMPORT_RC:-0}"

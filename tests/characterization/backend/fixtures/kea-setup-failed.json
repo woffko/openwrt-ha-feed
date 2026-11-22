@@ -1,0 +1,1 @@
+{"result":false,"written":false,"reason":"kea-dhcp4 -T refused the result: no such option 'foo'","file":"/etc/kea/kea-dhcp4.conf","backup":null,"subnets":[],"ha":null,"left":[]}

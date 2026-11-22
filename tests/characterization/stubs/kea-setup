@@ -1,0 +1,16 @@
+#!/bin/sh
+# Stands in for luci-app-kea's setup-from-dnsmasq (KEA_SETUP_BIN): records
+# its arguments in /tmp/fake-kea-setup.log and what it is given on standard
+# input (the nodes of ha-cluster) in /tmp/fake-kea-setup.in, prints the
+# fixture $FAKE_KEA_SETUP and exits with $FAKE_KEA_SETUP_RC (0). With code 0
+# and $FAKE_KEA_SETUP_CONF, that file becomes Kea's DHCPv4 config, as the
+# setup writes it.
+echo "setup-from-dnsmasq $*" >> /tmp/fake-kea-setup.log
+cat > /tmp/fake-kea-setup.in
+[ -n "${FAKE_KEA_SETUP:-}" ] && cat "$FAKE_KEA_SETUP"
+rc="${FAKE_KEA_SETUP_RC:-0}"
+if [ "$rc" -eq 0 ] && [ -n "${FAKE_KEA_SETUP_CONF:-}" ]; then
+	mkdir -p /etc/kea
+	cp "$FAKE_KEA_SETUP_CONF" /etc/kea/kea-dhcp4.conf
+fi
+exit "$rc"

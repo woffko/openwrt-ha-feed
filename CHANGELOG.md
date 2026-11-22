@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r18, `luci-app-ha-cluster` 2.0.0-r12,
+packages are `ha-cluster` 2.0.0-r19, `luci-app-ha-cluster` 2.0.0-r13,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -166,8 +166,23 @@ upgrading a node.
   input `ACCEPT`, such as `lan` with the sync link in it, let any of its
   clients reach it at a node's sync address: on the bench a LAN client got
   an answer from Kea. Before, only the accepting rule was written (r18).
+- A switch to Kea sets Kea up when Kea's config is all it lacks and that
+  config is still the sample of the Kea package: luci-app-kea's
+  `setup-from-dnsmasq` (0.15.0) writes it from dnsmasq's pools and the nodes
+  of the cluster, Kea is checked again, and once Kea serves, dnsmasq's
+  active leases are handed to it (`import-dnsmasq --leases`). A config of
+  the user's own is never touched, and the refusal says so. Before, Kea had
+  to be set up by hand first, which a router left with the package's sample
+  showed (r19).
+- `nodes` is made by ha-cluster itself (`ha_nodes_json`), also for the
+  switch, and lists the cluster's DHCP interfaces with their devices and
+  the IPv4 addresses of their VIPs (`dhcp_interfaces`).
+- A VIP whose `interface` is neither a logical interface nor the device of
+  one is taken as it is again, as before r17.
 
 ### luci-app-ha-cluster
+- The `nodes` call answers with ha-cluster's `ha_nodes_json`, which adds
+  `dhcp_interfaces`; it needs ha-cluster 2.0.0-r19 (r13).
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
   `sync_encryption`.
 - Dataplane health checks on the Keepalived (Advanced) page.

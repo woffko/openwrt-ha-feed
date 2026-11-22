@@ -1,0 +1,37 @@
+== nodes rc=0
+{
+    "dhcp_backend": "dnsmasq",
+    "node": {
+        "name": "ha-172-30-0-10",
+        "label": "ha-char",
+        "address": "172.30.0.10",
+        "priority": 100,
+        "kea_role": "primary"
+    },
+    "peers": [
+        {
+            "name": "ha-172-30-0-11",
+            "label": "node2",
+            "address": "172.30.0.11",
+            "vrrp_only": false,
+            "kea_role": "standby"
+        }
+    ],
+    "dhcp_interfaces": [
+        {
+            "interface": "lan",
+            "device": "br-lan",
+            "vip4": [
+                "192.168.50.254",
+                "192.168.50.253"
+            ]
+        },
+        {
+            "interface": "wifi",
+            "device": "eth2.87",
+            "vip4": [
+                "10.0.87.5"
+            ]
+        }
+    ]
+}

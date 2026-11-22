@@ -40,40 +40,6 @@ keepalived_roles() {
 	done
 }
 
-# Usage: nodes_collect_peer <peer section> (ha-cluster config loaded)
-# One line per peer with an address: address|own address|label|vrrp_only
-_nodes_peers=""
-nodes_collect_peer() {
-	local section="$1"
-	local address source label vrrp_only
-
-	config_get address "$section" address ""
-	[ -n "$address" ] || return 0
-	config_get source "$section" source_address ""
-	config_get label "$section" name "$section"
-	config_get_bool vrrp_only "$section" vrrp_only 0
-
-	_nodes_peers="${_nodes_peers}${address}|$(ha_own_address_for "$address" "$source")|${label}|${vrrp_only}
-"
-}
-
-# Usage: nodes_role <node id>
-# The part suggested for the node in Kea's hot-standby: the first id in
-# sort order is the primary. Every node sorts the same ids ($_nodes_sorted)
-# and so finds the same parts, without knowing the others' VRRP priority.
-nodes_role() {
-	local position
-
-	[ -n "$1" ] || return 0
-	position=$(printf '%s\n' "$_nodes_sorted" | grep -n -x -F "$1" | head -n 1 | cut -d: -f1)
-	case "$position" in
-		1) echo "primary" ;;
-		2) echo "standby" ;;
-		'') ;;
-		*) echo "backup" ;;
-	esac
-}
-
 # Usage: kea_status_get dhcp4|dhcp6
 # ha_kea_status_get of ha-cluster.sh, which the switch of the DHCP server
 # also asks
@@ -616,63 +582,7 @@ case "$1" in
 			# tool that sets up Kea's high availability; nothing here is
 			# written anywhere.
 			nodes)
-				config_load ha-cluster
-				config_get node_priority config node_priority "100"
-				dhcp_backend=$(ha_dhcp_backend)
-
-				_nodes_peers=""
-				config_foreach nodes_collect_peer peer
-
-				# This node's address towards the first peer it syncs with,
-				# else towards the first peer
-				own_address=$(printf '%s' "$_nodes_peers" | awk -F'|' '$4 == 0 && $2 != "" { print $2; exit }')
-				[ -n "$own_address" ] ||
-					own_address=$(printf '%s' "$_nodes_peers" | awk -F'|' '$2 != "" { print $2; exit }')
-
-				own_id=""
-				_nodes_sorted=""
-				if [ -n "$own_address" ]; then
-					own_id=$(ha_node_id "$own_address")
-					_nodes_sorted=$( {
-						echo "$own_id"
-						printf '%s' "$_nodes_peers" | awk -F'|' '$4 == 0 { print $1 }' |
-							while read -r peer_address; do ha_node_id "$peer_address"; done
-					} | LC_ALL=C sort -u)
-				fi
-
-				json_init
-				json_add_string dhcp_backend "$dhcp_backend"
-				json_add_object node
-				json_add_string name "$own_id"
-				json_add_string label "$(cat /proc/sys/kernel/hostname)"
-				json_add_string address "$own_address"
-				json_add_int priority "$node_priority"
-				role=$(nodes_role "$own_id")
-				[ -n "$role" ] && json_add_string kea_role "$role"
-				json_close_object
-
-				json_add_array peers
-				oldifs="$IFS"
-				IFS='
-'
-				for line in $_nodes_peers; do
-					IFS='|' read -r peer_address own_for_peer peer_label peer_vrrp_only <<EOF
-$line
-EOF
-					peer_id=$(ha_node_id "$peer_address")
-					json_add_object
-					json_add_string name "$peer_id"
-					json_add_string label "$peer_label"
-					json_add_string address "$peer_address"
-					json_add_boolean vrrp_only "$peer_vrrp_only"
-					# A VRRP-only peer is not among the sorted names
-					role=$(nodes_role "$peer_id")
-					[ -n "$role" ] && json_add_string kea_role "$role"
-					json_close_object
-				done
-				IFS="$oldifs"
-				json_close_array
-				json_dump
+				ha_nodes_json
 				;;
 
 			apply)

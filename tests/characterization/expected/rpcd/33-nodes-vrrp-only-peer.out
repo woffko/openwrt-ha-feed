@@ -22,5 +22,14 @@
             "address": "172.30.0.1",
             "vrrp_only": true
         }
+    ],
+    "dhcp_interfaces": [
+        {
+            "interface": "lan",
+            "device": "",
+            "vip4": [
+                "192.168.50.254"
+            ]
+        }
     ]
 }

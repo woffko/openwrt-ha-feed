@@ -8,7 +8,7 @@ LUCI_DEPENDS:=+ha-cluster +luci-base +rpcd
 
 PKG_NAME:=luci-app-ha-cluster
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=12
+PKG_RELEASE:=13
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=Apache-2.0
 
