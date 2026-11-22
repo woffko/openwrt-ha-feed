@@ -9,7 +9,13 @@ log=/tmp/fake-kea-init.log
 state=/tmp/fake-kea-enabled
 running=/tmp/fake-running
 [ -e "$state" ] || echo "${FAKE_KEA_ENABLED:-0}" > "$state"
-echo "$*" >> "$log"
+# With FAKE_KEA_LOG_STATE set, each call also records what the node noted
+# as its DHCP server at that moment
+if [ -n "$FAKE_KEA_LOG_STATE" ]; then
+	echo "$* (dhcp-backend: $(cat /etc/ha-cluster/dhcp-backend 2>/dev/null))" >> "$log"
+else
+	echo "$*" >> "$log"
+fi
 
 dhcp4_stop() {
 	[ -e "$running" ] || return 0

@@ -113,6 +113,7 @@ ha-cluster|daemon.err|vrrp_instance main: VRID must be 1-127 (got: 128, 128-255 
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
 == ls /var/run/ha-cluster
+uci-dhcp
 == /var/run/ha-cluster/keepalived.conf
 (absent)
 == /var/run/ha-cluster/owsync.conf

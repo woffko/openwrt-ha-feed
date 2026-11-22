@@ -258,7 +258,7 @@ kea_service() {
 # Adds kea_import: the static leases of dnsmasq the last import did not take
 # into Kea (those that need luci-app-kea's Import page), with their status
 kea_import_left() {
-	local out count i name identifier address status
+	local out count i field
 
 	out="$(cat "$1")"
 	count=$(printf '%s' "$out" | jsonfilter -e '@.left[*].key' 2>/dev/null | wc -l)
@@ -267,15 +267,11 @@ kea_import_left() {
 	json_add_array entries
 	i=0
 	while [ "$i" -lt "$count" ] && [ "$i" -lt 50 ]; do
-		name="" identifier="" address="" status=""
-		eval "$(printf '%s' "$out" | jsonfilter \
-			-e "name=@.left[$i].name" -e "identifier=@.left[$i].identifier" \
-			-e "address=@.left[$i].address" -e "status=@.left[$i].status" 2>/dev/null)"
 		json_add_object
-		json_add_string name "$name"
-		json_add_string identifier "$identifier"
-		json_add_string address "$address"
-		json_add_string status "$status"
+		# Each field read on its own: the entries come from /etc/config/dhcp
+		for field in name identifier address status; do
+			json_add_string "$field" "$(printf '%s' "$out" | jsonfilter -e "@.left[$i].$field" 2>/dev/null)"
+		done
 		json_close_object
 		i=$((i + 1))
 	done
@@ -484,6 +480,9 @@ case "$1" in
 				# migrated yet, or could not: no file or lease sync, whatever
 				# the daemons say
 				earlier_model=$(ha_config_earlier_model)
+				# A guard handler that keepalived runs and is not this release's
+				ha_guard_handler_stale && earlier_model="${earlier_model:+$earlier_model
+}IPv6 guard handler of an earlier release"
 
 				if [ "$ha_enabled" != "1" ]; then
 					cluster_state="STOPPED"

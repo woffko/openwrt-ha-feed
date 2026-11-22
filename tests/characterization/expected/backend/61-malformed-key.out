@@ -113,6 +113,7 @@ ha-cluster|daemon.err|encryption_key must be 64 hexadecimal characters (got 6)
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
 == ls /var/run/ha-cluster
+uci-dhcp
 == /var/run/ha-cluster/keepalived.conf
 (absent)
 == /var/run/ha-cluster/owsync.conf

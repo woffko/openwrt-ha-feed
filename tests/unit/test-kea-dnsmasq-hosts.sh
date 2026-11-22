@@ -28,7 +28,9 @@ export KDH_KEA_LEASE_DIR="$TEST_ROOT/lib-kea"
 export KDH_RUN_DIR="$TEST_ROOT/run"
 export KDH_NOW=1800000000
 export KDH_HUP="echo hup >> '$TEST_ROOT/hup.log'"
+export KDH_ETC_HOSTS="$TEST_ROOT/hosts-file"
 mkdir -p "$KDH_KEA_LEASE_DIR" "$KDH_KEA_CONF_DIR"
+printf '127.0.0.1 localhost\n192.168.50.1 router.lan router\n192.168.50.5 NAS.lan nas # static\n' > "$KDH_ETC_HOSTS"
 
 V4="$KDH_KEA_LEASE_DIR/kea-leases4.csv"
 V6="$KDH_KEA_LEASE_DIR/kea-leases6.csv"
@@ -78,15 +80,22 @@ $H4
 192.168.50.111,02:00:00:00:00:11,,43200,$LATER,1,0,0,renewed,0,,0
 192.168.50.112,02:00:00:00:00:12,,43200,$LATER,1,0,0,oldname,0,,0
 192.168.50.112,02:00:00:00:00:12,,43200,$LATER,1,0,0,newname,0,,0
+192.168.50.113,02:00:00:00:00:13,,43200,$LATER,1,1,1,updates.example.org.,0,,0
+192.168.50.114,02:00:00:00:00:14,,43200,$LATER,1,0,0,nas,0,,0
+192.168.50.115,02:00:00:00:00:15,,43200,$LATER,1,0,0,Router,0,,0
+192.168.50.116,02:00:00:00:00:16,,43200,$LATER,1,0,0,wpad,0,,0
+192.168.50.117,02:00:00:00:00:17,,43200,$LATER,1,0,0,LAPTOP,0,,0
+192.168.50.118,02:00:00:00:00:18,,43200,$LATER,1,0,0,a123456789012345678901234567890123456789012345678901234567890123,0,,0
 EOF
 
 rebuild "4"
-expect_hosts "active named leases only, the last line of an address wins, a qualified name also by its first label" \
+expect_hosts "active leases, the last line of an address wins, only the first label of a name, no name that is taken or claimed before, no label over 63" \
 "192.168.50.101 laptop
-192.168.50.106 phone.lan phone
+192.168.50.106 phone
 192.168.50.109 forever
 192.168.50.111 renewed
-192.168.50.112 newname"
+192.168.50.112 newname
+192.168.50.113 updates"
 [ "$(hups)" = "1" ] && pass "dnsmasq is told once when the file is written" || fail "dnsmasq is told once when the file is written ($(hups))"
 
 rebuild "4"
@@ -102,10 +111,11 @@ EOF
 rebuild "4 6"
 expect_hosts "DHCPv6 addresses join, prefixes and expired leases do not" \
 "192.168.50.101 laptop
-192.168.50.106 phone.lan phone
+192.168.50.106 phone
 192.168.50.109 forever
 192.168.50.111 renewed
 192.168.50.112 newname
+192.168.50.113 updates
 fd00:1234:abcd:1::1000 laptop"
 [ "$(hups)" = "2" ] && pass "dnsmasq is told after the change" || fail "dnsmasq is told after the change ($(hups))"
 
@@ -146,7 +156,15 @@ KDH_RUNNING="4" sh "$KDH" clear
 [ ! -e "$KDH_HOSTS_FILE" ] && pass "clear removes the file" || fail "clear removes the file"
 
 sh "$HOOK" leases4_committed
+[ ! -e "$KDH_RUN_DIR/changed" ] && pass "the hook writes nothing before the service made its directory" || fail "the hook writes nothing before the service made its directory"
+mkdir -p "$KDH_RUN_DIR"
+sh "$HOOK" leases4_committed
 [ -e "$KDH_RUN_DIR/changed" ] && pass "the hook notes that leases changed" || fail "the hook notes that leases changed"
+mkdir -p "$TEST_ROOT/elsewhere"
+rm -rf "$KDH_RUN_DIR"
+ln -s "$TEST_ROOT/elsewhere" "$KDH_RUN_DIR"
+sh "$HOOK" leases4_committed
+[ ! -e "$TEST_ROOT/elsewhere/changed" ] && pass "the hook writes nothing through a link" || fail "the hook writes nothing through a link"
 
 if sh "$KDH" bogus >/dev/null 2>&1; then
 	fail "an unknown command is refused"

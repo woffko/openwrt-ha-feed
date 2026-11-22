@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r15, `luci-app-ha-cluster` 2.0.0-r11,
+packages are `ha-cluster` 2.0.0-r16, `luci-app-ha-cluster` 2.0.0-r12,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -129,6 +129,30 @@ upgrading a node.
 - Whether a Kea DHCP daemon listens on a device is read from its
   `interfaces-config` when the config is plain JSON; a device named only in
   a subnet no longer counts.
+- What ha-cluster writes to `/etc/config/firewall`, `/etc/config/dhcp` and
+  `/etc/config/kea` no longer takes along what a user has staged in LuCI
+  and not applied. It went through `uci -t <own save directory>`, but uci
+  applies the pending changes of `/tmp/.uci` with any save directory: the
+  commit wrote the user's staged changes into the file, and left them
+  staged besides (CA-HACLUSTER-02 of the w0w6 audit; the firewall rules
+  have had it since they came). The changes are now made on a copy of the
+  committed file under another package name, which replaces the file under
+  its lock, as uci does, and only when the file did not change meanwhile.
+- The switch of the DHCP server takes its lock for the whole run. BusyBox's
+  flock has no `-w`: the lock was never taken. A switch to Kea is noted
+  (`switching`) before the pools change, and one cut short by a reboot or
+  a kill is made again or undone at the next start; with `auto`, a Kea
+  that still runs and serves a cluster interface when the node goes back
+  to dnsmasq is restarted and, if it still serves it, stopped, so that one
+  DHCP server answers (CA-HACLUSTER-03).
+- The rule of Kea's high availability no longer opens a port below 1024 or
+  the port of owsync or lease-sync, which a `"url"` in Kea's config may
+  name (a user of luci-app-kea may not be one who may open the firewall);
+  a warning names them (CA-LUCIKEA-02).
+- The run directory is made root's (0700) also by what runs before the
+  service, and a stale IPv6 guard handler shows in the status
+  (CA-HACLUSTER-05); the entries an import leaves are logged without word
+  splitting or eval (CA-HACLUSTER-04).
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
@@ -151,8 +175,10 @@ upgrading a node.
 - "DHCP Server" on the General page offers Automatic, the default; the
   Status page shows the server the node runs, why a switch was not made,
   and the static leases of dnsmasq the import left for luci-app-kea.
+- The status lists an IPv6 guard handler of an earlier release under
+  `earlier_model`, and reads the import's leftovers without eval.
 
-### kea-dnsmasq-hosts (new, 1.0.0-r2)
+### kea-dnsmasq-hosts (new, 1.0.0-r3)
 - The names of Kea's DHCP clients in dnsmasq's DNS, which takes no DDNS
   updates: a service rebuilds `/tmp/hosts/kea-leases` from the lease files
   of the Kea DHCP daemons that run on the node, when Kea's run script hook
@@ -162,6 +188,13 @@ upgrading a node.
   name. Needs `kea-hook-run-script`, which OpenWrt's Kea package does not
   build; the hook is set in Kea's config (luci-app-kea's "Client names in
   DNS"). Independent of ha-cluster.
+- Only the first label of a client's name is published, and never a name
+  of `/etc/hosts`, of a static lease, the router's own name, `wpad`,
+  `isatap` or `localhost`; of two clients with one name the first keeps
+  it. A client could make the router answer for any name of any domain
+  (CA-KEAHOSTS-01). The hosts file is written through `mktemp`, the lease
+  files are passed quoted and absolute, and the hook writes nothing through
+  a link (CA-KEAHOSTS-02).
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a
