@@ -614,6 +614,7 @@ packet counters, `nft list chain inet fw4 input`.
 | `HA-Cluster-owsync` | TCP `sync_port`, when owsync has work | the nodes that sync |
 | `HA-Cluster-lease-sync` | UDP `lease_sync_port`, when lease-sync has work | the nodes that sync |
 | `HA-Cluster-Kea-HA` | TCP, the ports of the `"url"`s in the config of each enabled Kea DHCP daemon, while the node runs Kea; not a port below 1024 nor those of owsync and lease-sync, which a warning names | the nodes that sync |
+| `HA-Cluster-Kea-HA-drop` | nothing: drops TCP to those same ports, right after the rule above | anybody else, whatever the zones accept |
 | `HA-Cluster-ping` | ICMP and ICMPv6 echo requests, which the status uses to see a peer | all nodes |
 
 "The nodes" are the peers' addresses and this node's own address towards
@@ -626,7 +627,12 @@ accept from any zone (`src '*'`): the link the nodes sync over may be in
 any zone. Only the addresses of the nodes get through, and of what a
 spoofed address could send, TCP gets no answer to complete a connection
 and the datagrams of lease-sync are authenticated; Kea's high availability
-is not (see the notes on Kea below).
+is not (see the notes on Kea below). Kea's listener takes commands from
+whoever connects, `dhcp-disable` and lease changes among them: Kea 3.0.4
+does not check basic-auth on it, only mutual TLS. A zone that accepts
+input from its clients (OpenWrt's `lan`) would let them reach it at a
+node's sync address, so `HA-Cluster-Kea-HA-drop` drops every connection
+to its ports that the rule before it did not accept.
 
 What the clients need (DHCP, DNS, Router Advertisements) is not in these
 rules: that is the business of the zone the clients are in, as it is
