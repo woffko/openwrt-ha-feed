@@ -28,16 +28,27 @@ as well as on a cluster.
   leases its partner gave out too: Kea's hook does not run for those, the
   periodic rebuild takes them in, so each node answers for every name, also
   after a failover.
-- A lease counts when it is active, has not run out, is an address
-  (DHCPv6: IA_NA) and has a host name of letters, digits, hyphens and dots.
-  A name with dots is written as it is and by its first label, which
-  dnsmasq qualifies with its domain (`expand-hosts`).
+- A lease counts when it is active, has not run out and is an address
+  (DHCPv6: IA_NA). The client chooses its host name, so only its first
+  label is written, which dnsmasq qualifies with its own domain
+  (`expand-hosts`): a client that calls itself `updates.example.org` is
+  `updates.lan`, never `updates.example.org`, as with dnsmasq's own DHCP.
+  The label must be a host name label (letters, digits, inner hyphens, at
+  most 63 characters), and must not be taken: a name of `/etc/hosts`, of a
+  static lease of `/etc/config/dhcp`, the router's own host name, `wpad`,
+  `isatap`, `localhost`, in any case. Of two clients with one name, the
+  first lease in Kea's files keeps it (per address family).
 - With no Kea DHCP daemon running, the file is removed: dnsmasq, back as the
   DHCP server, answers for its own leases. Stopping or disabling the service
   removes it too.
 
 Static leases of `/etc/config/dhcp` with `dns '1'` resolve as before:
 dnsmasq writes their names itself.
+
+The hosts file is written through a temporary file made with `mktemp`
+(0644) and renamed; `/var/run/kea-dnsmasq-hosts`, where the hook notes the
+changes, is made by the service, root's, and the hook writes nothing
+through a link or into a directory of another user.
 
 ## Setting the hook in Kea
 

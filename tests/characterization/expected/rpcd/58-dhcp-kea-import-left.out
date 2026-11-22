@@ -18,13 +18,19 @@
     "dhcp_backend": "kea",
     "dhcp_backend_mode": "auto",
     "kea_import": {
-        "left": 2,
+        "left": 3,
         "entries": [
             {
                 "name": "nas",
                 "identifier": "02:00:00:00:00:0b",
                 "address": "192.168.50.20",
                 "status": "review"
+            },
+            {
+                "name": "/etc/*",
+                "identifier": "",
+                "address": "",
+                "status": "blocked"
             },
             {
                 "name": "tv",

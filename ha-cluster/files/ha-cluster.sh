@@ -39,9 +39,6 @@ HA_KEA_IMPORT_RESULT="${HA_CLUSTER_RUN_DIR}/kea-import.json"
 HA_KEA_STOPPED_MARK="${HA_CLUSTER_RUN_DIR}/kea-stopped"
 HA_DHCP_BACKEND_LOCK="${HA_DHCP_BACKEND_LOCK:-/var/lock/ha-cluster-dhcp-backend.lock}"
 FW4_BIN="${FW4_BIN:-/sbin/fw4}"
-# The changes ha-cluster makes to /etc/config/firewall are staged here, apart
-# from what a user has pending in the usual place, and committed on their own
-HA_FIREWALL_SAVEDIR="${HA_CLUSTER_RUN_DIR}/uci-firewall"
 HA_FIREWALL_LOCK="${HA_FIREWALL_LOCK:-/var/lock/ha-cluster-firewall.lock}"
 HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
@@ -316,6 +313,8 @@ ha_dhcp_backend() {
 	[ -r "$HA_DHCP_BACKEND_STATE" ] && read -r backend < "$HA_DHCP_BACKEND_STATE"
 	case "$backend" in
 		dnsmasq|kea) ;;
+		# A switch to Kea was cut short: not Kea yet
+		switching) backend="dnsmasq" ;;
 		*)
 			if [ "$(ha_dhcp_backend_mode)" = "kea" ]; then
 				backend="kea"
@@ -1428,6 +1427,13 @@ ha_check_kea_backend() {
 
 	_ha_check_kea_daemon_conf dhcp4
 	_ha_check_kea_daemon_conf dhcp6
+
+	local port
+	for port in $(ha_kea_ha_ports); do
+		_ha_kea_port_refused "$port" &&
+			ha_log_warning "Kea's high availability listens on port $port (a \"url\" in its config), which the firewall rule of the cluster does not open: below 1024, or a port of owsync or lease-sync. Give Kea another port"
+	done
+	return 0
 }
 
 # Usage: ha_kea_daemon_enabled dhcp4|dhcp6
@@ -1533,7 +1539,8 @@ ha_kea_device_up() {
 	index="$(cat "$HA_SYS_NET_DIR/$device/ifindex" 2>/dev/null || true)"
 	[ -n "$index" ] || return 0
 	[ "$(cat "$HA_KEA_DEVICE_DIR/$device" 2>/dev/null || true)" = "$index" ] && return 0
-	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" "$HA_KEA_DEVICE_DIR" 2>/dev/null || return 0
+	ha_ensure_run_dir || return 0
+	mkdir -m 0700 -p "$HA_KEA_DEVICE_DIR" 2>/dev/null || return 0
 	printf '%s\n' "$index" > "$HA_KEA_DEVICE_DIR/$device"
 
 	for daemon in dhcp4 dhcp6; do
@@ -1559,6 +1566,21 @@ ha_kea_ha_ports() {
 			grep -o '"url"[[:space:]]*:[[:space:]]*"[^"]*"' |
 			sed -n 's/.*"https\{0,1\}:\/\/[^"/]*:\([0-9]\{1,5\}\)\(\/[^"]*\)\{0,1\}"$/\1/p'
 	done | sort -n -u
+}
+
+# Usage: _ha_kea_port_refused <port> (ha-cluster config loaded)
+# A port of Kea's high availability that its firewall rule does not open:
+# one below 1024, which system services use, or one of owsync or
+# lease-sync, which have rules of their own. Kea's config may be written by
+# a user of luci-app-kea who may not open the firewall.
+_ha_kea_port_refused() {
+	local own
+
+	[ "$1" -lt 1024 ] && return 0
+	config_get own config sync_port "4321"
+	[ "$1" = "$own" ] && return 0
+	config_get own advanced lease_sync_port "5378"
+	[ "$1" = "$own" ]
 }
 
 # A program that prints a Kea daemon's answer to status-get, given the
@@ -1648,20 +1670,33 @@ _ha_cluster_dhcp_interfaces() {
 	done
 }
 
+# Usage: _ha_dhcp_read <uci arguments>
+# Reads /etc/config/dhcp. While ha_apply_dhcp_backend runs it reads the copy
+# the switch works on (_ha_iso_begin dhcp): what is committed and what the
+# switch changed, never what a user has pending in LuCI.
+_ha_dhcp_iso=""
+_ha_dhcp_read() {
+	if [ -n "$_ha_dhcp_iso" ]; then
+		_ha_iso_uci dhcp "$@"
+	else
+		uci "$@"
+	fi
+}
+
 # Usage: _ha_dhcp_pools_of <logical interface>
 # The dhcp sections (pools) of /etc/config/dhcp for the interface
 _ha_dhcp_pools_of() {
 	local pool
 
-	for pool in $(uci -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dhcp$/\1/p'); do
-		[ "$(uci -q get "dhcp.$pool.interface")" = "$1" ] && printf '%s\n' "$pool"
+	for pool in $(_ha_dhcp_read -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dhcp$/\1/p'); do
+		[ "$(_ha_dhcp_read -q get "dhcp.$pool.interface")" = "$1" ] && printf '%s\n' "$pool"
 	done
 }
 
 # Usage: _ha_dhcp_pool_serves_v4 <pool>
 _ha_dhcp_pool_serves_v4() {
-	[ "$(uci -q get "dhcp.$1.ignore")" = "1" ] && return 1
-	[ "$(uci -q get "dhcp.$1.dhcpv4")" = "disabled" ] && return 1
+	[ "$(_ha_dhcp_read -q get "dhcp.$1.ignore")" = "1" ] && return 1
+	[ "$(_ha_dhcp_read -q get "dhcp.$1.dhcpv4")" = "disabled" ] && return 1
 	return 0
 }
 
@@ -1669,9 +1704,9 @@ _ha_dhcp_pool_serves_v4() {
 # dnsmasq answers DHCPv6 in a pool when it is the server of its Router
 # Advertisements and DHCPv6 is not disabled
 _ha_dhcp_pool_serves_v6() {
-	[ "$(uci -q get "dhcp.$1.ignore")" = "1" ] && return 1
-	[ "$(uci -q get "dhcp.$1.ra")" = "server" ] || return 1
-	[ "$(uci -q get "dhcp.$1.dhcpv6")" = "disabled" ] && return 1
+	[ "$(_ha_dhcp_read -q get "dhcp.$1.ignore")" = "1" ] && return 1
+	[ "$(_ha_dhcp_read -q get "dhcp.$1.ra")" = "server" ] || return 1
+	[ "$(_ha_dhcp_read -q get "dhcp.$1.dhcpv6")" = "disabled" ] && return 1
 	return 0
 }
 
@@ -1682,64 +1717,72 @@ _ha_dhcp_pools_switched_off() {
 
 	for interface in $(_ha_cluster_dhcp_interfaces); do
 		for pool in $(_ha_dhcp_pools_of "$interface"); do
-			[ -n "$(uci -q get "dhcp.$pool.ha_cluster_dhcpv4")" ] && printf '%s\n' "$pool"
+			[ -n "$(_ha_dhcp_read -q get "dhcp.$pool.ha_cluster_dhcpv4")" ] && printf '%s\n' "$pool"
 		done
 	done
 }
 
-# Usage: _ha_dhcp_uci <uci arguments>
-# Writes go through a save directory of their own, so that a commit of
-# /etc/config/dhcp takes ha-cluster's changes only, not what a user has
-# pending in LuCI
-HA_DHCP_SAVEDIR="${HA_CLUSTER_RUN_DIR}/uci-dhcp"
-_ha_dhcp_uci() {
-	mkdir -m 0700 -p "$HA_DHCP_SAVEDIR" 2>/dev/null
-	uci -t "$HA_DHCP_SAVEDIR" "$@"
-}
-
-# Usage: _ha_dhcp_pools_off
+# Usage: _ha_dhcp_pools_off (ha-cluster config loaded, copy of dhcp taken)
 # Switches dnsmasq's DHCPv4 off in the pools of the cluster interfaces that
 # still give it out, keeping the value each had, and commits. Prints the
-# pools it switched off.
+# pools it switched off; fails when /etc/config/dhcp could not be written.
 _ha_dhcp_pools_off() {
-	local interface pool value changed=""
+	local interface pool value changed try=0 rc
 
-	for interface in $(_ha_cluster_dhcp_interfaces); do
-		for pool in $(_ha_dhcp_pools_of "$interface"); do
-			_ha_dhcp_pool_serves_v4 "$pool" || continue
-			value="$(uci -q get "dhcp.$pool.dhcpv4")"
-			_ha_dhcp_uci -q set "dhcp.$pool.ha_cluster_dhcpv4=${value:-unset}"
-			_ha_dhcp_uci -q set "dhcp.$pool.dhcpv4=disabled"
-			changed="$changed $pool"
+	while :; do
+		changed=""
+		for interface in $(_ha_cluster_dhcp_interfaces); do
+			for pool in $(_ha_dhcp_pools_of "$interface"); do
+				_ha_dhcp_pool_serves_v4 "$pool" || continue
+				value="$(_ha_dhcp_read -q get "dhcp.$pool.dhcpv4")"
+				_ha_iso_uci dhcp -q set "dhcp.$pool.ha_cluster_dhcpv4=${value:-unset}"
+				_ha_iso_uci dhcp -q set "dhcp.$pool.dhcpv4=disabled"
+				changed="$changed $pool"
+			done
 		done
+		[ -n "$changed" ] || return 0
+		_ha_iso_commit dhcp
+		rc=$?
+		[ "$rc" -eq 2 ] && [ "$try" -lt 2 ] || break
+		# Changed meanwhile (owsync, LuCI): over again on what it holds now
+		try=$((try + 1))
+		_ha_iso_begin dhcp || return 1
 	done
-	[ -n "$changed" ] || return 0
-	_ha_dhcp_uci commit dhcp
+	[ "$rc" -eq 0 ] || return 1
 	for pool in $changed; do
 		printf '%s\n' "$pool"
 	done
 }
 
-# Usage: _ha_dhcp_pools_on [<pool>...] (ha-cluster config loaded)
+# Usage: _ha_dhcp_pools_on [<pool>...] (ha-cluster config loaded, copy of
+# dhcp taken)
 # Gives the pools named, else every pool of the cluster interfaces that was
-# switched off for Kea, their DHCPv4 back, and commits. Prints the pools.
+# switched off for Kea, their DHCPv4 back, and commits. Prints the pools;
+# fails when /etc/config/dhcp could not be written.
 _ha_dhcp_pools_on() {
-	local pool value changed=""
+	local pool value changed try=0 rc
 
-	[ "$#" -gt 0 ] || set -- $(_ha_dhcp_pools_switched_off)
-	for pool in "$@"; do
-		value="$(uci -q get "dhcp.$pool.ha_cluster_dhcpv4")"
-		[ -n "$value" ] || continue
-		if [ "$value" = "unset" ]; then
-			_ha_dhcp_uci -q delete "dhcp.$pool.dhcpv4"
-		else
-			_ha_dhcp_uci -q set "dhcp.$pool.dhcpv4=$value"
-		fi
-		_ha_dhcp_uci -q delete "dhcp.$pool.ha_cluster_dhcpv4"
-		changed="$changed $pool"
+	while :; do
+		changed=""
+		for pool in ${*:-$(_ha_dhcp_pools_switched_off)}; do
+			value="$(_ha_dhcp_read -q get "dhcp.$pool.ha_cluster_dhcpv4")"
+			[ -n "$value" ] || continue
+			if [ "$value" = "unset" ]; then
+				_ha_iso_uci dhcp -q delete "dhcp.$pool.dhcpv4"
+			else
+				_ha_iso_uci dhcp -q set "dhcp.$pool.dhcpv4=$value"
+			fi
+			_ha_iso_uci dhcp -q delete "dhcp.$pool.ha_cluster_dhcpv4"
+			changed="$changed $pool"
+		done
+		[ -n "$changed" ] || return 0
+		_ha_iso_commit dhcp
+		rc=$?
+		[ "$rc" -eq 2 ] && [ "$try" -lt 2 ] || break
+		try=$((try + 1))
+		_ha_iso_begin dhcp || return 1
 	done
-	[ -n "$changed" ] || return 0
-	_ha_dhcp_uci commit dhcp
+	[ "$rc" -eq 0 ] || return 1
 	for pool in $changed; do
 		printf '%s\n' "$pool"
 	done
@@ -1835,7 +1878,7 @@ _ha_kea_usable() {
 				return 1
 			fi
 			_ha_dhcp_pool_serves_v4 "$pool" ||
-				[ -n "$(uci -q get "dhcp.$pool.ha_cluster_dhcpv4")" ] || continue
+				[ -n "$(_ha_dhcp_read -q get "dhcp.$pool.ha_cluster_dhcpv4")" ] || continue
 			ha_resolve_device device "$interface" || device="$interface"
 			if ! ha_kea_conf_names_device dhcp4 "$device"; then
 				_ha_kea_unusable_reason="$conf does not name $device, the device of '$interface', in its interfaces"
@@ -1857,7 +1900,7 @@ _ha_kea_usable() {
 # printed in $HA_KEA_IMPORT_RESULT and logs what it left. Fails when the
 # import failed; without luci-app-kea there is no import, with a warning.
 _ha_kea_import() {
-	local out rc=0 result left i key status name identifier address notes
+	local out rc=0 result left i field label notes
 
 	rm -f "$HA_KEA_IMPORT_RESULT"
 	if [ -x "$KEA_IMPORT_BIN" ]; then
@@ -1868,8 +1911,7 @@ _ha_kea_import() {
 		ha_log_warning "dnsmasq's static leases are not imported into Kea: luci-app-kea is not installed. A client with a static lease in /etc/config/dhcp keeps its address only if Kea has a reservation for it"
 		return 0
 	fi
-	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" 2>/dev/null
-	printf '%s\n' "$out" > "$HA_KEA_IMPORT_RESULT"
+	ha_ensure_run_dir && printf '%s\n' "$out" > "$HA_KEA_IMPORT_RESULT"
 
 	result="$(printf '%s' "$out" | jsonfilter -e '@.result' 2>/dev/null)"
 	if [ "$rc" -ne 0 ] || [ "$result" != "true" ]; then
@@ -1881,14 +1923,18 @@ _ha_kea_import() {
 	left="$(printf '%s' "$out" | jsonfilter -e '@.left[*].key' 2>/dev/null | wc -l)"
 	[ "$left" -gt 0 ] || return 0
 	ha_log_warning "$left static leases of dnsmasq are not in Kea: they need luci-app-kea's Import page (Kea > Import from dnsmasq)"
+	# Each field read on its own and kept quoted: the entries come from
+	# /etc/config/dhcp, which another node may have sent (owsync)
 	i=0
 	while [ "$i" -lt "$left" ] && [ "$i" -lt 50 ]; do
-		eval "$(printf '%s' "$out" | jsonfilter \
-			-e "key=@.left[$i].key" -e "status=@.left[$i].status" -e "name=@.left[$i].name" \
-			-e "identifier=@.left[$i].identifier" -e "address=@.left[$i].address" 2>/dev/null)"
+		label=""
+		for field in name identifier address; do
+			field="$(printf '%s' "$out" | jsonfilter -e "@.left[$i].$field" 2>/dev/null)"
+			[ -n "$field" ] && label="${label:+$label }$field"
+		done
+		[ -n "$label" ] || label="$(printf '%s' "$out" | jsonfilter -e "@.left[$i].key" 2>/dev/null)"
 		notes="$(printf '%s' "$out" | jsonfilter -e "@.left[$i].notes[*]" 2>/dev/null | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
-		ha_log_warning "Not imported into Kea ($status): $(echo ${name:-$key} $identifier $address)${notes:+: $notes}"
-		key="" status="" name="" identifier="" address=""
+		ha_log_warning "Not imported into Kea ($(printf '%s' "$out" | jsonfilter -e "@.left[$i].status" 2>/dev/null)): $label${notes:+: $notes}"
 		i=$((i + 1))
 	done
 	return 0
@@ -1924,14 +1970,44 @@ _ha_kea_wait_dhcp4() {
 	done
 }
 
-# Usage: _ha_kea_uci <uci arguments>
-HA_KEA_SAVEDIR="${HA_CLUSTER_RUN_DIR}/uci-kea"
-_ha_kea_uci() {
-	mkdir -m 0700 -p "$HA_KEA_SAVEDIR" 2>/dev/null
-	uci -t "$HA_KEA_SAVEDIR" "$@"
+# Usage: _ha_kea_flag 0|1
+# Sets option disabled of the dhcp4 service in /etc/config/kea (the section
+# made when missing), on a copy of the file as for dhcp
+_ha_kea_flag() {
+	local try=0 rc
+
+	while :; do
+		_ha_iso_begin kea || return 1
+		[ "$(_ha_iso_uci kea -q get kea.dhcp4)" = "service" ] ||
+			_ha_iso_uci kea -q set kea.dhcp4=service
+		_ha_iso_uci kea -q set "kea.dhcp4.disabled=$1"
+		_ha_iso_commit kea
+		rc=$?
+		[ "$rc" -eq 2 ] && [ "$try" -lt 2 ] || break
+		try=$((try + 1))
+	done
+	return "$rc"
 }
 
-# Usage: _ha_switch_to_kea <mode> (ha-cluster config loaded)
+# Usage: _ha_kea4_serves_cluster (ha-cluster config loaded)
+# kea-dhcp4's config names the device of a cluster interface; the first such
+# interface is left in _ha_kea4_served
+_ha_kea4_served=""
+_ha_kea4_serves_cluster() {
+	local interface device
+
+	for interface in $(_ha_cluster_dhcp_interfaces); do
+		ha_resolve_device device "$interface" || device="$interface"
+		if ha_kea_conf_names_device dhcp4 "$device"; then
+			_ha_kea4_served="$interface"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Usage: _ha_switch_to_kea <mode> (ha-cluster config loaded, copy of dhcp
+# taken)
 _ha_switch_to_kea() {
 	local mode="$1" pools flag_set=0 init_enabled=0
 
@@ -1944,16 +2020,19 @@ _ha_switch_to_kea() {
 		return 1
 	fi
 
+	# Noted before the pools change: a switch cut short by a reboot or a kill
+	# is made again or undone at the next start (ha_apply_dhcp_backend)
+	_ha_dhcp_backend_save switching
 	# A few seconds without a DHCP server rather than two of them
-	pools="$(_ha_dhcp_pools_off)"
+	if ! pools="$(_ha_dhcp_pools_off)"; then
+		_ha_dhcp_backend_problem "/etc/config/dhcp could not be written: dnsmasq stays the DHCP server"
+		return 1
+	fi
 	ha_restart_dnsmasq
 
 	if [ "$mode" = "kea" ]; then
 		if ! ha_kea_daemon_enabled dhcp4; then
-			[ "$(uci -q get kea.dhcp4)" = "service" ] || _ha_kea_uci -q set kea.dhcp4=service
-			_ha_kea_uci -q set kea.dhcp4.disabled=0
-			_ha_kea_uci commit kea
-			flag_set=1
+			_ha_kea_flag 0 && flag_set=1
 		fi
 		if ! "$KEA_INIT" enabled 2>/dev/null; then
 			"$KEA_INIT" enable 2>/dev/null
@@ -1968,10 +2047,7 @@ _ha_switch_to_kea() {
 
 	if ! _ha_kea_wait_dhcp4; then
 		[ -n "$pools" ] && _ha_dhcp_pools_on $pools >/dev/null
-		if [ "$flag_set" -eq 1 ]; then
-			_ha_kea_uci -q set kea.dhcp4.disabled=1
-			_ha_kea_uci commit kea
-		fi
+		[ "$flag_set" -eq 1 ] && _ha_kea_flag 1
 		[ "$init_enabled" -eq 1 ] && "$KEA_INIT" disable 2>/dev/null
 		[ "$mode" = "kea" ] && "$KEA_INIT" restart >/dev/null 2>&1
 		ha_restart_dnsmasq
@@ -1979,40 +2055,48 @@ _ha_switch_to_kea() {
 		return 1
 	fi
 
-	ha_log_info "Kea is the DHCP server of the cluster interfaces${pools:+: dnsmasq's DHCPv4 switched off in $(echo $pools)}"
+	ha_log_info "Kea is the DHCP server of the cluster interfaces${pools:+: dnsmasq's DHCPv4 switched off in $(printf "%s" "$pools" | tr "\n" " " | sed "s/^ *//; s/ *$//")}"
 	return 0
 }
 
-# Usage: _ha_switch_to_dnsmasq <mode> (ha-cluster config loaded)
+# Usage: _ha_switch_to_dnsmasq <mode> (ha-cluster config loaded, copy of
+# dhcp taken)
 _ha_switch_to_dnsmasq() {
-	local mode="$1" pools interface device
+	local mode="$1" pools
 
-	# Kea off first: a few seconds without a DHCP server rather than two
-	if [ "$mode" = "dnsmasq" ] && ha_kea_daemon_enabled dhcp4; then
-		for interface in $(_ha_cluster_dhcp_interfaces); do
-			ha_resolve_device device "$interface" || device="$interface"
-			ha_kea_conf_names_device dhcp4 "$device" || continue
-			ha_log_warning "dhcp_backend is 'dnsmasq': kea-dhcp4, which serves '$interface', is switched off in /etc/config/kea"
-			_ha_kea_uci -q set kea.dhcp4.disabled=1
-			_ha_kea_uci commit kea
+	# Kea off first: a few seconds without a DHCP server rather than two.
+	# With 'dnsmasq' the HA cluster turns kea-dhcp4 off. With 'auto' Kea's
+	# settings say so, or Kea was stopped; a kea-dhcp4 that still runs is
+	# restarted to run as its settings say now, and stopped if it would
+	# still serve a cluster interface (its init script not enabled at boot)
+	if [ "$mode" = "dnsmasq" ]; then
+		if ha_kea_daemon_enabled dhcp4 && _ha_kea4_serves_cluster; then
+			ha_log_warning "dhcp_backend is 'dnsmasq': kea-dhcp4, which serves '$_ha_kea4_served', is switched off in /etc/config/kea"
+			_ha_kea_flag 1
 			"$KEA_INIT" restart >/dev/null 2>&1
-			break
-		done
+		fi
+	elif pgrep kea-dhcp4 >/dev/null 2>&1; then
+		"$KEA_INIT" restart >/dev/null 2>&1
+		if pgrep kea-dhcp4 >/dev/null 2>&1 && _ha_kea4_serves_cluster; then
+			ha_log_warning "kea-dhcp4 runs and serves '$_ha_kea4_served' while Kea is not set up to start it at boot: stopped, so that dnsmasq alone gives out DHCPv4 there"
+			"$KEA_INIT" stop >/dev/null 2>&1
+		fi
 	fi
 
-	pools="$(_ha_dhcp_pools_on)"
+	if ! pools="$(_ha_dhcp_pools_on)"; then
+		_ha_dhcp_backend_problem "/etc/config/dhcp could not be written: the pools of the cluster interfaces stay switched off for Kea"
+	fi
 	ha_restart_dnsmasq
-	ha_log_info "dnsmasq is the DHCP server of the cluster interfaces${pools:+: its DHCPv4 switched on again in $(echo $pools)}"
+	ha_log_info "dnsmasq is the DHCP server of the cluster interfaces${pools:+: its DHCPv4 switched on again in $(printf "%s" "$pools" | tr "\n" " " | sed "s/^ *//; s/ *$//")}"
 }
 
 # Usage: _ha_dhcp_backend_problem <text>
 _ha_dhcp_backend_problem() {
 	ha_log_error "DHCP server of the cluster interfaces: $1"
-	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" 2>/dev/null
-	printf '%s\n' "$1" > "$HA_DHCP_BACKEND_PROBLEM"
+	ha_ensure_run_dir && printf '%s\n' "$1" > "$HA_DHCP_BACKEND_PROBLEM"
 }
 
-# Usage: _ha_dhcp_backend_save dnsmasq|kea
+# Usage: _ha_dhcp_backend_save dnsmasq|kea|switching
 _ha_dhcp_backend_save() {
 	local current=""
 
@@ -2028,18 +2112,44 @@ _ha_dhcp_backend_save() {
 # asked for (ha_dhcp_backend_wanted), and remembers which one the node runs.
 # A switch that cannot be made leaves the server as it was, says why in the
 # log and in the status, and is tried again at the next start or reload.
-# One switch at a time.
+# One switch at a time: the lock is held from the first reading of the state
+# to its last writing, and a switch that cannot have it is not made. A
+# switch to Kea that was cut short (state 'switching') is made again, or
+# undone when Kea is no longer asked for.
 ha_apply_dhcp_backend() {
-	local mode current wanted
+	local mode current wanted state="" i
+
+	rm -f "$HA_DHCP_BACKEND_PROBLEM"
+	mkdir -p "${HA_DHCP_BACKEND_LOCK%/*}" 2>/dev/null
+	exec 7>"$HA_DHCP_BACKEND_LOCK"
+	# BusyBox's flock has no timeout (-w): asked again every second, for at
+	# most 30 seconds, longer than a switch takes
+	i=0
+	until flock -n -x 7 2>/dev/null; do
+		i=$((i + 1))
+		if [ "$i" -ge "${HA_DHCP_BACKEND_LOCK_WAIT:-30}" ]; then
+			exec 7>&-
+			_ha_dhcp_backend_problem "another switch of the DHCP server is still at work: nothing changed now, tried again at the next start or reload"
+			return 0
+		fi
+		sleep 1
+	done
+	_ha_iso_begin dhcp && _ha_dhcp_iso=1
 
 	mode="$(ha_dhcp_backend_mode)"
 	current="$(ha_dhcp_backend)"
 	wanted="$(ha_dhcp_backend_wanted)"
-	rm -f "$HA_DHCP_BACKEND_PROBLEM"
+
+	[ -r "$HA_DHCP_BACKEND_STATE" ] && read -r state < "$HA_DHCP_BACKEND_STATE"
+	if [ "$state" = "switching" ]; then
+		ha_log_warning "A switch of the DHCP server to Kea was cut short (a reboot or a kill)"
+		if [ "$wanted" != "kea" ]; then
+			_ha_switch_to_dnsmasq "$mode"
+			current="dnsmasq"
+		fi
+	fi
 
 	if [ "$current" != "$wanted" ]; then
-		exec 7>"$HA_DHCP_BACKEND_LOCK"
-		flock -w 30 7 2>/dev/null || true
 		if [ "$wanted" = "kea" ]; then
 			ha_log_info "Switching the DHCP server of the cluster interfaces from dnsmasq to Kea (dhcp_backend '$mode')"
 			_ha_switch_to_kea "$mode" && current="kea"
@@ -2048,10 +2158,11 @@ ha_apply_dhcp_backend() {
 			_ha_switch_to_dnsmasq "$mode"
 			current="dnsmasq"
 		fi
-		exec 7>&-
 	fi
 
 	_ha_dhcp_backend_save "$current"
+	_ha_dhcp_iso=""
+	exec 7>&-
 }
 
 # Usage: ha_kea_changed (ha-cluster config loaded)
@@ -2060,7 +2171,7 @@ ha_apply_dhcp_backend() {
 # dhcp_backend 'auto' dnsmasq takes the cluster interfaces back until Kea
 # runs again, at the latest at the next boot.
 ha_kea_changed() {
-	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" 2>/dev/null
+	ha_ensure_run_dir || return 0
 	if _ha_kea_set_up_for_cluster && ! pgrep kea-dhcp4 >/dev/null 2>&1; then
 		: > "$HA_KEA_STOPPED_MARK"
 	else
@@ -2230,9 +2341,12 @@ ha_firewall_rules() {
 	fi
 
 	if ha_dhcp_backend_is_kea; then
-		ports="$(ha_kea_ha_ports | tr '\n' ' ')"
-		[ -n "${ports% }" ] &&
-			_ha_fw_rule ha_cluster_kea "HA-Cluster-Kea-HA" tcp "${ports% }" "$sync_nodes"
+		ports=""
+		for port in $(ha_kea_ha_ports); do
+			_ha_kea_port_refused "$port" || ports="${ports:+$ports }$port"
+		done
+		[ -n "$ports" ] &&
+			_ha_fw_rule ha_cluster_kea "HA-Cluster-Kea-HA" tcp "$ports" "$sync_nodes"
 	fi
 
 	if [ -n "$nodes" ]; then
@@ -2250,9 +2364,98 @@ ha_firewall_rules() {
 	return 0
 }
 
+# Usage: ha_ensure_run_dir
+# The run directory as start_service makes it, root's alone (0700), never a
+# link: also for what may run before the service, a hotplug script at boot
+# or the firewall command while the service is stopped. A directory made by
+# "mkdir -m 0700 -p <run dir>/<sub>" would get the default mode.
+ha_ensure_run_dir() {
+	[ -L "$HA_CLUSTER_RUN_DIR" ] && rm -f "$HA_CLUSTER_RUN_DIR"
+	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" 2>/dev/null
+	chmod 0700 "$HA_CLUSTER_RUN_DIR" 2>/dev/null
+	[ -d "$HA_CLUSTER_RUN_DIR" ] && [ -O "$HA_CLUSTER_RUN_DIR" ]
+}
+
+# What ha-cluster changes in the config of another package (dhcp, kea,
+# firewall) it changes on a copy of the committed file, never through uci's
+# usual pending changes. uci applies the pending changes of a package from
+# every directory of its delta path, and /tmp/.uci, where LuCI keeps what a
+# user has not applied yet, is always one of them, also with -t: a commit
+# with -t would take the user's pending changes into the file, and leave
+# them pending besides. The copy goes by another package name, ha_<package>,
+# for which nothing is ever pending, in a directory of its own. Once
+# committed it replaces the file as uci itself does it, under the lock of
+# the file and by rename, and only if the file has not changed since the
+# copy was taken (owsync, another writer); otherwise the caller starts over.
+
+# Usage: _ha_iso_begin <package>
+# Takes the copy of /etc/config/<package>
+_ha_iso_begin() {
+	local dir="$HA_CLUSTER_RUN_DIR/uci-$1" conf="${HA_CLUSTER_ROOT}/etc/config/$1"
+
+	ha_ensure_run_dir || return 1
+	mkdir -m 0700 -p "$dir" "$dir/conf" "$dir/save" 2>/dev/null || return 1
+	rm -f "$dir/save/ha_$1" "$dir/conf/ha_$1"
+	if [ -f "$conf" ]; then
+		cp "$conf" "$dir/conf/ha_$1" || return 1
+		md5sum < "$conf" > "$dir/sum"
+	else
+		: > "$dir/conf/ha_$1"
+		echo "none" > "$dir/sum"
+	fi
+}
+
+# Usage: _ha_iso_uci <package> <uci arguments, naming the package as usual>
+# uci on the copy; what it prints names the package as usual
+_ha_iso_uci() {
+	local pkg="$1" iso="ha_$1" dir="$HA_CLUSTER_RUN_DIR/uci-$1" n arg out rc
+
+	shift
+	n=$#
+	for arg in "$@"; do
+		case "$arg" in
+			"$pkg") arg="$iso" ;;
+			"$pkg".*) arg="$iso.${arg#"$pkg".}" ;;
+		esac
+		set -- "$@" "$arg"
+	done
+	shift "$n"
+	out="$(uci -c "$dir/conf" -t "$dir/save" "$@")"
+	rc=$?
+	[ -n "$out" ] && printf '%s\n' "$out" | sed "s/^$iso\([.=]\)/$pkg\1/"
+	return "$rc"
+}
+
+# Usage: _ha_iso_commit <package>
+# Commits the copy and puts it in place of /etc/config/<package>, which
+# keeps its mode and owner. Returns 2, leaving the file alone, when the file
+# changed since the copy was taken; 1 when it cannot be written.
+_ha_iso_commit() {
+	local pkg="$1" iso="ha_$1" dir="$HA_CLUSTER_RUN_DIR/uci-$1"
+	local conf="${HA_CLUSTER_ROOT}/etc/config/$1" rc
+
+	uci -c "$dir/conf" -t "$dir/save" commit "$iso" || return 1
+	[ -f "$conf" ] || : > "$conf" || return 1
+	(
+		flock -x 9 2>/dev/null
+		[ "$(md5sum < "$conf")" = "$(cat "$dir/sum")" ] ||
+			{ [ "$(cat "$dir/sum")" = "none" ] && [ ! -s "$conf" ]; } || exit 2
+		tmp="${conf%/*}/.$pkg.ha-cluster.$$"
+		cp -p "$conf" "$tmp" && cat "$dir/conf/$iso" > "$tmp" && mv -f "$tmp" "$conf" || {
+			rm -f "$tmp"
+			exit 1
+		}
+	) 9<"$conf"
+	rc=$?
+	# The copy is what the file holds now
+	[ "$rc" -eq 0 ] && md5sum < "$conf" > "$dir/sum"
+	return "$rc"
+}
+
 # Usage: _ha_fw_uci <uci arguments>
+# uci on the copy of the firewall config taken by _ha_iso_begin firewall
 _ha_fw_uci() {
-	uci -t "$HA_FIREWALL_SAVEDIR" "$@"
+	_ha_iso_uci firewall "$@"
 }
 
 # Usage: _ha_fw_as_shown (the description on stdin)
@@ -2347,11 +2550,21 @@ ha_remove_firewall() {
 }
 
 _ha_remove_firewall() {
-	[ -n "$(_ha_fw_in_config)" ] || return 0
+	local try=0 rc
 
-	mkdir -p "$HA_FIREWALL_SAVEDIR" 2>/dev/null || return 0
-	_ha_fw_delete_sections
-	_ha_fw_uci commit firewall || return 0
+	while :; do
+		_ha_iso_begin firewall || return 0
+		[ -n "$(_ha_fw_in_config)" ] || return 0
+		_ha_fw_delete_sections
+		_ha_iso_commit firewall
+		rc=$?
+		[ "$rc" -eq 2 ] && [ "$try" -lt 2 ] || break
+		try=$((try + 1))
+	done
+	if [ "$rc" -ne 0 ]; then
+		ha_log_error "Firewall rules of the cluster could not be removed from /etc/config/firewall"
+		return 0
+	fi
 	ha_log_info "Firewall rules of the cluster removed from /etc/config/firewall"
 	_ha_fw_reload
 }
@@ -2367,10 +2580,11 @@ ha_apply_firewall() {
 }
 
 _ha_apply_firewall() {
-	local wanted description wanted_rules kind section option value names
+	local wanted description wanted_rules kind section option value names try=0 rc=0
 
 	# No firewall config: no firewall4 to open anything in
 	uci -q show firewall >/dev/null 2>&1 || return 0
+	_ha_iso_begin firewall || return 0
 
 	config_get_bool wanted config firewall 1
 	if [ "$wanted" -eq 0 ]; then
@@ -2405,30 +2619,42 @@ _ha_apply_firewall() {
 		return 0
 	fi
 
-	mkdir -p "$HA_FIREWALL_SAVEDIR" 2>/dev/null || return 0
-	_ha_fw_delete_sections
-	# For tests: time for another writer to step in, were it not held off
-	[ -z "${HA_FIREWALL_HOLD:-}" ] || sleep "$HA_FIREWALL_HOLD"
-	while IFS='|' read -r kind section option value; do
-		case "$kind" in
-			S) _ha_fw_uci set "firewall.$section=$option" ;;
-			O) _ha_fw_uci set "firewall.$section.$option=$value" ;;
-			L) _ha_fw_uci add_list "firewall.$section.$option=$value" ;;
-		esac
-	done <<EOF
+	while :; do
+		_ha_fw_delete_sections
+		# For tests: time for another writer to step in, were it not held off
+		[ -z "${HA_FIREWALL_HOLD:-}" ] || sleep "$HA_FIREWALL_HOLD"
+		while IFS='|' read -r kind section option value; do
+			case "$kind" in
+				S) _ha_fw_uci set "firewall.$section=$option" ;;
+				O) _ha_fw_uci set "firewall.$section.$option=$value" ;;
+				L) _ha_fw_uci add_list "firewall.$section.$option=$value" ;;
+			esac
+		done <<EOF
 $description
 EOF
-	_ha_fw_uci commit firewall || {
+		_ha_iso_commit firewall
+		rc=$?
+		[ "$rc" -eq 2 ] && [ "$try" -lt 2 ] || break
+		# The file changed meanwhile (owsync, another writer): over again
+		# on what it holds now, if there is still something to write
+		try=$((try + 1))
+		_ha_iso_begin firewall || return 0
+		[ "$wanted_rules" = "$(_ha_fw_in_config)" ] && { rc=3; break; }
+	done
+	if [ "$rc" -eq 3 ]; then
+		_ha_fw_loaded "$names" || _ha_fw_reload
+		return 0
+	fi
+	if [ "$rc" -ne 0 ]; then
 		ha_log_error "Firewall rules of the cluster could not be written to /etc/config/firewall"
 		return 0
-	}
+	fi
 	ha_log_info "Firewall rules of the cluster written to /etc/config/firewall (rules named HA-Cluster-...)"
 
 	# A config firewall4 cannot load would keep the whole firewall from
 	# loading, now and at boot
 	if [ -x "$FW4_BIN" ] && ! "$FW4_BIN" -q check >/dev/null 2>&1; then
-		_ha_fw_delete_sections
-		_ha_fw_uci commit firewall
+		_ha_iso_begin firewall && _ha_fw_delete_sections && _ha_iso_commit firewall
 		ha_log_error "firewall4 does not pass its check with the rules of ha-cluster: they are taken out again; open what the cluster needs from its peers yourself"
 		return 0
 	fi

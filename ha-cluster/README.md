@@ -153,6 +153,12 @@ They add to the list above when a node runs this fork's packages.
   were ignored by the 1.0.x backend and take effect once the section is
   named: check that they are the same on every node, `lease_sync_port`
   first.
+- **Delegated LuCI users.** The ACL of luci-app-ha-cluster, as in upstream
+  2.0.0, lets a user with its write role add health checks of
+  `check_type 'command'`, which keepalived runs as root, and write the
+  scripts of `/etc/hotplug.d/keepalived/`; its read role shows
+  `encryption_key` and the VRRP `auth_pass`. Give these roles only to users
+  who may be root on the router.
 - **sysupgrade with kept settings.** `/etc/hotplug.d/keepalived/` is kept
   as a whole for custom hooks; the upgrade script replaces the guard
   handler it finds there with the one of the new image at first boot.
@@ -607,14 +613,20 @@ packet counters, `nft list chain inet fw4 input`.
 | `HA-Cluster-VRRP-<device>` | VRRP (protocol 112), and AH (51) where an instance on that device uses `auth_type 'ah'` | anyone on the device of the instance: the adverts come from the nodes' addresses on that device, which the config does not name |
 | `HA-Cluster-owsync` | TCP `sync_port`, when owsync has work | the nodes that sync |
 | `HA-Cluster-lease-sync` | UDP `lease_sync_port`, when lease-sync has work | the nodes that sync |
-| `HA-Cluster-Kea-HA` | TCP, the ports of the `"url"`s in the config of each enabled Kea DHCP daemon, while the node runs Kea | the nodes that sync |
+| `HA-Cluster-Kea-HA` | TCP, the ports of the `"url"`s in the config of each enabled Kea DHCP daemon, while the node runs Kea; not a port below 1024 nor those of owsync and lease-sync, which a warning names | the nodes that sync |
 | `HA-Cluster-ping` | ICMP and ICMPv6 echo requests, which the status uses to see a peer | all nodes |
 
 "The nodes" are the peers' addresses and this node's own address towards
 each peer: the peer's `source_address`, else `bind_address`, else the one
 the kernel routes with. With both in every rule, every node writes the same
 rules, and a firewall config that owsync carries from node to node is right
-on each of them. The rules accept from any zone (`src '*'`).
+on each of them; rules without the node's own address would differ from
+node to node and the synced file would change back and forth. The rules
+accept from any zone (`src '*'`): the link the nodes sync over may be in
+any zone. Only the addresses of the nodes get through, and of what a
+spoofed address could send, TCP gets no answer to complete a connection
+and the datagrams of lease-sync are authenticated; Kea's high availability
+is not (see the notes on Kea below).
 
 What the clients need (DHCP, DNS, Router Advertisements) is not in these
 rules: that is the business of the zone the clients are in, as it is
@@ -629,7 +641,14 @@ How the rules are kept:
 - They are rules of ha-cluster: a change made to one by hand, or another
   section named `ha_cluster_...`, is undone at the next start. Rules of
   your own under other names are left alone, and so are changes you have
-  staged and not yet applied: ha-cluster commits its rules on their own.
+  staged in LuCI and not yet applied: ha-cluster writes its rules on a copy
+  of the committed file, not through uci's pending changes, which `uci -t`
+  does not keep apart (uci applies the pending changes of `/tmp/.uci` with
+  any save directory, and a commit would take them into the file). The
+  copy replaces the file under its lock, as uci does, and only if the file
+  has not changed meanwhile; otherwise the rules are written again on what
+  it holds then. The same goes for what the switch of the DHCP server
+  writes to `/etc/config/dhcp` and `/etc/config/kea`.
 - Before the firewall is reloaded with new rules it is checked
   (`fw4 check`); if the check fails the rules are taken out again and an
   error is logged, since a config firewall4 cannot load would keep the

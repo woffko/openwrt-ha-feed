@@ -15,10 +15,15 @@
 #   kea-dnsmasq-hosts rebuild   once
 #   kea-dnsmasq-hosts clear     removes the hosts file
 #
-# A lease counts when it is active (state 0), has not run out, is an
-# address (DHCPv6: IA_NA, /128), and has a host name made of letters,
-# digits, hyphens and dots. A name with dots is written as it is and with
-# its first label, which dnsmasq qualifies with its domain (expand-hosts).
+# A lease counts when it is active (state 0), has not run out and is an
+# address (DHCPv6: IA_NA, /128). Its host name is chosen by the client, so
+# only the first label of it is written: a client cannot make the router
+# answer for a name of another domain, as dnsmasq would not either, and
+# dnsmasq qualifies the label with its own domain (expand-hosts). The label
+# must be a host name label (letters, digits, inner hyphens, at most 63),
+# and must not be taken: a name of /etc/hosts, of a static lease of
+# /etc/config/dhcp, the router's own host name, wpad, isatap, localhost.
+# Two clients with one name: the first lease in Kea's files keeps it.
 # With no Kea DHCP server running, the file is removed: dnsmasq, back as
 # the DHCP server, answers for its own leases.
 
@@ -26,6 +31,7 @@ KDH_RUN_DIR="${KDH_RUN_DIR:-/var/run/kea-dnsmasq-hosts}"
 KDH_HOSTS_FILE="${KDH_HOSTS_FILE:-/tmp/hosts/kea-leases}"
 KDH_KEA_CONF_DIR="${KDH_KEA_CONF_DIR:-/etc/kea}"
 KDH_KEA_LEASE_DIR="${KDH_KEA_LEASE_DIR:-/var/lib/kea}"
+KDH_ETC_HOSTS="${KDH_ETC_HOSTS:-/etc/hosts}"
 # For tests: KDH_RUNNING, even empty, names the families that count as
 # running ("4 6") in place of pgrep; KDH_NOW the time; KDH_HUP the command
 # that has dnsmasq read its hosts files again
@@ -54,33 +60,45 @@ lease_file() {
 
 	name="$(jsonfilter -i "$KDH_KEA_CONF_DIR/kea-dhcp$1.conf" \
 		-e "@.Dhcp$1[\"lease-database\"].name" 2>/dev/null)"
-	[ -n "$name" ] || name="$KDH_KEA_LEASE_DIR/kea-leases$1.csv"
+	# An absolute path only: awk would take an operand like a=b for an
+	# assignment
+	case "$name" in
+		/*) ;;
+		*) name="$KDH_KEA_LEASE_DIR/kea-leases$1.csv" ;;
+	esac
 	printf '%s\n' "$name"
 }
 
-# Usage: lease_files <memfile>
-# The files Kea reads at its start, in its order: what its lease file
-# cleanup (LFC) left (.completed, else .2 then .1), then the file itself.
-# A later line for an address replaces an earlier one.
-lease_files() {
-	if [ -r "$1.completed" ]; then
-		echo "$1.completed"
-	else
-		[ -r "$1.2" ] && echo "$1.2"
-		[ -r "$1.1" ] && echo "$1.1"
-	fi
-	[ -r "$1" ] && echo "$1"
+# Usage: taken_names
+# The names a client's DHCP host name must not take, lowercase, one per line
+taken_names() {
+	awk '$1 !~ /^#/ { for (i = 2; i <= NF; i++) { if ($i ~ /^#/) break; print $i } }' \
+		"$KDH_ETC_HOSTS" 2>/dev/null
+	uci -q show dhcp 2>/dev/null | sed -n "s/^dhcp\.[^.=]*\.name='\(.*\)'$/\1/p" | tr ' ' '\n'
+	uci -q get system.@system[0].hostname 2>/dev/null
+	printf '%s\n' wpad isatap localhost
 }
 
 # Usage: hosts_of <4|6> <now>
-# "address name..." for each lease that counts, from the daemon's files
+# "address name" for each lease that counts, from the daemon's files: what
+# its lease file cleanup (LFC) left (.completed, else .2 then .1), then the
+# file itself, in the order Kea reads them at its start. A later line for an
+# address replaces an earlier one.
 hosts_of() {
-	local family="$1" now="$2" files
+	local family="$1" now="$2" memfile taken
 
-	files="$(lease_files "$(lease_file "$family")")"
-	[ -n "$files" ] || return 0
-	# shellcheck disable=SC2086
-	awk -F, -v family="$family" -v now="$now" '
+	memfile="$(lease_file "$family")"
+	set --
+	if [ -r "$memfile.completed" ]; then
+		set -- "$memfile.completed"
+	else
+		[ -r "$memfile.2" ] && set -- "$@" "$memfile.2"
+		[ -r "$memfile.1" ] && set -- "$@" "$memfile.1"
+	fi
+	[ -r "$memfile" ] && set -- "$@" "$memfile"
+	[ "$#" -gt 0 ] || return 0
+	taken="$(taken_names | tr 'A-Z' 'a-z' | sed 's/\..*//' | tr '\n' ' ')"
+	awk -F, -v family="$family" -v now="$now" -v taken="$taken" '
 		FNR == 1 && $1 == "address" { next }
 		{
 			if (family == 4) {
@@ -97,21 +115,20 @@ hosts_of() {
 			if (!($1 in order)) { order[$1] = ++count; addr[count] = $1 }
 		}
 		END {
+			n = split(taken, t, " ")
+			for (i = 1; i <= n; i++) used[t[i]] = 1
 			for (i = 1; i <= count; i++) {
 				a = addr[i]
 				if (!keep[a]) continue
 				name = lease[a]
-				sub(/\.$/, "", name)
-				if (name !~ /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/) continue
-				if (name ~ /\./) {
-					short = name
-					sub(/\..*/, "", short)
-					print a, name, short
-				} else {
-					print a, name
-				}
+				sub(/\..*/, "", name)
+				if (length(name) > 63 || name !~ /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$/) continue
+				lower = tolower(name)
+				if (lower in used) continue
+				used[lower] = 1
+				print a, name
 			}
-		}' $files
+		}' "$@"
 }
 
 hup_dnsmasq() {
@@ -133,8 +150,9 @@ rebuild() {
 	local now family tmp any=0
 
 	now="${KDH_NOW:-$(date +%s)}"
-	tmp="$KDH_HOSTS_FILE.new.$$"
 	mkdir -p "${KDH_HOSTS_FILE%/*}" 2>/dev/null
+	tmp="$(mktemp "$KDH_HOSTS_FILE.XXXXXX")" || return 1
+	chmod 0644 "$tmp"
 	{
 		echo "# Written by kea-dnsmasq-hosts from the leases of Kea - do not edit"
 		for family in 4 6; do
@@ -163,7 +181,13 @@ run() {
 	case "$interval" in
 		''|*[!0-9]*) interval=60 ;;
 	esac
-	mkdir -p "$KDH_RUN_DIR"
+	# Root's, never a link: the hook of Kea writes there
+	[ -L "$KDH_RUN_DIR" ] && rm -f "$KDH_RUN_DIR"
+	mkdir -m 0755 -p "$KDH_RUN_DIR"
+	if [ ! -d "$KDH_RUN_DIR" ] || [ ! -O "$KDH_RUN_DIR" ]; then
+		log err "$KDH_RUN_DIR is not a directory of this user: not started"
+		exit 1
+	fi
 	while :; do
 		now="$(date +%s)"
 		if { [ -e "$KDH_RUN_DIR/changed" ] && [ $((now - last)) -ge 5 ]; } ||

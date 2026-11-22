@@ -112,6 +112,7 @@ ha-cluster|daemon.err|Set the same key on all nodes, generated in LuCI or with: 
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
 == ls /var/run/ha-cluster
+uci-dhcp
 == /var/run/ha-cluster/keepalived.conf
 (absent)
 == /var/run/ha-cluster/owsync.conf
