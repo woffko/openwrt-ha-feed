@@ -21,8 +21,11 @@
 # answer for a name of another domain, as dnsmasq would not either, and
 # dnsmasq qualifies the label with its own domain (expand-hosts). The label
 # must be a host name label (letters, digits, inner hyphens, at most 63),
-# and must not be taken: a name of /etc/hosts, of a static lease of
+# and must not be taken: a name of /etc/hosts or of a 'domain' of
 # /etc/config/dhcp, the router's own host name, wpad, isatap, localhost.
+# The name of a static lease ('host') is written for that host's lease
+# only (its MAC or its address), as dnsmasq answers for it while the host
+# has a lease of dnsmasq's.
 # Two clients with one name: the first lease in Kea's files keeps it.
 # With no Kea DHCP server running, the file is removed: dnsmasq, back as
 # the DHCP server, answers for its own leases.
@@ -70,13 +73,51 @@ lease_file() {
 }
 
 # Usage: taken_names
-# The names a client's DHCP host name must not take, lowercase, one per line
+# The names a client's DHCP host name must not take, one per line: those
+# dnsmasq answers for itself (/etc/hosts, the names of the sections of
+# /etc/config/dhcp other than static leases, such as 'domain'), the
+# router's own name, and names clients look up to find services
 taken_names() {
 	awk '$1 !~ /^#/ { for (i = 2; i <= NF; i++) { if ($i ~ /^#/) break; print $i } }' \
 		"$KDH_ETC_HOSTS" 2>/dev/null
-	uci -q show dhcp 2>/dev/null | sed -n "s/^dhcp\.[^.=]*\.name='\(.*\)'$/\1/p" | tr ' ' '\n'
+	uci -q show dhcp 2>/dev/null | awk '
+		{
+			eq = index($0, "="); key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
+			n = split(key, k, ".")
+			if (n == 2) type[k[2]] = val
+			else if (n == 3 && k[3] == "name") name[k[2]] = val
+		}
+		END { for (s in name) if (type[s] != "host") print name[s] }' |
+		tr -d "'" | tr ' ' '\n'
 	uci -q get system.@system[0].hostname 2>/dev/null
 	printf '%s\n' wpad isatap localhost
+}
+
+# Usage: static_hosts
+# The static leases of /etc/config/dhcp ('host' sections) with a name, as
+# "name,ip,mac mac" items separated by ";", lowercase. dnsmasq answers for
+# such a name only while the host has a lease of its own: with Kea, the
+# host's lease from Kea gives it (a lease with the host's MAC or its
+# address), and no other client may take it.
+static_hosts() {
+	uci -q show dhcp 2>/dev/null | awk '
+		{
+			eq = index($0, "="); key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
+			gsub(/\047/, "", val)
+			n = split(key, k, ".")
+			if (n == 2) type[k[2]] = val
+			else if (n == 3 && k[3] == "name") name[k[2]] = val
+			else if (n == 3 && k[3] == "ip") ip[k[2]] = val
+			else if (n == 3 && k[3] == "mac") mac[k[2]] = val
+		}
+		END {
+			for (s in name) {
+				if (type[s] != "host") continue
+				c = split(name[s], names, " ")
+				for (i = 1; i <= c; i++)
+					printf "%s,%s,%s;", tolower(names[i]), ip[s], tolower(mac[s])
+			}
+		}'
 }
 
 # Usage: hosts_of <4|6> <now>
@@ -98,18 +139,19 @@ hosts_of() {
 	[ -r "$memfile" ] && set -- "$@" "$memfile"
 	[ "$#" -gt 0 ] || return 0
 	taken="$(taken_names | tr 'A-Z' 'a-z' | sed 's/\..*//' | tr '\n' ' ')"
-	awk -F, -v family="$family" -v now="$now" -v taken="$taken" '
+	awk -F, -v family="$family" -v now="$now" -v taken="$taken" -v static="$(static_hosts)" '
 		FNR == 1 && $1 == "address" { next }
 		{
 			if (family == 4) {
-				valid = $4; expire = $5; name = $9; state = $10
+				valid = $4; expire = $5; name = $9; state = $10; hw = $2
 				type = 0; plen = 128
 			} else {
 				valid = $3; expire = $4; type = $7; plen = $9
-				name = $12; state = $14
+				name = $12; state = $14; hw = $13
 			}
 			if (state == "") state = 0
 			lease[$1] = name
+			hwaddr[$1] = tolower(hw)
 			keep[$1] = (state == 0 && type == 0 && plen == 128 &&
 				(valid == 4294967295 || expire + 0 > now + 0))
 			if (!($1 in order)) { order[$1] = ++count; addr[count] = $1 }
@@ -117,6 +159,16 @@ hosts_of() {
 		END {
 			n = split(taken, t, " ")
 			for (i = 1; i <= n; i++) used[t[i]] = 1
+			# A static lease name: only for the address or MACs of that host
+			n = split(static, s, ";")
+			for (i = 1; i <= n; i++) {
+				if (split(s[i], f, ",") < 1 || f[1] == "") continue
+				sub(/\..*/, "", f[1])
+				host[f[1]] = 1
+				if (f[2] != "") owner[f[1] SUBSEP f[2]] = 1
+				m = split(f[3], macs, " ")
+				for (j = 1; j <= m; j++) owner[f[1] SUBSEP macs[j]] = 1
+			}
 			for (i = 1; i <= count; i++) {
 				a = addr[i]
 				if (!keep[a]) continue
@@ -125,6 +177,10 @@ hosts_of() {
 				if (length(name) > 63 || name !~ /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$/) continue
 				lower = tolower(name)
 				if (lower in used) continue
+				if (lower in host) {
+					byip = lower SUBSEP a; bymac = lower SUBSEP hwaddr[a]
+					if (!(byip in owner) && !(hwaddr[a] != "" && bymac in owner)) continue
+				}
 				used[lower] = 1
 				print a, name
 			}

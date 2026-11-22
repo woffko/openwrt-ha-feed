@@ -32,6 +32,19 @@ export KDH_ETC_HOSTS="$TEST_ROOT/hosts-file"
 mkdir -p "$KDH_KEA_LEASE_DIR" "$KDH_KEA_CONF_DIR"
 printf '127.0.0.1 localhost\n192.168.50.1 router.lan router\n192.168.50.5 NAS.lan nas # static\n' > "$KDH_ETC_HOSTS"
 
+# A stand-in for uci: "show dhcp" prints $UCI_DHCP when it exists, anything
+# else prints nothing
+export UCI_DHCP="$TEST_ROOT/uci-dhcp"
+mkdir -p "$TEST_ROOT/bin"
+cat > "$TEST_ROOT/bin/uci" <<'EOF'
+#!/bin/sh
+[ "$1" = "-q" ] && shift
+[ "$1 $2" = "show dhcp" ] && [ -r "$UCI_DHCP" ] && cat "$UCI_DHCP"
+exit 0
+EOF
+chmod +x "$TEST_ROOT/bin/uci"
+export PATH="$TEST_ROOT/bin:$PATH"
+
 V4="$KDH_KEA_LEASE_DIR/kea-leases4.csv"
 V6="$KDH_KEA_LEASE_DIR/kea-leases6.csv"
 H4="address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id"
@@ -137,6 +150,46 @@ rebuild "4"
 expect_hosts "a completed LFC replaces its working files" \
 "192.168.50.122 compact
 192.168.50.101 laptop"
+
+# Static leases of /etc/config/dhcp: the name is the host's, by its address
+# or one of its MACs (any case); a 'domain' name stays taken
+cat > "$UCI_DHCP" <<'EOF'
+dhcp.cfg01=host
+dhcp.cfg01.name='printer'
+dhcp.cfg01.ip='192.168.50.120'
+dhcp.cfg01.mac='02:00:00:00:00:30'
+dhcp.cfg02=host
+dhcp.cfg02.name='Camera'
+dhcp.cfg02.mac='02:00:00:00:00:31' '02:00:00:00:00:3A'
+dhcp.cfg03=host
+dhcp.cfg03.name='scanner'
+dhcp.cfg03.ip='192.168.50.125'
+dhcp.cfg04=domain
+dhcp.cfg04.name='files'
+dhcp.cfg04.ip='192.168.50.7'
+EOF
+rm -f "$V4.1" "$V4.2" "$V4.completed"
+cat > "$V4" <<EOF
+$H4
+192.168.50.130,02:00:00:00:00:99,,43200,$LATER,1,0,0,printer,0,,0
+192.168.50.120,02:00:00:00:00:30,,43200,$LATER,1,0,0,printer,0,,0
+192.168.50.131,02:00:00:00:00:3a,,43200,$LATER,1,0,0,camera,0,,0
+192.168.50.125,02:00:00:00:00:40,,43200,$LATER,1,0,0,scanner,0,,0
+192.168.50.132,02:00:00:00:00:41,,43200,$LATER,1,0,0,files,0,,0
+192.168.50.133,02:00:00:00:00:42,,43200,$LATER,1,0,0,Scanner,0,,0
+EOF
+cat > "$V6" <<EOF
+$H6
+fd00:1234:abcd:1::1200,00:01:00:01:dd,43200,$LATER,1,3600,0,1,128,0,0,printer,02:00:00:00:00:30,0,,1,0,0
+fd00:1234:abcd:1::1201,00:01:00:01:ee,43200,$LATER,1,3600,0,1,128,0,0,camera,,0,,1,0,0
+EOF
+rebuild "4 6"
+expect_hosts "a static lease name for that host's lease only (address or MAC), a domain name never" \
+"192.168.50.120 printer
+192.168.50.131 camera
+192.168.50.125 scanner
+fd00:1234:abcd:1::1200 printer"
+rm -f "$UCI_DHCP" "$V6"
 
 before="$(hups)"
 rebuild ""

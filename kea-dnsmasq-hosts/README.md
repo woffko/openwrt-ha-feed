@@ -34,10 +34,13 @@ as well as on a cluster.
   (`expand-hosts`): a client that calls itself `updates.example.org` is
   `updates.lan`, never `updates.example.org`, as with dnsmasq's own DHCP.
   The label must be a host name label (letters, digits, inner hyphens, at
-  most 63 characters), and must not be taken: a name of `/etc/hosts`, of a
-  static lease of `/etc/config/dhcp`, the router's own host name, `wpad`,
-  `isatap`, `localhost`, in any case. Of two clients with one name, the
-  first lease in Kea's files keeps it (per address family).
+  most 63 characters), and must not be taken: a name of `/etc/hosts` or of
+  a `domain` of `/etc/config/dhcp`, the router's own host name, `wpad`,
+  `isatap`, `localhost`, in any case. The name of a static lease (`host`)
+  is written for that host's lease only, one with its MAC or its address,
+  as dnsmasq answers for it while the host has a lease of dnsmasq's; no
+  other client takes it. Of two clients with one name, the first lease in
+  Kea's files keeps it (per address family).
 - With no Kea DHCP daemon running, the file is removed: dnsmasq, back as the
   DHCP server, answers for its own leases. Stopping or disabling the service
   removes it too.
