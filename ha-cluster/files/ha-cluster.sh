@@ -2314,7 +2314,8 @@ _ha_fw_rule() {
 #   device is the limit;
 # - from the addresses of the nodes that sync: the port of owsync and the
 #   port of lease-sync, each when that daemon has work, and with Kea as the
-#   DHCP server the ports of the listeners of its high availability;
+#   DHCP server the ports of the listeners of its high availability, which
+#   right after are dropped from anybody else;
 # - from the addresses of all nodes: ping, which the status uses.
 # What the clients need (DHCP, DNS) is the business of the zones, as it is
 # without a cluster.
@@ -2365,8 +2366,23 @@ ha_firewall_rules() {
 		for port in $(ha_kea_ha_ports); do
 			_ha_kea_port_refused "$port" || ports="${ports:+$ports }$port"
 		done
-		[ -n "$ports" ] &&
+		if [ -n "$ports" ] && [ -n "$sync_nodes" ]; then
 			_ha_fw_rule ha_cluster_kea "HA-Cluster-Kea-HA" tcp "$ports" "$sync_nodes"
+			# Kea's listener takes commands from whoever connects (dhcp-disable,
+			# lease changes): its basic-auth is not checked on the listener,
+			# only mutual TLS is. Anybody else's connection to these ports is
+			# dropped, also where a zone accepts input from its clients and
+			# the nodes' sync addresses are reachable from there.
+			section="ha_cluster_kea_drop"
+			echo "S|$section|rule"
+			echo "O|$section|name|HA-Cluster-Kea-HA-drop"
+			echo "O|$section|src|*"
+			echo "L|$section|proto|tcp"
+			for word in $ports; do
+				echo "L|$section|dest_port|$word"
+			done
+			echo "O|$section|target|DROP"
+		fi
 	fi
 
 	if [ -n "$nodes" ]; then
