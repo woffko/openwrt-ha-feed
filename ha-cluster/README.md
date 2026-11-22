@@ -398,8 +398,10 @@ The switch covers DHCPv4. On the way to Kea, in this order:
    stays the server, and the status says why (`dhcp_backend_problem`,
    `DEGRADED`). The switch is tried again at the next start or reload.
 5. **dnsmasq's active leases are handed to Kea**, with
-   `import-dnsmasq --leases` (luci-app-kea 0.15.0 and later), so that every
-   client keeps its address at its next renewal. When that fails there is
+   `import-dnsmasq --leases` (luci-app-kea 0.15.0 and later), from a copy
+   of dnsmasq's lease file taken before step 3 (in the run directory, 0600,
+   removed afterwards), so that every client keeps its address at its next
+   renewal. When that fails there is
    a warning only: Kea serves already, and gives a client its address again
    while nobody else has it.
 

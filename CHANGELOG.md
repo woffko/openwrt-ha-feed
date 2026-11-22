@@ -170,7 +170,8 @@ upgrading a node.
   config is still the sample of the Kea package: luci-app-kea's
   `setup-from-dnsmasq` (0.15.0) writes it from dnsmasq's pools and the nodes
   of the cluster, Kea is checked again, and once Kea serves, dnsmasq's
-  active leases are handed to it (`import-dnsmasq --leases`). A config of
+  active leases are handed to it (`import-dnsmasq --leases`, from a copy
+  of dnsmasq's lease file taken before the pools changed). A config of
   the user's own is never touched, and the refusal says so. Before, Kea had
   to be set up by hand first, which a router left with the package's sample
   showed (r19).

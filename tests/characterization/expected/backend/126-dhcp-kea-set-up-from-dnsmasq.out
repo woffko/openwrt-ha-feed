@@ -300,6 +300,7 @@ dnsmasq
 
 == leases calls
 (none)
+== copy left: no
 == rc.d
 K91ha-cluster
 S25ha-cluster
@@ -482,7 +483,9 @@ setup-from-dnsmasq --cluster -
 { "dhcp_backend": "dnsmasq", "node": { "name": "ha-172-30-0-10", "label": "ha-char", "address": "172.30.0.10", "priority": 100, "kea_role": "primary" }, "peers": [ { "name": "ha-172-30-0-11", "label": "node2", "address": "172.30.0.11", "vrrp_only": false, "kea_role": "standby" } ], "dhcp_interfaces": [ { "interface": "lan", "device": "br-lan", "vip4": [ "192.168.50.254" ] } ] }
 
 == leases calls
-import-dnsmasq --leases
+import-dnsmasq --leases --leases-file /var/run/ha-cluster/dnsmasq-leases
+  read: 1800000000 02:00:00:00:00:21 192.168.50.121 laptop 01:02:00:00:00:00:21
+== copy left: no
 == rc.d
 K91ha-cluster
 S25ha-cluster
