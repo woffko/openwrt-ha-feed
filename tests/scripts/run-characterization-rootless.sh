@@ -82,6 +82,13 @@ run_case() {
 		cp -al "$ROOTFS/usr/$entry" "$WORK/usr-$entry" 2>/dev/null ||
 			cp -a "$ROOTFS/usr/$entry" "$WORK/usr-$entry"
 	done
+	# Kea, luci-app-kea and kea-dnsmasq-hosts are not installed for the
+	# cases, whatever the rootfs holds (the node image has them since
+	# w0w6): a case about Kea puts its own stand-ins in place
+	rm -rf "$WORK/usr-sbin/"kea-* "$WORK/etc/kea" "$WORK/etc/config/kea" \
+		"$WORK/etc/config/kea-dnsmasq-hosts" "$WORK/etc/init.d/kea" \
+		"$WORK/etc/init.d/kea-dnsmasq-hosts" "$WORK/etc/rc.d/"[SK][0-9][0-9]kea \
+		"$WORK/etc/rc.d/"[SK][0-9][0-9]kea-dnsmasq-hosts
 
 	# Top-level directories of the rootfs read-only; /etc, /tmp, /usr/bin
 	# and /usr/sbin writable and thrown away after the case
@@ -97,6 +104,13 @@ run_case() {
 			set -- "$@" --ro-bind "$entry" "/$(basename "$entry")"
 		fi
 	done
+
+	[ -d "$ROOTFS/usr/libexec/luci-app-kea" ] &&
+		set -- "$@" --tmpfs /usr/libexec/luci-app-kea
+	[ -d "$ROOTFS/usr/share/kea" ] &&
+		set -- "$@" --tmpfs /usr/share/kea
+	[ -d "$ROOTFS/usr/lib/kea" ] &&
+		set -- "$@" --tmpfs /usr/lib/kea
 
 	timeout 300 bwrap "$@" \
 		--bind "$WORK/etc" /etc \
