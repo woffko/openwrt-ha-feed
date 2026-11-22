@@ -113,6 +113,7 @@ config vrrp_instance 'guest'
 rc=1
 == service_triggers
 reload_trigger [ha-cluster]
+raw_trigger [kea.service] [1000] [/etc/init.d/ha-cluster] [kea_changed]
 == log
 ha-cluster|daemon.info|Starting HA cluster
 ha-cluster|daemon.info|Applying HA cluster configuration
@@ -131,7 +132,7 @@ ha-cluster|daemon.err|Failed to apply configuration
 == /tmp/dnsmasq.cfg01411c.d/ha-cluster.conf
 (absent)
 == ls /etc/ha-cluster
-(absent)
+dhcp-backend
 == /etc/ha-cluster/service_states
 (absent)
 == firewall rules of the cluster

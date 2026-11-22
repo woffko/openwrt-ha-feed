@@ -427,7 +427,7 @@ refute 'lease sync is not active with Kea' ha_lease_sync_active
 expect 'file sync is still wanted with Kea' ha_owsync_wanted
 expect 'validation passes without the dhcp force of lease sync' ha_validate_config
 refute 'no missing force is reported' logged "force must be '1'"
-expect 'the unused lease_sync switch is mentioned' logged "lease_sync is not used with dhcp_backend 'kea'"
+expect 'the unused lease_sync switch is mentioned' logged 'lease_sync is not used with Kea as the DHCP server'
 expect 'a missing Kea is reported' logged 'neither kea-dhcp4 nor kea-dhcp6 is installed'
 expect 'a dnsmasq pool on the VIP interface is reported' \
 	logged "dnsmasq still answers DHCPv4 on interface 'br-lan' (dhcp.lan)"

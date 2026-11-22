@@ -9,7 +9,11 @@
 
 [ "$ACTION" = "ifup" ] || exit 0
 [ -n "$DEVICE" ] || exit 0
-[ "$(uci -q get ha-cluster.config.dhcp_backend)" = "kea" ] || exit 0
+# Cheap first test at every ifup: the server the node runs, written at each
+# start of ha-cluster, else what the config asks for
+backend="$(cat /etc/ha-cluster/dhcp-backend 2>/dev/null)"
+[ -n "$backend" ] || backend="$(uci -q get ha-cluster.config.dhcp_backend)"
+[ "$backend" = "kea" ] || [ "$backend" = "auto" ] || exit 0
 
 . /lib/functions.sh
 . /usr/lib/ha-cluster/ha-cluster.sh

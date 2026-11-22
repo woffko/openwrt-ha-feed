@@ -1,0 +1,7 @@
+#!/bin/sh
+# Stands in for luci-app-kea's import-dnsmasq (KEA_IMPORT_BIN): prints the
+# fixture $FAKE_KEA_IMPORT and exits with $FAKE_KEA_IMPORT_RC (0). Each call
+# is recorded in /tmp/fake-kea-import.log.
+echo "import-dnsmasq $*" >> /tmp/fake-kea-import.log
+[ -n "$FAKE_KEA_IMPORT" ] && cat "$FAKE_KEA_IMPORT"
+exit "${FAKE_KEA_IMPORT_RC:-0}"

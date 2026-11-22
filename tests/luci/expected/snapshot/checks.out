@@ -5,6 +5,7 @@ h3: Cluster Status
 | Cluster Overview
 | Cluster State | HEALTHY
 | Node Role | MASTER
+| DHCP Server | dnsmasq (automatic)
 | Instance: main | MASTER
 | Instance: main_v6 | MASTER
 | Last Synchronization
@@ -54,8 +55,8 @@ config._group_dhcp [CBI.FlagValue] DHCP and DNS: [ ]
 config._group_firewall [CBI.FlagValue] Firewall: [ ]
   help: /etc/config/firewall: zones, rules, port forwards. Review the rules before enabling: they apply to every node.
 h3: DHCP Leases
-config.dhcp_backend [CBI.ListValue] DHCP Server: select=dnsmasq {dnsmasq,kea}
-  help: The server that gives out the leases on the cluster interfaces. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, which are made in Kea on every node. The IPv6 guard then leaves DHCPv6 to Kea and keeps guarding Router Advertisements.
+config.dhcp_backend [CBI.ListValue] DHCP Server: select=auto {auto,dnsmasq,kea}
+  help: The server that gives out IPv4 leases on the cluster interfaces. Automatic: Kea once it is set up for a cluster interface and started (in the Kea pages), dnsmasq otherwise. Kea or dnsmasq: that one, and the HA cluster switches Kea's DHCPv4 server on or off itself. On a switch to Kea the static leases of dnsmasq are imported into Kea first, then the DHCPv4 of dnsmasq is switched off in the pools of the cluster interfaces (visible on the DHCP page), and switched on again on the way back; DNS and Router Advertisements stay with dnsmasq. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, made in Kea on every node, and the IPv6 guard leaves DHCPv6 to Kea. Set the same on every node.
 config.lease_sync [CBI.FlagValue] Real-time Lease Sync: [ ]
   help: Replicates DHCP leases between nodes so that clients keep their address after a failover. Independent of the DHCP configuration sync above.
 ==== simple modal peer1

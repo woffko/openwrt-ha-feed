@@ -74,56 +74,11 @@ nodes_role() {
 	esac
 }
 
-# A program that prints a Kea daemon's answer to status-get, given the
-# control socket as its argument, in place of the ucode below (for tests)
-KEA_STATUS_GET="${KEA_STATUS_GET:-}"
-
-# Asks the Kea daemon behind the control socket $KEA_SOCKET for its status.
-# Gives up two seconds after the question, so that a Kea that does not answer
-# cannot hold up the status of the cluster.
-KEA_STATUS_UCODE='
-import * as socket from "socket";
-
-let s = socket.create(socket.AF_UNIX, socket.SOCK_STREAM);
-
-if (!s || !s.connect({ family: socket.AF_UNIX, path: getenv("KEA_SOCKET") }))
-	exit(1);
-
-s.send("{\"command\":\"status-get\"}");
-
-let answer = "";
-
-for (let tries = 0; tries < 20; tries++) {
-	if (!length(socket.poll(100, s)))
-		continue;
-
-	let chunk = s.recv(16384);
-
-	if (!length(chunk))
-		break;
-
-	answer += chunk;
-
-	try { json(answer); break; } catch (e) {}
-}
-
-print(answer);
-'
-
 # Usage: kea_status_get dhcp4|dhcp6
-# Prints Kea's answer to status-get, or nothing: the daemon has no control
-# socket under the name the Kea package gives it, the ucode socket module
-# (ucode-mod-socket) is not installed, or no answer came.
+# ha_kea_status_get of ha-cluster.sh, which the switch of the DHCP server
+# also asks
 kea_status_get() {
-	local socket="$KEA_RUN_DIR/kea${1#dhcp}-ctrl-socket"
-
-	if [ -n "$KEA_STATUS_GET" ]; then
-		"$KEA_STATUS_GET" "$socket" 2>/dev/null
-		return 0
-	fi
-
-	[ -S "$socket" ] || return 0
-	KEA_SOCKET="$socket" ucode -e "$KEA_STATUS_UCODE" 2>/dev/null
+	ha_kea_status_get "$1"
 }
 
 # Usage: kea_cluster_device <vip or vrrp_instance section>
@@ -299,6 +254,35 @@ kea_service() {
 	json_close_object
 }
 
+# Usage: kea_import_left <file with what the import printed>
+# Adds kea_import: the static leases of dnsmasq the last import did not take
+# into Kea (those that need luci-app-kea's Import page), with their status
+kea_import_left() {
+	local out count i name identifier address status
+
+	out="$(cat "$1")"
+	count=$(printf '%s' "$out" | jsonfilter -e '@.left[*].key' 2>/dev/null | wc -l)
+	json_add_object kea_import
+	json_add_int left "$count"
+	json_add_array entries
+	i=0
+	while [ "$i" -lt "$count" ] && [ "$i" -lt 50 ]; do
+		name="" identifier="" address="" status=""
+		eval "$(printf '%s' "$out" | jsonfilter \
+			-e "name=@.left[$i].name" -e "identifier=@.left[$i].identifier" \
+			-e "address=@.left[$i].address" -e "status=@.left[$i].status" 2>/dev/null)"
+		json_add_object
+		json_add_string name "$name"
+		json_add_string identifier "$identifier"
+		json_add_string address "$address"
+		json_add_string status "$status"
+		json_close_object
+		i=$((i + 1))
+	done
+	json_close_array
+	json_close_object
+}
+
 case "$1" in
 	list)
 		json_init
@@ -345,8 +329,14 @@ case "$1" in
 
 				ha_enabled=$(get_bool "$(uci -q get ha-cluster.config.enabled)" 0)
 
-				dhcp_backend=$(uci -q get ha-cluster.config.dhcp_backend)
-				dhcp_backend=${dhcp_backend:-dnsmasq}
+				# The server the node runs, and what the config asks for
+				config_load ha-cluster
+				dhcp_backend=$(ha_dhcp_backend)
+				dhcp_backend_mode=$(ha_dhcp_backend_mode)
+				dhcp_backend_problem=""
+				[ -r "$HA_DHCP_BACKEND_PROBLEM" ] && dhcp_backend_problem=$(head -n 1 "$HA_DHCP_BACKEND_PROBLEM")
+				[ "$ha_enabled" = "1" ] && [ -z "$dhcp_backend_problem" ] &&
+					dhcp_backend_problem=$(ha_dhcp_pools_mismatch)
 
 				if [ "$ha_enabled" != "1" ]; then
 					cluster_state="STOPPED"
@@ -505,11 +495,19 @@ case "$1" in
 					cluster_state="DEGRADED"
 				elif [ -n "$earlier_model" ]; then
 					cluster_state="DEGRADED"
+				elif [ -n "$dhcp_backend_problem" ]; then
+					cluster_state="DEGRADED"
 				elif [ "$services_ok" -eq 1 ]; then
 					cluster_state="HEALTHY"
 				fi
 				json_add_string state "$cluster_state"
 				json_add_string dhcp_backend "$dhcp_backend"
+				json_add_string dhcp_backend_mode "$dhcp_backend_mode"
+				[ -n "$dhcp_backend_problem" ] && json_add_string dhcp_backend_problem "$dhcp_backend_problem"
+				# What the last import of dnsmasq's static leases into Kea left
+				if [ "$dhcp_backend" = "kea" ] && [ -r "$HA_KEA_IMPORT_RESULT" ]; then
+					kea_import_left "$HA_KEA_IMPORT_RESULT"
+				fi
 				if [ -n "$earlier_model" ]; then
 					json_add_array earlier_model
 					oldifs="$IFS"

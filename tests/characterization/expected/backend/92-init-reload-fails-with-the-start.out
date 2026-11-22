@@ -131,6 +131,7 @@ end
 rc=0
 == service_triggers
 reload_trigger [ha-cluster]
+raw_trigger [kea.service] [1000] [/etc/init.d/ha-cluster] [kea_changed]
 == log
 ha-cluster|daemon.info|Starting HA cluster
 ha-cluster|daemon.info|Applying HA cluster configuration
@@ -240,6 +241,7 @@ ha-cluster.conf
 # Call dhcp-script on lease renewals so lease-sync can track expiry changes
 script-on-renewal
 == ls /etc/ha-cluster
+dhcp-backend
 service_states
 == /etc/ha-cluster/service_states
 keepalived=1
@@ -257,7 +259,7 @@ ha-cluster|daemon.info|Reloading HA cluster configuration
 ha-cluster|daemon.info|Service not running, performing full start
 ha-cluster|daemon.info|Starting HA cluster
 ha-cluster|daemon.info|Applying HA cluster configuration
-ha-cluster|daemon.err|dhcp_backend 'isc' is not supported (only 'dnsmasq' and 'kea')
+ha-cluster|daemon.err|dhcp_backend 'isc' is not supported (only 'auto', 'dnsmasq' and 'kea')
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
 == ls /var/run/ha-cluster
@@ -347,6 +349,7 @@ ha-cluster.conf
 # Call dhcp-script on lease renewals so lease-sync can track expiry changes
 script-on-renewal
 == ls /etc/ha-cluster
+dhcp-backend
 service_states
 == /etc/ha-cluster/service_states
 keepalived=1

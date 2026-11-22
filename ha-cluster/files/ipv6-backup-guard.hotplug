@@ -582,6 +582,17 @@ reconcile_ra_output_rules() {
 	}
 }
 
+# The DHCP server of the cluster interfaces: the one ha-cluster switched to
+# (its start writes it), else the one the config names; dnsmasq when it
+# names none or 'auto'
+dhcp_backend() {
+	local backend
+
+	backend="$(cat "${HA_DHCP_BACKEND_STATE:-/etc/ha-cluster/dhcp-backend}" 2>/dev/null)"
+	[ -n "$backend" ] || backend="$(uci -q get ha-cluster.config.dhcp_backend)"
+	[ "$backend" = "kea" ] && echo "kea" || echo "dnsmasq"
+}
+
 reconcile_all() {
 	local backup_ifaces dhcpv6_ifaces source_rules
 
@@ -594,7 +605,7 @@ reconcile_all() {
 	# dropping the requests on a BACKUP could silence the one server that
 	# is to answer. Router Advertisements stay guarded.
 	dhcpv6_ifaces="$backup_ifaces"
-	[ "$(uci -q get ha-cluster.config.dhcp_backend)" = "kea" ] && dhcpv6_ifaces=""
+	[ "$(dhcp_backend)" = "kea" ] && dhcpv6_ifaces=""
 
 	ensure_dhcpv6_table || return 1
 	ensure_ra_table || return 1

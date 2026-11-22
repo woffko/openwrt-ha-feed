@@ -5,8 +5,9 @@
 #
 # A case file is sourced with errexit set. It may change UCI, remove or
 # create files, set the FAKE_* variables read by the stubs, and set
-# STEP2=reload|stop (with an optional step2 function applying changes
-# first) to observe a second step after the first start. rpcd cases may
+# STEP2=reload|stop|firewall|init-reload|kea_changed (with an optional
+# step2 function applying changes first) to observe a second step after
+# the first start. rpcd cases may
 # set RPCD_METHOD to call another method than status.
 #
 # Cases describe the configuration before the package upgrade: the
@@ -105,10 +106,12 @@ load_init() {
 	procd_append_param() { printf '\tappend'; args "$@"; }
 	procd_close_instance() { echo "end"; }
 	procd_add_reload_trigger() { printf 'reload_trigger'; args "$@"; }
+	procd_add_raw_trigger() { printf 'raw_trigger'; args "$@"; }
 	procd_running() { [ -z "$_char_killed" ]; }
 	procd_kill() { _char_killed=1; }
 	procd_send_signal() { printf 'signal'; args "$@"; }
 	start() { start_service; }
+	reload() { reload_service; }
 	stop() {
 		stop_service
 		procd_kill ha-cluster
@@ -174,6 +177,8 @@ case "$mode" in
 				reload) reload_service ;;
 				stop) stop ;;
 				firewall) firewall ;;
+				# procd runs it on the event luci-app-kea sends
+				kea_changed) kea_changed ;;
 				# The init script as procd runs it, through rc.common: only
 				# its return code is of interest (procd is not there)
 				init-reload) sh /etc/rc.common /etc/init.d/ha-cluster reload >/dev/null 2>&1 ;;
