@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r12, `luci-app-ha-cluster` 2.0.0-r9,
+packages are `ha-cluster` 2.0.0-r13, `luci-app-ha-cluster` 2.0.0-r10,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -93,6 +93,15 @@ upgrading a node.
 - `/etc/init.d/ha-cluster start` and `reload` fail when the start fails
   (a config that does not validate); they returned 0 with no daemon
   running, and LuCI's apply reported success.
+- A config of the releases before 2.0 found at a start is migrated then,
+  with a warning, as the upgrade does, and the guard handlers in
+  `/etc/hotplug.d/keepalived/` are brought in line with the release. The
+  upgrade migrates once, at the first boot of the image; files put back
+  after it (a restored backup, or the kept settings unpacked again because
+  a first-boot script rebooted before the boot ended) left the node with
+  no file and no lease sync and the status `HEALTHY`. Until the config is
+  migrated the status is `DEGRADED` and lists what it found in
+  `earlier_model`.
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
@@ -110,6 +119,8 @@ upgrading a node.
   tracks nothing else; removing a health check takes it out of the
   instances' Track Scripts. A name left behind failed the backend's
   validation, and the cluster did not start.
+- The Status page says when `/etc/config/ha-cluster` is still in the form
+  of the releases before 2.0 (`earlier_model` of the status).
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a

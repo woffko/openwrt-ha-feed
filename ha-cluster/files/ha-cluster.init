@@ -18,10 +18,15 @@ HA_CLUSTER_LIB="${IPKG_INSTROOT}/usr/lib/ha-cluster/ha-cluster.sh"
 start_service() {
 	local enabled
 
+	ha_log_init
+
+	# A config of the releases before 2.0 reads here as one with no file and
+	# no lease sync: migrated first, as the upgrade does. The cluster starts
+	# even if that fails, as it would have: without sync, but with VRRP.
+	ha_migrate_earlier_model
+
 	config_load ha-cluster
 	config_get_bool enabled config enabled 0
-
-	ha_log_init
 
 	[ "$enabled" -eq 0 ] && {
 		ha_log_debug "HA cluster disabled"

@@ -156,6 +156,20 @@ They add to the list above when a node runs this fork's packages.
 - **sysupgrade with kept settings.** `/etc/hotplug.d/keepalived/` is kept
   as a whole for custom hooks; the upgrade script replaces the guard
   handler it finds there with the one of the new image at first boot.
+- **Settings put back after the migration.** The migration runs once, at
+  the first boot of the image, and is then deleted. When the files it
+  changed come back afterwards, ha-cluster finds the old model at its
+  next start and migrates it then, with a warning in the log; it puts the
+  guard handler of the release back in the same way. Two ways they come
+  back: a backup of an earlier release restored in LuCI, and a first-boot
+  script of your own that reboots, to grow the root partition for
+  example. `/etc/init.d/done`, the last boot script, deletes the settings
+  kept by sysupgrade (`/sysupgrade.tgz`); until a boot gets that far,
+  preinit unpacks them again at every boot, over what the first-boot
+  scripts of every package changed. Such a script should delete them
+  before it reboots: `rm -f /sysupgrade.tgz && sync`. Until the config is
+  migrated, `ubus call ha-cluster status` is `DEGRADED` and lists what it
+  found under `earlier_model`, and LuCI's Status page says so.
 
 ## Dependencies
 
@@ -766,6 +780,7 @@ Available environment variables:
 /etc/config/ha-cluster                  UCI configuration
 /etc/init.d/ha-cluster                  procd init script (START=25, STOP=91)
 /usr/lib/ha-cluster/ha-cluster.sh       Core library
+/usr/lib/ha-cluster/migrate-config      The upgrade's migration, for a config put back after it
 /etc/hotplug.d/iface/60-ha-cluster-kea  With Kea as the DHCP server: Kea rereads its config at ifup
 /var/run/ha-cluster/                        Generated configs (runtime)
 ```

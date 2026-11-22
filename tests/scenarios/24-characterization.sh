@@ -63,6 +63,7 @@ run_case() {
         -v "$FEED_DIR/ha-cluster/files/ha-cluster.init:/etc/init.d/ha-cluster:ro" \
         -v "$FEED_DIR/ha-cluster/files/ha-cluster.config:/shipped/ha-cluster:ro" \
         -v "$FEED_DIR/ha-cluster/files/ha-cluster.uci-defaults:/char-migrate:ro" \
+        -v "$FEED_DIR/ha-cluster/files/ha-cluster.uci-defaults:/usr/lib/ha-cluster/migrate-config:ro" \
         -v "$FEED_DIR/luci-app-ha-cluster/root/usr/libexec/rpcd/ha-cluster:/usr/libexec/rpcd/ha-cluster:ro" \
         -v "$FEED_DIR/luci-app-ha-cluster/root/usr/share/rpcd/acl.d/luci-app-ha-cluster.json:/usr/share/rpcd/acl.d/luci-app-ha-cluster.json:ro" \
         -v "$FEED_DIR/dnsmasq-ha/files/dhcp-script.sh:/char-dhcp-script:ro" \

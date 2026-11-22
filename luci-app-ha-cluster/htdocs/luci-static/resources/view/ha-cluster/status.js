@@ -213,7 +213,17 @@ return view.extend({
 		var instances = status.instances || {};
 		var instanceNames = Object.keys(instances);
 
-		return [
+		// What the config holds of the releases before 2.0: the service
+		// migrates it when it starts, so this shows only until then, or when
+		// that failed
+		var earlierModel = Array.isArray(status.earlier_model) ? status.earlier_model : [];
+		var earlierWarning = earlierModel.length > 0 ? [
+			E('div', { 'class': 'alert-message warning' },
+				_('/etc/config/ha-cluster is in the form of the releases before 2.0 (%s), which this release does not read: configuration and leases are not synchronized. Restarting the HA cluster service migrates it, as the upgrade does; the system log says why if it does not.')
+					.format(earlierModel.join(', ')))
+		] : [];
+
+		return earlierWarning.concat([
 			E('h3', {}, _('Cluster Status')),
 
 			E('div', { 'class': 'cbi-section', 'style': 'display: flex; gap: 2em;' }, [
@@ -316,7 +326,7 @@ return view.extend({
 					}))) :
 					E('div', { 'class': 'alert-message warning' }, _('No peers configured'))
 			])
-		];
+		]);
 	},
 
 	render: function(data) {

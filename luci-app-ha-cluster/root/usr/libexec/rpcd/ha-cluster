@@ -490,6 +490,11 @@ case "$1" in
 					[ -n "$kea_dhcp4_problem$kea_dhcp6_problem" ] && kea_problem=1
 				fi
 
+				# A config of the releases before 2.0 that the service has not
+				# migrated yet, or could not: no file or lease sync, whatever
+				# the daemons say
+				earlier_model=$(ha_config_earlier_model)
+
 				if [ "$ha_enabled" != "1" ]; then
 					cluster_state="STOPPED"
 				elif [ "$services_ok" -eq 0 ]; then
@@ -498,11 +503,24 @@ case "$1" in
 					cluster_state="DEGRADED"
 				elif [ "$kea_problem" -eq 1 ]; then
 					cluster_state="DEGRADED"
+				elif [ -n "$earlier_model" ]; then
+					cluster_state="DEGRADED"
 				elif [ "$services_ok" -eq 1 ]; then
 					cluster_state="HEALTHY"
 				fi
 				json_add_string state "$cluster_state"
 				json_add_string dhcp_backend "$dhcp_backend"
+				if [ -n "$earlier_model" ]; then
+					json_add_array earlier_model
+					oldifs="$IFS"
+					IFS='
+'
+					for entry in $earlier_model; do
+						json_add_string "" "$entry"
+					done
+					IFS="$oldifs"
+					json_close_array
+				fi
 
 
 				json_add_object services

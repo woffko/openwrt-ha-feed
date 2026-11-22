@@ -2214,6 +2214,109 @@ ha_reconcile_ipv6_guard() {
 	ACTION=RECONCILE TYPE=INSTANCE NAME= /bin/sh "$handler" >/dev/null 2>&1 &
 }
 
+# The migration script of this release, also run at the first boot of an
+# image as /etc/uci-defaults/60_ha-cluster-sync-model
+HA_MIGRATE_CONFIG="${HA_MIGRATE_CONFIG:-${HA_CLUSTER_ROOT}/usr/lib/ha-cluster/migrate-config}"
+
+# Usage: ha_config_earlier_model
+# Prints, one per line, what /etc/config/ha-cluster holds of the model of
+# the releases before 2.0 that the migration script changes: nothing for a
+# config of this release, which reads none of it: service sections and
+# sync_leases leave a node with no file and no lease sync, an anonymous
+# advanced section with the defaults instead of its options.
+ha_config_earlier_model() {
+	local shown sync_method section
+
+	shown="$(uci -q show ha-cluster)" || return 0
+
+	printf '%s\n' "$shown" | grep -q '^ha-cluster\.[^.=]*=service$' &&
+		echo "service sections"
+	# Only where the migration removes them: elsewhere they would be
+	# reported at every start
+	for section in $(printf '%s\n' "$shown" | sed -n -E 's/^ha-cluster\.([^.=]*)=(service|sync_group)$/\1/p'); do
+		printf '%s\n' "$shown" | grep -qF "ha-cluster.$section.sync_leases=" || continue
+		echo "sync_leases"
+		break
+	done
+	for section in $(printf '%s\n' "$shown" | sed -n 's/^ha-cluster\.\([^.=]*\)=peer$/\1/p'); do
+		printf '%s\n' "$shown" | grep -qF "ha-cluster.$section.sync_enabled=" || continue
+		echo "sync_enabled"
+		break
+	done
+	sync_method="$(uci -q get ha-cluster.config.sync_method)"
+	[ -n "$sync_method" ] && [ "$sync_method" != "owsync" ] &&
+		echo "sync_method $sync_method"
+	# The migration names the first anonymous one, unless one has the name
+	if ! printf '%s\n' "$shown" | grep -q '^ha-cluster\.advanced=advanced$' &&
+		printf '%s\n' "$shown" | grep -q '^ha-cluster\.@advanced\[[0-9]*\]=advanced$'; then
+		echo "an anonymous advanced section"
+	fi
+	printf '%s\n' "$shown" | grep -q '^ha-cluster\.advanced\.lease_sync_persist_interval=' &&
+		echo "lease_sync_persist_interval"
+	return 0
+}
+
+# Usage: _ha_earlier_model_list
+# What ha_config_earlier_model prints, on one line
+_ha_earlier_model_list() {
+	ha_config_earlier_model | tr '\n' ',' | sed 's/,$//; s/,/, /g'
+}
+
+# Usage: ha_guard_handler_stale
+# True when /etc/hotplug.d/keepalived holds another IPv6 BACKUP guard
+# handler than the one of this release, or one of an earlier release.
+# keepalived's state changes run that one; this release's own calls run
+# the packaged copy.
+ha_guard_handler_stale() {
+	local packaged="${HA_CLUSTER_ROOT}/usr/lib/ha-cluster/ipv6-backup-guard"
+	local hooks="${HA_CLUSTER_ROOT}/etc/hotplug.d/keepalived"
+
+	[ -f "$packaged" ] || return 1
+	cmp -s "$packaged" "$hooks/20-ipv6-backup-guard" || return 0
+	[ -e "$hooks/20-dhcpv6-backup-guard" ] || [ -e "$hooks/21-RA-backup-guard" ]
+}
+
+# Usage: ha_migrate_earlier_model
+# Does at a start what the migration script does at the first boot of an
+# image, when its work is not there: when the files it changed were put
+# back afterwards. A backup of an earlier release restored in LuCI does
+# that; so does sysupgrade when a first-boot script reboots before the boot
+# ends (resizing the root partition, for one): /etc/init.d/done deletes the
+# settings kept, and preinit unpacks them again at each boot until then,
+# after the migration script has run and been deleted.
+# Returns 1 when something of the earlier model is still there afterwards.
+ha_migrate_earlier_model() {
+	local found stale=0 rc=0
+
+	found="$(_ha_earlier_model_list)"
+	ha_guard_handler_stale && stale=1
+	[ -n "$found" ] || [ "$stale" -eq 1 ] || return 0
+
+	[ -n "$found" ] && ha_log_warning "/etc/config/ha-cluster holds what the releases before 2.0 wrote and this release does not read: $found. It comes back when a backup of an earlier release is restored, or when the first boot of an upgrade reboots before its end. Migrating it now, as the upgrade does"
+	[ "$stale" -eq 1 ] && ha_log_warning "/etc/hotplug.d/keepalived holds another IPv6 BACKUP guard handler than the one of this release, which keepalived runs at each state change: putting this release's in place and removing those of earlier releases, as the upgrade does"
+
+	if [ ! -r "$HA_MIGRATE_CONFIG" ]; then
+		ha_log_error "The migration script $HA_MIGRATE_CONFIG is missing"
+	elif ! /bin/sh "$HA_MIGRATE_CONFIG" >/dev/null 2>&1; then
+		ha_log_error "The migration script $HA_MIGRATE_CONFIG failed"
+	fi
+
+	if [ -n "$found" ]; then
+		found="$(_ha_earlier_model_list)"
+		if [ -n "$found" ]; then
+			ha_log_error "/etc/config/ha-cluster still holds what this release does not read: $found"
+			rc=1
+		else
+			ha_log_info "/etc/config/ha-cluster migrated to the model of this release"
+		fi
+	fi
+	if [ "$stale" -eq 1 ] && ha_guard_handler_stale; then
+		ha_log_error "The IPv6 BACKUP guard handlers in /etc/hotplug.d/keepalived could not be brought in line with this release"
+		rc=1
+	fi
+	return "$rc"
+}
+
 ha_apply_config() {
 	ha_log "Applying HA cluster configuration"
 
