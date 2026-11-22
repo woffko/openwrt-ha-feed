@@ -67,6 +67,7 @@ run_case() {
 	cp -a "$ROOTFS/usr/lib/ha-cluster" "$WORK/ha-lib"
 	cp "$FEED_DIR/ha-cluster/files/check-dataplane.sh" "$WORK/ha-lib/check-dataplane"
 	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/ha-lib/ipv6-backup-guard"
+	cp "$FEED_DIR/ha-cluster/files/ha-cluster.uci-defaults" "$WORK/ha-lib/migrate-config"
 	mkdir -p "$WORK/etc/hotplug.d/keepalived"
 	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
 	chmod 0755 "$WORK/ha-lib/check-dataplane" "$WORK/ha-lib/ipv6-backup-guard" \

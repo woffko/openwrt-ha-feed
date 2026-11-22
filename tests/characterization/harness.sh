@@ -13,6 +13,10 @@
 # uci-defaults migration runs on it before the first start. step2
 # changes are made after the upgrade and use the current option names.
 #
+# SKIP_MIGRATION=1 starts backend and rpcd cases without that migration:
+# the config stays as the case left it, as when the files the migration
+# changed were put back after the first boot.
+#
 # Migration cases write /etc/config/ha-cluster verbatim; only the
 # uci-defaults migration runs, twice.
 #
@@ -59,6 +63,7 @@ export FAKE_ONLINE="172.30.0.11"
 export FAKE_KEEPALIVED="$CHAR/rpcd/fixtures/keepalived-master.json"
 
 STEP2=""
+SKIP_MIGRATION=""
 RPCD_METHOD=status
 set -e
 . "$case_file"
@@ -139,9 +144,13 @@ case "$mode" in
 		uci export ha-cluster
 		uci export dhcp
 
-		sh /char-migrate
-		echo "== uci after migration"
-		uci export ha-cluster
+		if [ -n "$SKIP_MIGRATION" ]; then
+			echo "== migration skipped"
+		else
+			sh /char-migrate
+			echo "== uci after migration"
+			uci export ha-cluster
+		fi
 
 		load_init
 
@@ -174,7 +183,7 @@ case "$mode" in
 		fi
 		;;
 	rpcd)
-		sh /char-migrate
+		[ -n "$SKIP_MIGRATION" ] || sh /char-migrate
 		# rpcd may read what the backend generated
 		( load_init; start_service ) > /dev/null 2>&1
 		# Fixed mtimes for the "last sync" timestamps

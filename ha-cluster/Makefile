@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=12
+PKG_RELEASE:=13
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -67,6 +67,9 @@ define Package/ha-cluster/install
 
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/ha-cluster.uci-defaults $(1)/etc/uci-defaults/60_ha-cluster-sync-model
+	# The same script for the init script, which runs it when the files it
+	# changed were put back after the first boot
+	$(INSTALL_BIN) ./files/ha-cluster.uci-defaults $(1)/usr/lib/ha-cluster/migrate-config
 endef
 
 define Package/ha-cluster/prerm

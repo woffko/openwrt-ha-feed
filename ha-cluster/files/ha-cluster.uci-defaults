@@ -6,6 +6,8 @@
 # migrates /etc/config/ha-cluster to sync_group sections, the global
 # lease_sync switch, vrrp_only peers and a named advanced section, and
 # drops the lease-sync persist interval. Idempotent.
+# Also installed as /usr/lib/ha-cluster/migrate-config: the init script
+# runs it when the files it changes were put back after the first boot.
 
 # sysupgrade keeps every file of /etc/hotplug.d/keepalived/, for the custom
 # hooks that directory may hold. The handler this package installs there is
