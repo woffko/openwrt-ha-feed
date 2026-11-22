@@ -405,7 +405,7 @@ kea
 == /var/run/ha-cluster/dhcp-backend-problem
 (absent)
 == leases calls
-import-dnsmasq --leases
+import-dnsmasq --leases --leases-file /var/run/ha-cluster/dnsmasq-leases
 == rc.d
 K91ha-cluster
 S25ha-cluster

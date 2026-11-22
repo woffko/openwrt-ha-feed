@@ -39,6 +39,9 @@ HA_DHCP_BACKEND_STATE="${HA_DHCP_BACKEND_STATE:-${HA_CLUSTER_ROOT}/etc/ha-cluste
 HA_DHCP_BACKEND_PROBLEM="${HA_CLUSTER_RUN_DIR}/dhcp-backend-problem"
 # What the last import printed
 HA_KEA_IMPORT_RESULT="${HA_CLUSTER_RUN_DIR}/kea-import.json"
+# dnsmasq's lease file as it was before a switch to Kea changed the pools,
+# for the hand-over of the leases to Kea; removed once handed over
+HA_DNSMASQ_LEASES_COPY="${HA_CLUSTER_RUN_DIR}/dnsmasq-leases"
 # Kea was stopped from luci-app-kea while its config says it runs
 HA_KEA_STOPPED_MARK="${HA_CLUSTER_RUN_DIR}/kea-stopped"
 HA_DHCP_BACKEND_LOCK="${HA_DHCP_BACKEND_LOCK:-/var/lock/ha-cluster-dhcp-backend.lock}"
@@ -2133,16 +2136,41 @@ _ha_kea_setup() {
 	return 0
 }
 
+# Usage: _ha_kea_leases_copy
+# Keeps dnsmasq's lease file as it is now, before the pools change (root's
+# alone: it names the clients), for _ha_kea_leases
+_ha_kea_leases_copy() {
+	local file
+
+	rm -f "$HA_DNSMASQ_LEASES_COPY"
+	file="$(_ha_dhcp_read -q get 'dhcp.@dnsmasq[0].leasefile')"
+	file="${file:-/tmp/dhcp.leases}"
+	[ -f "$file" ] && [ ! -L "$file" ] || return 0
+	ha_ensure_run_dir || return 0
+	( umask 077; cp "$file" "$HA_DNSMASQ_LEASES_COPY" ) 2>/dev/null ||
+		rm -f "$HA_DNSMASQ_LEASES_COPY"
+	return 0
+}
+
 # Usage: _ha_kea_leases
-# Has luci-app-kea hand dnsmasq's active leases to the running Kea, so that
-# every client keeps its address at its next renewal. Only warned about when
-# it fails: Kea serves already, and gives a client its address again when
-# nobody else has it. A luci-app-kea before 0.15.0 does not know --leases.
+# Has luci-app-kea hand dnsmasq's active leases to the running Kea, from the
+# copy taken before the pools changed, so that every client keeps its
+# address at its next renewal. Only warned about when it fails: Kea serves
+# already, and gives a client its address again when nobody else has it. A
+# luci-app-kea before 0.15.0 does not know --leases.
 _ha_kea_leases() {
 	local out rc=0 reason
 
-	[ -x "$KEA_IMPORT_BIN" ] || return 0
-	out="$("$KEA_IMPORT_BIN" --leases 2>/dev/null)" || rc=$?
+	if [ ! -x "$KEA_IMPORT_BIN" ]; then
+		rm -f "$HA_DNSMASQ_LEASES_COPY"
+		return 0
+	fi
+	if [ -f "$HA_DNSMASQ_LEASES_COPY" ]; then
+		out="$("$KEA_IMPORT_BIN" --leases --leases-file "$HA_DNSMASQ_LEASES_COPY" 2>/dev/null)" || rc=$?
+	else
+		out="$("$KEA_IMPORT_BIN" --leases 2>/dev/null)" || rc=$?
+	fi
+	rm -f "$HA_DNSMASQ_LEASES_COPY"
 	if [ "$rc" -eq 2 ]; then
 		ha_log_debug "dnsmasq's leases not handed to Kea: this luci-app-kea cannot (0.15.0 and later can)"
 		return 0
@@ -2294,11 +2322,14 @@ _ha_switch_to_kea() {
 		return 1
 	fi
 
+	# dnsmasq's leases before its DHCPv4 goes, for Kea
+	_ha_kea_leases_copy
 	# Noted before the pools change: a switch cut short by a reboot or a kill
 	# is made again or undone at the next start (ha_apply_dhcp_backend)
 	_ha_dhcp_backend_save switching
 	# A few seconds without a DHCP server rather than two of them
 	if ! pools="$(_ha_dhcp_pools_off)"; then
+		rm -f "$HA_DNSMASQ_LEASES_COPY"
 		_ha_dhcp_backend_problem "/etc/config/dhcp could not be written: dnsmasq stays the DHCP server"
 		return 1
 	fi
@@ -2325,6 +2356,7 @@ _ha_switch_to_kea() {
 		[ "$init_enabled" -eq 1 ] && "$KEA_INIT" disable 2>/dev/null
 		[ "$mode" = "kea" ] && "$KEA_INIT" restart >/dev/null 2>&1
 		ha_restart_dnsmasq
+		rm -f "$HA_DNSMASQ_LEASES_COPY"
 		_ha_dhcp_backend_problem "Kea did not take over ($_ha_kea_wait_failed): dnsmasq is the DHCP server again"
 		return 1
 	fi

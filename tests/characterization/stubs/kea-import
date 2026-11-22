@@ -5,9 +5,11 @@
 # With --leases (dnsmasq's active leases into a running Kea): prints
 # $FAKE_KEA_LEASES and exits with $FAKE_KEA_LEASES_RC, by default 2 (an
 # unknown argument, as for luci-app-kea before 0.15.0); recorded in
-# /tmp/fake-kea-leases.log.
+# /tmp/fake-kea-leases.log, with the lines of a --leases-file.
 if [ "${1:-}" = "--leases" ]; then
 	echo "import-dnsmasq $*" >> /tmp/fake-kea-leases.log
+	# The file it was given, as it read it
+	[ "${2:-}" = "--leases-file" ] && sed 's/^/  read: /' "$3" >> /tmp/fake-kea-leases.log
 	[ -n "${FAKE_KEA_LEASES:-}" ] && cat "$FAKE_KEA_LEASES"
 	exit "${FAKE_KEA_LEASES_RC:-2}"
 fi
