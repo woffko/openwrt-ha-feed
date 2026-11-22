@@ -7,5 +7,14 @@
         "address": "",
         "priority": 100
     },
-    "peers": []
+    "peers": [],
+    "dhcp_interfaces": [
+        {
+            "interface": "lan",
+            "device": "",
+            "vip4": [
+                "192.168.50.254"
+            ]
+        }
+    ]
 }

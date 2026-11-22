@@ -366,6 +366,18 @@ The switch covers DHCPv4. On the way to Kea, in this order:
    also gives out DHCPv6 (Router Advertisements `server`, `dhcpv6` not
    `disabled`) stops the switch: with Kea, lease-sync no longer keeps those
    leases in step. Set `dhcpv6 'disabled'` first, or leave dnsmasq.
+   **When what is missing is in Kea's config** (no config, the device or a
+   subnet missing), and that config is still the sample of the Kea package
+   (or missing), luci-app-kea's
+   `/usr/libexec/luci-app-kea/setup-from-dnsmasq` (from 0.15.0) writes it
+   from dnsmasq's pools and the nodes of the cluster, which ha-cluster gives
+   it (`--cluster -`, the reply of the `nodes` call): the devices of the
+   cluster interfaces, a subnet with the pool, lease time and options of
+   each pool (routers and DNS the VIP when the pool names none), and Kea's
+   high availability in hot-standby between the nodes. What it could not
+   carry over is named in the log. Then Kea is checked again. A config of
+   the user's own is never set up: the refusal says so, and it is fixed in
+   luci-app-kea. A setup that fails stops the switch, nothing changed.
 2. **dnsmasq's static leases are imported into Kea**, with luci-app-kea's
    `/usr/libexec/luci-app-kea/import-dnsmasq` (from 0.11.0), else its rpcd
    method; without luci-app-kea there is no import, and a warning. Only the
@@ -385,12 +397,17 @@ The switch covers DHCPv4. On the way to Kea, in this order:
    changed in `/etc/config/kea` and Kea's init script is put back, dnsmasq
    stays the server, and the status says why (`dhcp_backend_problem`,
    `DEGRADED`). The switch is tried again at the next start or reload.
+5. **dnsmasq's active leases are handed to Kea**, with
+   `import-dnsmasq --leases` (luci-app-kea 0.15.0 and later), so that every
+   client keeps its address at its next renewal. When that fails there is
+   a warning only: Kea serves already, and gives a client its address again
+   while nobody else has it.
 
 dnsmasq is switched off before Kea starts: a few seconds without a DHCP
 server rather than two of them. On the way back, Kea off first (with
 `dnsmasq`), then the pools get their DHCPv4 back from `ha_cluster_dhcpv4`,
-and dnsmasq is restarted. Leases are not carried over either way: clients
-ask again; the static leases stay in `/etc/config/dhcp`.
+and dnsmasq is restarted. Kea's leases are not carried back to dnsmasq:
+clients ask again; the static leases stay in `/etc/config/dhcp`.
 
 The node remembers the server it runs in `/etc/ha-cluster/dhcp-backend`,
 kept across sysupgrade. A node without that file, after an upgrade from a
@@ -569,9 +586,22 @@ side:
 			"vrrp_only": false,
 			"kea_role": "standby"
 		}
+	],
+	"dhcp_interfaces": [
+		{
+			"interface": "lan",
+			"device": "br-lan",
+			"vip4": [ "192.168.50.1" ]
+		}
 	]
 }
 ```
+
+`dhcp_interfaces` lists the cluster interfaces a DHCP server serves (those
+of the enabled VIPs, the logical interface also when a VIP names its
+device), each with its device (empty when the network config does not
+give it) and the IPv4 addresses of its VIPs, without mask: what
+luci-app-kea's setup builds the subnets on.
 
 - `name` is made from the address a node is reached at by its peers, so
   every node gives every node the same name. `label` is the host name of

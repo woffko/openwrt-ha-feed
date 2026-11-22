@@ -298,7 +298,7 @@ rc=0
 ha-cluster|daemon.info|Reloading HA cluster configuration
 ha-cluster|daemon.info|Starting HA cluster
 ha-cluster|daemon.info|Switching the DHCP server of the cluster interfaces from dnsmasq to Kea (dhcp_backend 'kea')
-ha-cluster|daemon.err|DHCP server of the cluster interfaces: Kea cannot take over: /etc/kea/kea-dhcp4.conf has no subnet for the address of 'lan'
+ha-cluster|daemon.err|DHCP server of the cluster interfaces: Kea cannot take over: /etc/kea/kea-dhcp4.conf has no subnet for the address of 'lan' (luci-app-kea 0.15.0 or later sets Kea up from dnsmasq's pools by itself)
 ha-cluster|daemon.info|Applying HA cluster configuration
 ha-cluster|daemon.info|Taking over service management from standalone init scripts
 ha-cluster|daemon.info|Generating keepalived configuration for node: ha-char
@@ -422,7 +422,7 @@ lease-sync=1
 == /etc/ha-cluster/dhcp-backend
 dnsmasq
 == /var/run/ha-cluster/dhcp-backend-problem
-Kea cannot take over: /etc/kea/kea-dhcp4.conf has no subnet for the address of 'lan'
+Kea cannot take over: /etc/kea/kea-dhcp4.conf has no subnet for the address of 'lan' (luci-app-kea 0.15.0 or later sets Kea up from dnsmasq's pools by itself)
 == rc.d
 K91ha-cluster
 S25ha-cluster

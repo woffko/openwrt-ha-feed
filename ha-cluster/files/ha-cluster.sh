@@ -26,8 +26,12 @@ HA_SYS_NET_DIR="${HA_SYS_NET_DIR:-/sys/class/net}"
 # The index each device had when netifd last brought its interface up
 HA_KEA_DEVICE_DIR="${HA_CLUSTER_RUN_DIR}/kea-devices"
 KEA_INIT="${KEA_INIT:-/etc/init.d/kea}"
-# luci-app-kea's import of the static leases of dnsmasq into Kea
+# luci-app-kea's import of the static leases of dnsmasq into Kea (and, with
+# --leases, of its active leases into a running Kea)
 KEA_IMPORT_BIN="${KEA_IMPORT_BIN:-/usr/libexec/luci-app-kea/import-dnsmasq}"
+# luci-app-kea's setup of Kea's DHCPv4 config from dnsmasq's pools, which
+# writes only over the sample of the Kea package (0.15.0 and later)
+KEA_SETUP_BIN="${KEA_SETUP_BIN:-/usr/libexec/luci-app-kea/setup-from-dnsmasq}"
 # The DHCP server this node runs for the cluster interfaces, dnsmasq or kea,
 # kept across reboots and upgrades: what a switch starts from
 HA_DHCP_BACKEND_STATE="${HA_DHCP_BACKEND_STATE:-${HA_CLUSTER_ROOT}/etc/ha-cluster/dhcp-backend}"
@@ -1649,9 +1653,10 @@ ha_kea_status_get() {
 # The logical interfaces (network sections) it stands for, one per line:
 # itself when it is one, else those whose device it is. A VIP may name the
 # device (br-lan, bond0.87), as the routers' configs do, while the pools of
-# /etc/config/dhcp always name the logical interface.
+# /etc/config/dhcp always name the logical interface. A name that is
+# neither is taken as it is, as before.
 _ha_logical_ifaces_of() {
-	local name device
+	local name device found=0
 
 	if [ "$(uci -q get "network.$1")" = "interface" ]; then
 		printf '%s\n' "$1"
@@ -1659,8 +1664,11 @@ _ha_logical_ifaces_of() {
 	fi
 	for name in $(uci -q show network | sed -n 's/^network\.\([^.=]*\)=interface$/\1/p'); do
 		ha_resolve_device device "$name" || continue
-		[ "$device" = "$1" ] && printf '%s\n' "$name"
+		[ "$device" = "$1" ] || continue
+		printf '%s\n' "$name"
+		found=1
 	done
+	[ "$found" -eq 1 ] || printf '%s\n' "$1"
 }
 
 # Usage: _ha_cluster_dhcp_interfaces (ha-cluster config loaded)
@@ -1688,6 +1696,151 @@ _ha_cluster_dhcp_interfaces() {
 	for interface in $_ha_dhcp_ifaces; do
 		printf '%s\n' "$interface"
 	done
+}
+
+# Usage: _ha_vip4_of <logical interface> (ha-cluster config loaded)
+# The IPv4 addresses of the enabled VIPs on it, without mask, one per line
+_ha_vip4_for=""
+_ha_collect_vip4() {
+	local enabled interface address
+
+	config_get_bool enabled "$1" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+	config_get interface "$1" interface ""
+	config_get address "$1" address ""
+	[ -n "$interface" ] && [ -n "$address" ] || return 0
+	_ha_logical_ifaces_of "$interface" | grep -qx -F "$_ha_vip4_for" || return 0
+	printf '%s\n' "${address%%/*}"
+}
+_ha_vip4_of() {
+	_ha_vip4_for="$1"
+	config_foreach _ha_collect_vip4 vip
+}
+
+# Usage: _ha_nodes_collect_peer <peer section> (ha-cluster config loaded)
+# One line per peer with an address: address|own address|label|vrrp_only
+_ha_nodes_peers=""
+_ha_nodes_collect_peer() {
+	local section="$1"
+	local address source label vrrp_only
+
+	config_get address "$section" address ""
+	[ -n "$address" ] || return 0
+	config_get source "$section" source_address ""
+	config_get label "$section" name "$section"
+	config_get_bool vrrp_only "$section" vrrp_only 0
+
+	_ha_nodes_peers="${_ha_nodes_peers}${address}|$(ha_own_address_for "$address" "$source")|${label}|${vrrp_only}
+"
+}
+
+# Usage: _ha_nodes_role <node id>
+# The part suggested for the node in Kea's hot-standby: the first id in
+# sort order is the primary. Every node sorts the same ids ($_ha_nodes_sorted)
+# and so finds the same parts, without knowing the others' VRRP priority.
+_ha_nodes_sorted=""
+_ha_nodes_role() {
+	local position
+
+	[ -n "$1" ] || return 0
+	position=$(printf '%s\n' "$_ha_nodes_sorted" | grep -n -x -F "$1" | head -n 1 | cut -d: -f1)
+	case "$position" in
+		1) echo "primary" ;;
+		2) echo "standby" ;;
+		'') ;;
+		*) echo "backup" ;;
+	esac
+}
+
+# Usage: ha_nodes_json
+# The nodes of the cluster as a DHCP server pair needs them, as JSON: a name
+# for each that is the same on every node, the address its partner reaches
+# it at, and who would be Kea's primary; and the cluster interfaces a DHCP
+# server serves, each with its device and the IPv4 addresses of its VIPs.
+# For a tool that sets up Kea (luci-app-kea, through the "nodes" call of
+# the status, and given at a switch to Kea); nothing here is written
+# anywhere. Loads the ha-cluster config, in a subshell.
+ha_nodes_json() {
+	(
+		local node_priority dhcp_backend own_address own_id role line
+		local peer_address own_for_peer peer_label peer_vrrp_only peer_id
+		local interface device address oldifs
+
+		. "${HA_CLUSTER_ROOT}/usr/share/libubox/jshn.sh"
+		config_load ha-cluster
+		config_get node_priority config node_priority "100"
+		dhcp_backend=$(ha_dhcp_backend)
+
+		_ha_nodes_peers=""
+		config_foreach _ha_nodes_collect_peer peer
+
+		# This node's address towards the first peer it syncs with, else
+		# towards the first peer
+		own_address=$(printf '%s' "$_ha_nodes_peers" | awk -F'|' '$4 == 0 && $2 != "" { print $2; exit }')
+		[ -n "$own_address" ] ||
+			own_address=$(printf '%s' "$_ha_nodes_peers" | awk -F'|' '$2 != "" { print $2; exit }')
+
+		own_id=""
+		_ha_nodes_sorted=""
+		if [ -n "$own_address" ]; then
+			own_id=$(ha_node_id "$own_address")
+			_ha_nodes_sorted=$( {
+				echo "$own_id"
+				printf '%s' "$_ha_nodes_peers" | awk -F'|' '$4 == 0 { print $1 }' |
+					while read -r peer_address; do ha_node_id "$peer_address"; done
+			} | LC_ALL=C sort -u)
+		fi
+
+		json_init
+		json_add_string dhcp_backend "$dhcp_backend"
+		json_add_object node
+		json_add_string name "$own_id"
+		json_add_string label "$(cat /proc/sys/kernel/hostname)"
+		json_add_string address "$own_address"
+		json_add_int priority "$node_priority"
+		role=$(_ha_nodes_role "$own_id")
+		[ -n "$role" ] && json_add_string kea_role "$role"
+		json_close_object
+
+		json_add_array peers
+		oldifs="$IFS"
+		IFS='
+'
+		for line in $_ha_nodes_peers; do
+			IFS='|' read -r peer_address own_for_peer peer_label peer_vrrp_only <<EOF
+$line
+EOF
+			peer_id=$(ha_node_id "$peer_address")
+			json_add_object
+			json_add_string name "$peer_id"
+			json_add_string label "$peer_label"
+			json_add_string address "$peer_address"
+			json_add_boolean vrrp_only "$peer_vrrp_only"
+			# A VRRP-only peer is not among the sorted names
+			role=$(_ha_nodes_role "$peer_id")
+			[ -n "$role" ] && json_add_string kea_role "$role"
+			json_close_object
+		done
+		IFS="$oldifs"
+		json_close_array
+
+		json_add_array dhcp_interfaces
+		for interface in $(_ha_cluster_dhcp_interfaces); do
+			# Empty when the network config does not tell it
+			ha_resolve_device device "$interface" || device=""
+			json_add_object
+			json_add_string interface "$interface"
+			json_add_string device "$device"
+			json_add_array vip4
+			for address in $(_ha_vip4_of "$interface"); do
+				json_add_string "" "$address"
+			done
+			json_close_array
+			json_close_object
+		done
+		json_close_array
+		json_dump
+	)
 }
 
 # Usage: _ha_dhcp_read <uci arguments>
@@ -1877,18 +2030,22 @@ ha_dhcp_backend_wanted() {
 
 # Usage: _ha_kea_usable (ha-cluster config loaded)
 # Kea can take DHCPv4 over on every cluster interface where dnsmasq gives
-# it out. Leaves why not in _ha_kea_unusable_reason and fails.
+# it out. Leaves why not in _ha_kea_unusable_reason and fails;
+# _ha_kea_unusable_conf is 1 when what is missing is in Kea's config.
 _ha_kea_unusable_reason=""
+_ha_kea_unusable_conf=0
 _ha_kea_usable() {
 	local conf="$KEA_CONF_DIR/kea-dhcp4.conf" interface pool device
 
 	_ha_kea_unusable_reason=""
+	_ha_kea_unusable_conf=0
 	if [ ! -x "$KEA_DHCP4_BIN" ]; then
 		_ha_kea_unusable_reason="kea-dhcp4 is not installed"
 		return 1
 	fi
 	if [ ! -r "$conf" ]; then
 		_ha_kea_unusable_reason="$conf is missing"
+		_ha_kea_unusable_conf=1
 		return 1
 	fi
 	for interface in $(_ha_cluster_dhcp_interfaces); do
@@ -1902,14 +2059,100 @@ _ha_kea_usable() {
 			ha_resolve_device device "$interface" || device="$interface"
 			if ! ha_kea_conf_names_device dhcp4 "$device"; then
 				_ha_kea_unusable_reason="$conf does not name $device, the device of '$interface', in its interfaces"
+				_ha_kea_unusable_conf=1
 				return 1
 			fi
 			if ! _ha_kea4_has_subnet_for "$interface"; then
 				_ha_kea_unusable_reason="$conf has no subnet for the address of '$interface'"
+				_ha_kea_unusable_conf=1
 				return 1
 			fi
 		done
 	done
+	return 0
+}
+
+# Usage: _ha_kea_setup (ha-cluster config loaded)
+# Has luci-app-kea write Kea's DHCPv4 config from dnsmasq's pools and the
+# nodes of the cluster (ha_nodes_json) while that config is still the sample
+# of the Kea package, or missing: the subnets, pools and options of the
+# cluster interfaces, and Kea's high availability between the nodes. A
+# config of the user's own is never touched ($_ha_kea_setup_note tells why
+# it was not set up; $_ha_kea_setup_written is 1 when it was). Fails only
+# when the setup failed, having written nothing.
+_ha_kea_setup_note=""
+_ha_kea_setup_written=0
+_ha_kea_setup() {
+	local out rc=0 reason count i subnet device what why
+
+	_ha_kea_setup_note=""
+	_ha_kea_setup_written=0
+	if [ ! -x "$KEA_SETUP_BIN" ]; then
+		_ha_kea_setup_note="luci-app-kea 0.15.0 or later sets Kea up from dnsmasq's pools by itself"
+		return 0
+	fi
+	out="$(ha_nodes_json | "$KEA_SETUP_BIN" --cluster - 2>/dev/null)" || rc=$?
+	reason="$(printf '%s' "$out" | jsonfilter -e '@.reason' 2>/dev/null)"
+	case "$rc" in
+		0) ;;
+		3)
+			_ha_kea_setup_note="it is not the sample of the Kea package, so it is not set up from dnsmasq's pools: set it up in luci-app-kea"
+			return 0
+			;;
+		4)
+			_ha_kea_setup_note="luci-app-kea found nothing to set up from dnsmasq's pools"
+			return 0
+			;;
+		*)
+			ha_log_error "luci-app-kea could not set Kea up from dnsmasq's pools: ${reason:-exit code $rc}"
+			return 1
+			;;
+	esac
+
+	_ha_kea_setup_written=1
+	count="$(printf '%s' "$out" | jsonfilter -e '@.subnets[*].subnet' 2>/dev/null | wc -l)"
+	subnet=""
+	i=0
+	while [ "$i" -lt "$count" ] && [ "$i" -lt 20 ]; do
+		device="$(printf '%s' "$out" | jsonfilter -e "@.subnets[$i].device" 2>/dev/null)"
+		subnet="${subnet:+$subnet, }$(printf '%s' "$out" | jsonfilter -e "@.subnets[$i].subnet" 2>/dev/null)${device:+ on $device}"
+		i=$((i + 1))
+	done
+	ha_log_info "Kea's DHCPv4 config set up from dnsmasq's pools by luci-app-kea${subnet:+: $subnet}$([ -n "$(printf '%s' "$out" | jsonfilter -e '@.ha.this' 2>/dev/null)" ] && echo ", with high availability between the nodes")"
+
+	# Each field read on its own: they come from /etc/config/dhcp, which
+	# another node may have sent
+	count="$(printf '%s' "$out" | jsonfilter -e '@.left[*].what' 2>/dev/null | wc -l)"
+	i=0
+	while [ "$i" -lt "$count" ] && [ "$i" -lt 50 ]; do
+		what="$(printf '%s' "$out" | jsonfilter -e "@.left[$i].what" 2>/dev/null)"
+		why="$(printf '%s' "$out" | jsonfilter -e "@.left[$i].why" 2>/dev/null)"
+		ha_log_warning "Not set up in Kea from dnsmasq: $what${why:+: $why}"
+		i=$((i + 1))
+	done
+	return 0
+}
+
+# Usage: _ha_kea_leases
+# Has luci-app-kea hand dnsmasq's active leases to the running Kea, so that
+# every client keeps its address at its next renewal. Only warned about when
+# it fails: Kea serves already, and gives a client its address again when
+# nobody else has it. A luci-app-kea before 0.15.0 does not know --leases.
+_ha_kea_leases() {
+	local out rc=0 reason
+
+	[ -x "$KEA_IMPORT_BIN" ] || return 0
+	out="$("$KEA_IMPORT_BIN" --leases 2>/dev/null)" || rc=$?
+	if [ "$rc" -eq 2 ]; then
+		ha_log_debug "dnsmasq's leases not handed to Kea: this luci-app-kea cannot (0.15.0 and later can)"
+		return 0
+	fi
+	if [ "$rc" -ne 0 ] || [ "$(printf '%s' "$out" | jsonfilter -e '@.result' 2>/dev/null)" != "true" ]; then
+		reason="$(printf '%s' "$out" | jsonfilter -e '@.reason' 2>/dev/null)"
+		ha_log_warning "dnsmasq's leases were not handed to Kea (${reason:-exit code $rc}): a client gets its address from Kea again at its renewal while nobody else has it"
+		return 0
+	fi
+	ha_log_info "dnsmasq's leases handed to Kea: $(printf '%s' "$out" | jsonfilter -e '@.added' 2>/dev/null || echo 0), $(printf '%s' "$out" | jsonfilter -e '@.skipped[*].address' 2>/dev/null | wc -l) skipped"
 	return 0
 }
 
@@ -2031,9 +2274,20 @@ _ha_kea4_serves_cluster() {
 _ha_switch_to_kea() {
 	local mode="$1" pools flag_set=0 init_enabled=0
 
+	# What Kea's config lacks is set up from dnsmasq's pools when that config
+	# is still the package's sample; a refusal for anything else comes
+	# before anything is changed
 	if ! _ha_kea_usable; then
-		_ha_dhcp_backend_problem "Kea cannot take over: $_ha_kea_unusable_reason"
-		return 1
+		_ha_kea_setup_note=""
+		_ha_kea_setup_written=0
+		if [ "$_ha_kea_unusable_conf" -eq 1 ] && ! _ha_kea_setup; then
+			_ha_dhcp_backend_problem "Kea could not be set up from dnsmasq's pools (see the system log): dnsmasq stays the DHCP server"
+			return 1
+		fi
+		if [ "$_ha_kea_setup_written" -eq 0 ] || ! _ha_kea_usable; then
+			_ha_dhcp_backend_problem "Kea cannot take over: $_ha_kea_unusable_reason${_ha_kea_setup_note:+ ($_ha_kea_setup_note)}"
+			return 1
+		fi
 	fi
 	if ! _ha_kea_import; then
 		_ha_dhcp_backend_problem "the import of dnsmasq's static leases into Kea failed (see the system log): dnsmasq stays the DHCP server"
@@ -2076,6 +2330,7 @@ _ha_switch_to_kea() {
 	fi
 
 	ha_log_info "Kea is the DHCP server of the cluster interfaces${pools:+: dnsmasq's DHCPv4 switched off in $(printf "%s" "$pools" | tr "\n" " " | sed "s/^ *//; s/ *$//")}"
+	_ha_kea_leases
 	return 0
 }
 
