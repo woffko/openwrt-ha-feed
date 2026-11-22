@@ -180,6 +180,10 @@ upgrading a node.
   the IPv4 addresses of their VIPs (`dhcp_interfaces`).
 - A VIP whose `interface` is neither a logical interface nor the device of
   one is taken as it is again, as before r17.
+- The README says what IPv6 does with Kea ("IPv6 with Kea: Router
+  Advertisements and DHCPv6"): the switch moves DHCPv4 only, the Router
+  Advertisements stay with dnsmasq, why Kea sends none, and what DHCPv6
+  from Kea would need in a cluster.
 
 ### luci-app-ha-cluster
 - The `nodes` call answers with ha-cluster's `ha_nodes_json`, which adds

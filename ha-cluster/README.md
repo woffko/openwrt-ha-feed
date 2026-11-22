@@ -365,7 +365,8 @@ The switch covers DHCPv4. On the way to Kea, in this order:
    searched as text and its subnets are not checked. A pool where dnsmasq
    also gives out DHCPv6 (Router Advertisements `server`, `dhcpv6` not
    `disabled`) stops the switch: with Kea, lease-sync no longer keeps those
-   leases in step. Set `dhcpv6 'disabled'` first, or leave dnsmasq.
+   leases in step. Set `dhcpv6 'disabled'` first, or leave dnsmasq (see
+   [IPv6 with Kea](#ipv6-with-kea-router-advertisements-and-dhcpv6)).
    **When what is missing is in Kea's config** (no config, the device or a
    subnet missing), and that config is still the sample of the Kea package
    (or missing), luci-app-kea's
@@ -437,6 +438,72 @@ says so. `/etc/config/ha-cluster` and Kea's config are not synced: set
 VRRP, the VIPs, file sync and the guard for Router Advertisements work as
 with dnsmasq. Kea's primary need not be the VRRP MASTER: the clients reach
 Kea by broadcast and multicast on the LAN, not through the VIP.
+
+### IPv6 with Kea: Router Advertisements and DHCPv6
+
+The switch moves DHCPv4 only. IPv6 on the cluster interfaces stays with
+dnsmasq whichever server gives out the IPv4 leases. dnsmasq keeps sending
+the Router Advertisements, with the prefix for SLAAC, the default route
+and the DNS server (RDNSS). A client's SLAAC address does not change at a
+switch, either way.
+
+**Kea sends no Router Advertisements, and is not meant to.** In IPv6 the
+Router Advertisement belongs to Neighbor Discovery (RFC 4861). The router
+of each link sends it, and it is the only way a client learns its default
+route: DHCPv6 (RFC 8415) has no option for a router, unlike option 3 of
+DHCPv4. A DHCPv6 server is a separate service that may serve many links
+from elsewhere, through relays, and ISC Kea is such a server, as ISC dhcpd
+was before it. So a Kea DHCPv6 server always needs a router on the link
+that sends Router Advertisements with the right flags:
+
+| Flag | Tells the client |
+|---|---|
+| M (managed) | ask DHCPv6 for an address |
+| O (other configuration) | ask DHCPv6 for options only (DNS, domain), not for an address |
+| A (autonomous, per prefix) | build an address by SLAAC from this prefix |
+
+Networks pair Kea with a separate source of Router Advertisements: radvd
+on a Linux server; the router itself on a dedicated router (FRR, BIRD, a
+vendor's "managed-config flag"); on OpenWrt odhcpd or dnsmasq.
+dnsmasq sets the M flag only for a DHCPv6 range it serves itself, and the
+O flag only for an `ra-stateless` one (`src/radv.c`). With
+`dhcpv6 'disabled'` its advertisements carry neither, and dnsmasq cannot
+serve DHCPv6 next to `kea-dhcp6` either: both want UDP port 547 on the
+interface.
+
+**What this means for a cluster:**
+
+- **SLAAC only** (`ra 'server'` and `dhcpv6 'disabled'` in the pools, as in
+  most home and small office networks): nothing to do. A switch to Kea and
+  back leaves IPv6 as it was. Many clients use SLAAC only: Android has no
+  DHCPv6 client at all, and the DNS server comes in the advertisement.
+- **dnsmasq also gives out DHCPv6 addresses** (`ra 'server'` and `dhcpv6`
+  `server` or not set, which dnsmasq's init script takes as SLAAC and
+  DHCPv6): the switch is refused, as step 1 above says. With Kea,
+  lease-sync does not run, so dnsmasq's DHCPv6 leases would no longer be
+  kept in step between the nodes, and a node taking over would not know
+  them. ha-cluster does not move DHCPv6 to Kea, and does not switch it off
+  for you: set `dhcpv6 'disabled'` in the pools first, or stay on dnsmasq.
+  Clients keep IPv6 by SLAAC once DHCPv6 is off; a client's DHCPv6
+  address stays until its lease runs out.
+- **DHCPv6 from Kea** is not set up by ha-cluster or by luci-app-kea's
+  setup, and has not been tried in a cluster here. It needs, on every
+  cluster interface:
+  - a source of Router Advertisements that sets the M flag (and O) without
+    serving DHCPv6 itself, sent by the VRRP MASTER only and from the
+    link-local VIP: the guard drops Router Advertisements on a BACKUP, and
+    on an interface with a link-local VIP those with any other source,
+    whatever daemon sends them (nftables, output hook). dnsmasq
+    cannot do this today (see above). odhcpd can (`ra 'server'`,
+    `dhcpv6 'disabled'`, `ra_flags 'managed-config other-config'`), but it
+    reads the same pool options as dnsmasq, which then must not send its
+    own advertisements on that link;
+  - `kea-dhcp6` with a `subnet6` for the prefix of the interface, and a
+    high-availability relationship of its own (the hook is loaded per
+    daemon: its own peers' URLs, for example port 8002, which the rule
+    `HA-Cluster-Kea-HA` opens like those of `kea-dhcp4`). Kea does not
+    follow the system's prefixes: a prefix delegated by the provider may
+    change, and the `subnet6` has to change with it.
 
 ### What ha-cluster does for Kea
 
