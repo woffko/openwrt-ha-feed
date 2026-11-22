@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r16, `luci-app-ha-cluster` 2.0.0-r12,
+packages are `ha-cluster` 2.0.0-r17, `luci-app-ha-cluster` 2.0.0-r12,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -153,6 +153,12 @@ upgrading a node.
   service, and a stale IPv6 guard handler shows in the status
   (CA-HACLUSTER-05); the entries an import leaves are logged without word
   splitting or eval (CA-HACLUSTER-04).
+- The switch of the DHCP server finds the pools of a VIP whose `interface`
+  names a device (`br-lan`, `bond0.87`) rather than the logical interface:
+  through the network config, the logical interfaces whose device it is.
+  Before, such a pool was left giving out DHCPv4 beside Kea, the status
+  did not see it, and Kea could not bind its fallback socket there (found
+  on the bench with the routers' config, r17).
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's

@@ -1645,20 +1645,40 @@ ha_kea_status_get() {
 # must run the same server: a node changes the pools when it switches
 # itself, never because it finds what another node did.
 
+# Usage: _ha_logical_ifaces_of <interface option of a VIP>
+# The logical interfaces (network sections) it stands for, one per line:
+# itself when it is one, else those whose device it is. A VIP may name the
+# device (br-lan, bond0.87), as the routers' configs do, while the pools of
+# /etc/config/dhcp always name the logical interface.
+_ha_logical_ifaces_of() {
+	local name device
+
+	if [ "$(uci -q get "network.$1")" = "interface" ]; then
+		printf '%s\n' "$1"
+		return 0
+	fi
+	for name in $(uci -q show network | sed -n 's/^network\.\([^.=]*\)=interface$/\1/p'); do
+		ha_resolve_device device "$name" || continue
+		[ "$device" = "$1" ] && printf '%s\n' "$name"
+	done
+}
+
 # Usage: _ha_cluster_dhcp_interfaces (ha-cluster config loaded)
 # The logical interfaces of the enabled VIPs, one per line, each once
 _ha_dhcp_ifaces=""
 _ha_collect_dhcp_iface() {
-	local enabled interface
+	local enabled interface logical
 
 	config_get_bool enabled "$1" enabled 1
 	[ "$enabled" -eq 1 ] || return 0
 	config_get interface "$1" interface ""
 	[ -n "$interface" ] || return 0
-	case " $_ha_dhcp_ifaces " in
-		*" $interface "*) return 0 ;;
-	esac
-	_ha_dhcp_ifaces="$_ha_dhcp_ifaces $interface"
+	for logical in $(_ha_logical_ifaces_of "$interface"); do
+		case " $_ha_dhcp_ifaces " in
+			*" $logical "*) continue ;;
+		esac
+		_ha_dhcp_ifaces="$_ha_dhcp_ifaces $logical"
+	done
 }
 _ha_cluster_dhcp_interfaces() {
 	local interface
