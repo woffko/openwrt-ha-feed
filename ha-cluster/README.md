@@ -372,9 +372,10 @@ The switch covers DHCPv4. On the way to Kea, in this order:
    DHCP page of LuCI shows it, with the value the pool had in
    `ha_cluster_dhcpv4` (`unset` when it had none). dnsmasq is restarted;
    DNS, the Router Advertisements and DHCPv6 stay as they were.
-4. **Kea is started** (or restarted, or reloaded after the import changed
-   its files), and given up to ten seconds to run with its sockets ready or
-   retrying. If it does not, the pools get their DHCPv4 back, what was
+4. **Kea is restarted** (started, when it does not run), and given up to
+   ten seconds to run with its sockets ready or retrying. A Kea started
+   before, from luci-app-kea, could not bind its fallback socket while
+   dnsmasq gave out DHCPv4 on the interface; the restart opens it. If it does not, the pools get their DHCPv4 back, what was
    changed in `/etc/config/kea` and Kea's init script is put back, dnsmasq
    stays the server, and the status says why (`dhcp_backend_problem`,
    `DEGRADED`). The switch is tried again at the next start or reload.

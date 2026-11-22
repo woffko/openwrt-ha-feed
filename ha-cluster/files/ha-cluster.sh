@@ -1854,14 +1854,11 @@ _ha_kea_usable() {
 # Runs luci-app-kea's import of dnsmasq's static leases (the host sections
 # of /etc/config/dhcp) into Kea's DHCP configs: the entries Kea can take as
 # they are, not those it would change or take only in part. Keeps what it
-# printed in $HA_KEA_IMPORT_RESULT, logs what it left, and sets
-# _ha_kea_import_changed to 1 when it wrote Kea's files. Fails when the
+# printed in $HA_KEA_IMPORT_RESULT and logs what it left. Fails when the
 # import failed; without luci-app-kea there is no import, with a warning.
-_ha_kea_import_changed=0
 _ha_kea_import() {
 	local out rc=0 result left i key status name identifier address notes
 
-	_ha_kea_import_changed=0
 	rm -f "$HA_KEA_IMPORT_RESULT"
 	if [ -x "$KEA_IMPORT_BIN" ]; then
 		out="$("$KEA_IMPORT_BIN" 2>/dev/null)" || rc=$?
@@ -1879,7 +1876,6 @@ _ha_kea_import() {
 		ha_log_error "The import of dnsmasq's static leases into Kea failed: $(printf '%s' "$out" | jsonfilter -e '@.error' 2>/dev/null || echo "exit code $rc")"
 		return 1
 	fi
-	[ "$(printf '%s' "$out" | jsonfilter -e '@.changed' 2>/dev/null)" = "true" ] && _ha_kea_import_changed=1
 	ha_log_info "dnsmasq's static leases imported into Kea: $(printf '%s' "$out" | jsonfilter -e '@.imported' 2>/dev/null || echo 0) new reservations"
 
 	left="$(printf '%s' "$out" | jsonfilter -e '@.left[*].key' 2>/dev/null | wc -l)"
@@ -1963,12 +1959,12 @@ _ha_switch_to_kea() {
 			"$KEA_INIT" enable 2>/dev/null
 			init_enabled=1
 		fi
-		"$KEA_INIT" restart >/dev/null 2>&1
-	elif ! pgrep kea-dhcp4 >/dev/null 2>&1; then
-		"$KEA_INIT" start >/dev/null 2>&1
-	elif [ "$_ha_kea_import_changed" -eq 1 ]; then
-		"$KEA_INIT" reload >/dev/null 2>&1
 	fi
+	# Started anew in any case (a start when it does not run). A Kea that
+	# ran before dnsmasq let the DHCP port go, as when it was started from
+	# luci-app-kea, could not bind its fallback socket on the interface and
+	# does not listen there; the import may also have changed its files.
+	"$KEA_INIT" restart >/dev/null 2>&1
 
 	if ! _ha_kea_wait_dhcp4; then
 		[ -n "$pools" ] && _ha_dhcp_pools_on $pools >/dev/null

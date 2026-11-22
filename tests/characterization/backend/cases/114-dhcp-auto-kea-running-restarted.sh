@@ -1,6 +1,6 @@
 # Automatic, Kea set up and already running when the switch is made (it was
-# started from luci-app-kea): the import changed Kea's files, so Kea is
-# reloaded, not started
+# started from luci-app-kea, while dnsmasq still held the DHCP port of the
+# interface): Kea is restarted once dnsmasq has let the port go
 . "$CHAR/backend/kea-switch.inc"
 uci set kea.dhcp4.disabled=0
 export FAKE_KEA_ENABLED=1

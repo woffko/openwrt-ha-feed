@@ -229,7 +229,7 @@ dhcp.lan.dhcpv4='disabled'
 == kea.dhcp4.disabled=0
 == kea init calls
 enabled
-start
+restart
 == kea init enabled: 1
 == import calls: 1
 == running: kea-dhcp4 
@@ -393,7 +393,7 @@ lease-sync=1
 == kea.dhcp4.disabled=1
 == kea init calls
 enabled
-start
+restart
 restart
 == kea init enabled: 1
 == import calls: 1

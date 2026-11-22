@@ -13,8 +13,10 @@ as well as on a cluster.
 ## How it works
 
 - Kea's run script hook (`libdhcp_run_script.so`, package
-  `kea-hook-run-script`) calls `/usr/lib/kea-dnsmasq-hosts/kea-hook` for
-  each lease event. The script only notes that leases changed.
+  `kea-hook-run-script`) calls `/usr/share/kea/scripts/kea-dnsmasq-hosts`
+  for each lease event. The script only notes that leases changed. Kea 3
+  takes the scripts of this hook from `/usr/share/kea/scripts` only, and
+  refuses its config otherwise.
 - The service (`/etc/init.d/kea-dnsmasq-hosts`, `/usr/sbin/kea-dnsmasq-hosts
   run`) rebuilds the hosts file then, at most every five seconds, and every
   `interval` seconds (60) without an event. It reads the lease files of the
@@ -46,7 +48,7 @@ In the config of each Kea DHCP daemon whose clients are to resolve, under
 {
 	"library": "/usr/lib/kea/hooks/libdhcp_run_script.so",
 	"parameters": {
-		"name": "/usr/lib/kea-dnsmasq-hosts/kea-hook",
+		"name": "/usr/share/kea/scripts/kea-dnsmasq-hosts",
 		"sync": false
 	}
 }
@@ -71,7 +73,7 @@ is missing: remove the entry before removing either package.
 /etc/config/kea-dnsmasq-hosts          configuration
 /etc/init.d/kea-dnsmasq-hosts          procd init script (START=99)
 /usr/sbin/kea-dnsmasq-hosts            run | rebuild | clear
-/usr/lib/kea-dnsmasq-hosts/kea-hook    the script for Kea's run script hook
+/usr/share/kea/scripts/kea-dnsmasq-hosts  the script for Kea's run script hook
 /tmp/hosts/kea-leases                  the hosts file dnsmasq reads
 ```
 
