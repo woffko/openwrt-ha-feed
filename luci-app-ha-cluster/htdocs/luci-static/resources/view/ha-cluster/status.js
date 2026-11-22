@@ -223,6 +223,25 @@ return view.extend({
 					.format(earlierModel.join(', ')))
 		] : [];
 
+		// The DHCP server of the cluster interfaces: why the one asked for is
+		// not in use, and the static leases of dnsmasq not taken into Kea
+		var dhcpMode = status.dhcp_backend_mode || 'auto';
+		var dhcpServer = (status.dhcp_backend === 'kea') ? 'Kea' : 'dnsmasq';
+		if (dhcpMode === 'auto')
+			dhcpServer = _('%s (automatic)').format(dhcpServer);
+		if (status.dhcp_backend_problem)
+			earlierWarning.push(E('div', { 'class': 'alert-message warning' },
+				_('DHCP server of the cluster interfaces: %s').format(status.dhcp_backend_problem)));
+		var keaImport = status.kea_import || {};
+		if (keaImport.left > 0)
+			earlierWarning.push(E('div', { 'class': 'alert-message warning' }, [
+				E('p', {}, _('%d static leases of dnsmasq are not in Kea: open the import from dnsmasq in the Kea pages to take them over.').format(keaImport.left)),
+				E('ul', {}, (keaImport.entries || []).map(function(entry) {
+					return E('li', {}, [ entry.name || '-', ' ', entry.identifier || '', ' ', entry.address || '',
+						' (', entry.status || '', ')' ].join(''));
+				}))
+			]));
+
 		return earlierWarning.concat([
 			E('h3', {}, _('Cluster Status')),
 
@@ -243,6 +262,10 @@ return view.extend({
 							E('td', { 'class': 'td left' }, [
 								E('span', { 'class': roleClass }, nodeRole)
 							])
+						]),
+						E('tr', { 'class': 'tr' }, [
+							E('td', { 'class': 'td left' }, _('DHCP Server')),
+							E('td', { 'class': 'td left' }, dhcpServer)
 						])
 					].concat(instanceNames.length > 1 ? instanceNames.map(function(name) {
 						var instRole = instances[name];

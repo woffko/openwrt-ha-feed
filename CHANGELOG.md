@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r13, `luci-app-ha-cluster` 2.0.0-r10,
+packages are `ha-cluster` 2.0.0-r14, `luci-app-ha-cluster` 2.0.0-r11,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -102,6 +102,31 @@ upgrading a node.
   no file and no lease sync and the status `HEALTHY`. Until the config is
   migrated the status is `DEGRADED` and lists what it found in
   `earlier_model`.
+- `dhcp_backend` switches the DHCPv4 server of the cluster interfaces
+  between dnsmasq and Kea, and has a third value, `auto`, the new default:
+  Kea once its init script starts kea-dhcp4 and kea-dhcp4 listens on a
+  cluster interface, dnsmasq otherwise. On the way to Kea the static leases
+  of dnsmasq are imported into Kea first (luci-app-kea 0.11.0), the entries
+  left are named in the log and the status, dnsmasq's DHCPv4 is switched off
+  in the pools of the cluster interfaces (`dhcpv4 'disabled'`, the old value
+  kept in `ha_cluster_dhcpv4`), and Kea is started; if it does not run and
+  listen within ten seconds everything is put back and the status says
+  why. With `kea` and `dnsmasq` ha-cluster also turns kea-dhcp4 on or off in
+  `/etc/config/kea`. A switch is refused, before anything changes, when Kea
+  does not listen on a cluster interface, has no subnet for it, or dnsmasq
+  gives out DHCPv6 there. The node keeps the server it runs in
+  `/etc/ha-cluster/dhcp-backend`; a node that never switched runs Kea only
+  with `dhcp_backend 'kea'`, as before. luci-app-kea's `kea.service` event
+  makes a running cluster check its server (`/etc/init.d/ha-cluster
+  kea_changed`). Before, `kea` only told ha-cluster that Kea was the server,
+  and the pools and Kea were the user's to switch. The status gives
+  `dhcp_backend` (the server the node runs), `dhcp_backend_mode`,
+  `dhcp_backend_problem` and `kea_import`, and is `DEGRADED` when the pools
+  say otherwise than the node's server (another node switched alone, or
+  two servers on a cluster interface).
+- Whether a Kea DHCP daemon listens on a device is read from its
+  `interfaces-config` when the config is plain JSON; a device named only in
+  a subnet no longer counts.
 
 ### luci-app-ha-cluster
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
@@ -121,6 +146,9 @@ upgrading a node.
   validation, and the cluster did not start.
 - The Status page says when `/etc/config/ha-cluster` is still in the form
   of the releases before 2.0 (`earlier_model` of the status).
+- "DHCP Server" on the General page offers Automatic, the default; the
+  Status page shows the server the node runs, why a switch was not made,
+  and the static leases of dnsmasq the import left for luci-app-kea.
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a

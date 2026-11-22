@@ -139,6 +139,7 @@ end
 rc=0
 == service_triggers
 reload_trigger [ha-cluster]
+raw_trigger [kea.service] [1000] [/etc/init.d/ha-cluster] [kea_changed]
 == log
 ha-cluster|daemon.info|Starting HA cluster
 ha-cluster|daemon.info|Applying HA cluster configuration
@@ -255,6 +256,7 @@ ha-cluster.conf
 # Call dhcp-script on lease renewals so lease-sync can track expiry changes
 script-on-renewal
 == ls /etc/ha-cluster
+dhcp-backend
 service_states
 == /etc/ha-cluster/service_states
 keepalived=1

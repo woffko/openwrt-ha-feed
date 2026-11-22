@@ -1,0 +1,47 @@
+== status rc=0
+{
+    "role": "MASTER",
+    "instances": {
+        "main": "MASTER",
+        "main_v6": "MASTER"
+    },
+    "peers": [
+        {
+            "name": "node2",
+            "address": "172.30.0.11",
+            "online": true,
+            "vrrp_only": false,
+            "last_seen": "Just now"
+        }
+    ],
+    "state": "DEGRADED",
+    "dhcp_backend": "dnsmasq",
+    "dhcp_backend_mode": "auto",
+    "dhcp_backend_problem": "dnsmasq's DHCPv4 is switched off for Kea in dhcp.lan while this node runs dnsmasq: another node switched to Kea; set the same DHCP server on every node",
+    "services": {
+        "keepalived": {
+            "required": true,
+            "running": true,
+            "pid": 99999,
+            "uptime": 0
+        },
+        "owsync": {
+            "required": true,
+            "wanted": true,
+            "running": true,
+            "pid": 99999,
+            "uptime": 0
+        },
+        "lease-sync": {
+            "required": true,
+            "wanted": true,
+            "running": true,
+            "pid": 99999,
+            "uptime": 0
+        }
+    },
+    "sync": {
+        "config_last_sync": 0,
+        "lease_last_sync": 1767225600
+    }
+}

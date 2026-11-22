@@ -1,0 +1,87 @@
+== status rc=0
+{
+    "role": "MASTER",
+    "instances": {
+        "main": "MASTER",
+        "main_v6": "MASTER"
+    },
+    "peers": [
+        {
+            "name": "node2",
+            "address": "172.30.0.11",
+            "online": true,
+            "vrrp_only": false,
+            "last_seen": "Just now"
+        }
+    ],
+    "state": "HEALTHY",
+    "dhcp_backend": "kea",
+    "dhcp_backend_mode": "auto",
+    "kea_import": {
+        "left": 2,
+        "entries": [
+            {
+                "name": "nas",
+                "identifier": "02:00:00:00:00:0b",
+                "address": "192.168.50.20",
+                "status": "review"
+            },
+            {
+                "name": "tv",
+                "identifier": "",
+                "address": "192.168.50.30",
+                "status": "blocked"
+            }
+        ]
+    },
+    "services": {
+        "keepalived": {
+            "required": true,
+            "running": true,
+            "pid": 99999,
+            "uptime": 0
+        },
+        "owsync": {
+            "required": true,
+            "wanted": true,
+            "running": true,
+            "pid": 99999,
+            "uptime": 0
+        },
+        "lease-sync": {
+            "required": false,
+            "wanted": false,
+            "running": true,
+            "pid": 99999,
+            "uptime": 0
+        },
+        "kea-dhcp4": {
+            "required": false,
+            "enabled": true,
+            "installed": true,
+            "running": true,
+            "pid": 99999,
+            "uptime": 0,
+            "sockets": "ready",
+            "ha": {
+                "mode": "hot-standby",
+                "state": "hot-standby",
+                "role": "primary",
+                "partner_in_touch": true,
+                "partner_state": "hot-standby"
+            }
+        },
+        "kea-dhcp6": {
+            "required": false,
+            "enabled": false,
+            "installed": false,
+            "running": false,
+            "pid": 0,
+            "uptime": 0
+        }
+    },
+    "sync": {
+        "config_last_sync": 0,
+        "lease_last_sync": 0
+    }
+}

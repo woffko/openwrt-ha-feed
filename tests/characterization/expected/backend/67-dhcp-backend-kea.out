@@ -124,12 +124,13 @@ end
 rc=0
 == service_triggers
 reload_trigger [ha-cluster]
+raw_trigger [kea.service] [1000] [/etc/init.d/ha-cluster] [kea_changed]
 == log
 ha-cluster|daemon.info|Starting HA cluster
 ha-cluster|daemon.info|Applying HA cluster configuration
-ha-cluster|daemon.warning|dhcp_backend is 'kea' but neither kea-dhcp4 nor kea-dhcp6 is installed
-ha-cluster|daemon.info|lease_sync is not used with dhcp_backend 'kea': Kea replicates its leases itself
-ha-cluster|daemon.warning|dnsmasq still answers DHCPv4 on interface 'lan' (dhcp.lan) while dhcp_backend is 'kea'
+ha-cluster|daemon.warning|Kea is the DHCP server of the cluster but neither kea-dhcp4 nor kea-dhcp6 is installed
+ha-cluster|daemon.info|lease_sync is not used with Kea as the DHCP server: Kea replicates its leases itself
+ha-cluster|daemon.warning|dnsmasq still answers DHCPv4 on interface 'lan' (dhcp.lan) while Kea is the DHCP server
 ha-cluster|daemon.warning|Set dhcp.lan.dhcpv4='disabled' to keep its router advertisements, or dhcp.lan.ignore='1'
 ha-cluster|daemon.info|Taking over service management from standalone init scripts
 ha-cluster|daemon.info|Disabled standalone service: keepalived
@@ -214,6 +215,7 @@ exclude=ha-cluster
 == /tmp/dnsmasq.cfg01411c.d/ha-cluster.conf
 (absent)
 == ls /etc/ha-cluster
+dhcp-backend
 service_states
 == /etc/ha-cluster/service_states
 keepalived=1

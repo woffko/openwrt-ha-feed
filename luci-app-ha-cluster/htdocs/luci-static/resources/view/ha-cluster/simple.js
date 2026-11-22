@@ -693,13 +693,14 @@ return view.extend({
 		s = m.section(form.NamedSection, 'config', 'global', _('DHCP Leases'));
 
 		// Written only when it changes: a config without the option means
-		// dnsmasq and stays without it
+		// automatic and stays without it
 		o = s.option(form.ListValue, 'dhcp_backend', _('DHCP Server'),
-			_('The server that gives out the leases on the cluster interfaces. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, which are made in Kea on every node. The IPv6 guard then leaves DHCPv6 to Kea and keeps guarding Router Advertisements.'));
+			_('The server that gives out IPv4 leases on the cluster interfaces. Automatic: Kea once it is set up for a cluster interface and started (in the Kea pages), dnsmasq otherwise. Kea or dnsmasq: that one, and the HA cluster switches Kea\'s DHCPv4 server on or off itself. On a switch to Kea the static leases of dnsmasq are imported into Kea first, then the DHCPv4 of dnsmasq is switched off in the pools of the cluster interfaces (visible on the DHCP page), and switched on again on the way back; DNS and Router Advertisements stay with dnsmasq. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, made in Kea on every node, and the IPv6 guard leaves DHCPv6 to Kea. Set the same on every node.'));
+		o.value('auto', _('Automatic (Kea when it is set up, else dnsmasq)'));
 		o.value('dnsmasq', _('dnsmasq (leases replicated by lease-sync)'));
 		o.value('kea', _('Kea (replicates its leases itself)'));
 		o.cfgvalue = function(section_id) {
-			return uci.get('ha-cluster', section_id, 'dhcp_backend') || 'dnsmasq';
+			return uci.get('ha-cluster', section_id, 'dhcp_backend') || 'auto';
 		};
 		o.write = function(section_id, value) {
 			if (this.cfgvalue(section_id) !== value)
@@ -713,6 +714,7 @@ return view.extend({
 			o.rmempty = false;
 			// Kept while Kea is chosen, for the day dnsmasq is chosen again
 			o.depends('dhcp_backend', 'dnsmasq');
+			o.depends('dhcp_backend', 'auto');
 			o.retain = true;
 			o.cfgvalue = function(section_id) {
 				return getBool(uci.get('ha-cluster', section_id, 'lease_sync'), false) ? '1' : '0';
@@ -724,6 +726,7 @@ return view.extend({
 		} else {
 			o = s.option(form.DummyValue, '_lease_sync_missing');
 			o.depends('dhcp_backend', 'dnsmasq');
+			o.depends('dhcp_backend', 'auto');
 			o.renderWidget = function(section_id) {
 				return installHint(_('lease-sync is not installed. Install the <code>lease-sync</code> and <code>dnsmasq-ha</code> packages to synchronize DHCP leases.') +
 					(getBool(uci.get('ha-cluster', section_id, 'lease_sync'), false)

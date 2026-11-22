@@ -25,6 +25,19 @@ HA_PROC_DIR="${HA_PROC_DIR:-/proc}"
 HA_SYS_NET_DIR="${HA_SYS_NET_DIR:-/sys/class/net}"
 # The index each device had when netifd last brought its interface up
 HA_KEA_DEVICE_DIR="${HA_CLUSTER_RUN_DIR}/kea-devices"
+KEA_INIT="${KEA_INIT:-/etc/init.d/kea}"
+# luci-app-kea's import of the static leases of dnsmasq into Kea
+KEA_IMPORT_BIN="${KEA_IMPORT_BIN:-/usr/libexec/luci-app-kea/import-dnsmasq}"
+# The DHCP server this node runs for the cluster interfaces, dnsmasq or kea,
+# kept across reboots and upgrades: what a switch starts from
+HA_DHCP_BACKEND_STATE="${HA_DHCP_BACKEND_STATE:-${HA_CLUSTER_ROOT}/etc/ha-cluster/dhcp-backend}"
+# Why the server asked for is not the one in use, when it is not
+HA_DHCP_BACKEND_PROBLEM="${HA_CLUSTER_RUN_DIR}/dhcp-backend-problem"
+# What the last import printed
+HA_KEA_IMPORT_RESULT="${HA_CLUSTER_RUN_DIR}/kea-import.json"
+# Kea was stopped from luci-app-kea while its config says it runs
+HA_KEA_STOPPED_MARK="${HA_CLUSTER_RUN_DIR}/kea-stopped"
+HA_DHCP_BACKEND_LOCK="${HA_DHCP_BACKEND_LOCK:-/var/lock/ha-cluster-dhcp-backend.lock}"
 FW4_BIN="${FW4_BIN:-/sbin/fw4}"
 # The changes ha-cluster makes to /etc/config/firewall are staged here, apart
 # from what a user has pending in the usual place, and committed on their own
@@ -278,15 +291,64 @@ ha_owsync_wanted() {
 	[ "$_ha_include_count" -gt 0 ] && ha_has_sync_peer
 }
 
-# Usage: ha_dhcp_backend (ha-cluster config loaded)
-# Prints the DHCP server whose leases the cluster keeps in step: dnsmasq,
-# with lease-sync, or kea. Kea replicates its leases itself through its
-# high-availability hook, which is configured in Kea, not here.
-ha_dhcp_backend() {
-	local backend
+# Usage: ha_dhcp_backend_mode (ha-cluster config loaded)
+# What the config asks for: auto (the default), dnsmasq or kea.
+ha_dhcp_backend_mode() {
+	local mode
 
-	config_get backend config dhcp_backend "dnsmasq"
+	config_get mode config dhcp_backend "auto"
+	printf '%s\n' "$mode"
+}
+
+# Usage: ha_dhcp_backend (ha-cluster config loaded)
+# Prints the DHCP server this node runs for the cluster interfaces, whose
+# leases the cluster keeps in step: dnsmasq, with lease-sync, or kea. Kea
+# replicates its leases itself through its high-availability hook, which is
+# configured in Kea, not here.
+# It is the one the last start switched to (ha_apply_dhcp_backend). A node
+# that never switched, as after an upgrade from a release without
+# switching, runs Kea if the config says kea, dnsmasq otherwise. Not from
+# the pools: /etc/config/dhcp may come from another node, and a switch to
+# Kea on a node whose pools are already off for Kea changes nothing there.
+ha_dhcp_backend() {
+	local backend=""
+
+	[ -r "$HA_DHCP_BACKEND_STATE" ] && read -r backend < "$HA_DHCP_BACKEND_STATE"
+	case "$backend" in
+		dnsmasq|kea) ;;
+		*)
+			if [ "$(ha_dhcp_backend_mode)" = "kea" ]; then
+				backend="kea"
+			else
+				backend="dnsmasq"
+			fi
+			;;
+	esac
 	printf '%s\n' "$backend"
+}
+
+# Usage: ha_dhcp_pools_mismatch (ha-cluster config loaded)
+# Prints what the pools of the cluster interfaces say against the server the
+# node runs, nothing when they agree: pools switched off for Kea on a node
+# that runs dnsmasq (another node switched, /etc/config/dhcp was synced), or
+# a pool that gives out DHCPv4 on a node that runs Kea.
+ha_dhcp_pools_mismatch() {
+	local pools interface pool serving=""
+
+	if ha_dhcp_backend_is_kea; then
+		for interface in $(_ha_cluster_dhcp_interfaces); do
+			for pool in $(_ha_dhcp_pools_of "$interface"); do
+				_ha_dhcp_pool_serves_v4 "$pool" && serving="$serving dhcp.$pool"
+			done
+		done
+		[ -n "$serving" ] &&
+			echo "dnsmasq gives out DHCPv4 in$serving while this node runs Kea: two DHCP servers on the cluster interfaces"
+	else
+		pools="$(_ha_dhcp_pools_switched_off | sed 's/^/dhcp./' | tr '\n' ' ' | sed 's/ $//')"
+		[ -n "$pools" ] &&
+			echo "dnsmasq's DHCPv4 is switched off for Kea in $pools while this node runs dnsmasq: another node switched to Kea; set the same DHCP server on every node"
+	fi
+	return 0
 }
 
 # Usage: ha_dhcp_backend_is_kea (ha-cluster config loaded)
@@ -1232,12 +1294,13 @@ ha_validate_config() {
 
 	# Which DHCP server the cluster works with
 	local dhcp_backend
-	dhcp_backend="$(ha_dhcp_backend)"
+	dhcp_backend="$(ha_dhcp_backend_mode)"
 	case "$dhcp_backend" in
-		dnsmasq) ;;
-		kea) ha_check_kea_backend ;;
+		auto|dnsmasq|kea)
+			ha_dhcp_backend_is_kea && ha_check_kea_backend
+			;;
 		*)
-			ha_log_error "dhcp_backend '$dhcp_backend' is not supported (only 'dnsmasq' and 'kea')"
+			ha_log_error "dhcp_backend '$dhcp_backend' is not supported (only 'auto', 'dnsmasq' and 'kea')"
 			errors=$((errors + 1))
 			;;
 	esac
@@ -1348,17 +1411,17 @@ ha_dhcp_authoritative_conflict() {
 }
 
 # Usage: ha_check_kea_backend (ha-cluster config loaded)
-# What does not fit dhcp_backend 'kea'. Warnings only: Kea and
+# What does not fit Kea as the DHCP server. Warnings only: Kea and
 # /etc/config/dhcp belong to the user, and VRRP works whatever they hold.
 ha_check_kea_backend() {
 	local lease_sync
 
 	[ -x "$KEA_DHCP4_BIN" ] || [ -x "$KEA_DHCP6_BIN" ] ||
-		ha_log_warning "dhcp_backend is 'kea' but neither kea-dhcp4 nor kea-dhcp6 is installed"
+		ha_log_warning "Kea is the DHCP server of the cluster but neither kea-dhcp4 nor kea-dhcp6 is installed"
 
 	config_get_bool lease_sync config lease_sync 0
 	[ "$lease_sync" -eq 1 ] &&
-		ha_log "lease_sync is not used with dhcp_backend 'kea': Kea replicates its leases itself"
+		ha_log "lease_sync is not used with Kea as the DHCP server: Kea replicates its leases itself"
 
 	_ha_kea_pools_checked=""
 	config_foreach _ha_check_kea_dnsmasq_pool vip
@@ -1382,12 +1445,22 @@ ha_kea_daemon_enabled() {
 }
 
 # Usage: ha_kea_conf_names_device dhcp4|dhcp6 <device>
-# The daemon's config names the device, alone or with an address after a
-# slash, or every device ("*"). Lines that are only a comment are skipped.
+# The daemon listens on the device: its interfaces-config names it, alone or
+# with an address after a slash, or names every device ("*"). A config that
+# jsonfilter cannot read (one with comments) is searched as text instead,
+# skipping the lines that are only a comment, where any mention counts.
 ha_kea_conf_names_device() {
-	local conf="$KEA_CONF_DIR/kea-$1.conf"
+	local conf="$KEA_CONF_DIR/kea-$1.conf" key="Dhcp${1#dhcp}" name
 
 	[ -r "$conf" ] || return 1
+	if jsonfilter -i "$conf" -e "@.$key" >/dev/null 2>&1; then
+		for name in $(jsonfilter -i "$conf" -e "@.$key[\"interfaces-config\"].interfaces[*]" 2>/dev/null); do
+			case "$name" in
+				"$2"|"$2"/*|"*") return 0 ;;
+			esac
+		done
+		return 1
+	fi
 	grep -v -e '^[[:space:]]*//' -e '^[[:space:]]*#' "$conf" |
 		grep -q -F -e "\"$2\"" -e "\"$2/" -e '"*"'
 }
@@ -1486,6 +1559,517 @@ ha_kea_ha_ports() {
 			grep -o '"url"[[:space:]]*:[[:space:]]*"[^"]*"' |
 			sed -n 's/.*"https\{0,1\}:\/\/[^"/]*:\([0-9]\{1,5\}\)\(\/[^"]*\)\{0,1\}"$/\1/p'
 	done | sort -n -u
+}
+
+# A program that prints a Kea daemon's answer to status-get, given the
+# control socket as its argument, in place of the ucode below (for tests)
+KEA_STATUS_GET="${KEA_STATUS_GET:-}"
+# Asks the Kea daemon behind the control socket $KEA_SOCKET for its status.
+# Gives up two seconds after the question, so that a Kea that does not answer
+# cannot hold up its caller.
+KEA_STATUS_UCODE='
+import * as socket from "socket";
+let s = socket.create(socket.AF_UNIX, socket.SOCK_STREAM);
+if (!s || !s.connect({ family: socket.AF_UNIX, path: getenv("KEA_SOCKET") }))
+	exit(1);
+s.send("{\"command\":\"status-get\"}");
+let answer = "";
+for (let tries = 0; tries < 20; tries++) {
+	if (!length(socket.poll(100, s)))
+		continue;
+	let chunk = s.recv(16384);
+	if (!length(chunk))
+		break;
+	answer += chunk;
+	try { json(answer); break; } catch (e) {}
+}
+print(answer);
+'
+
+# Usage: ha_kea_status_get dhcp4|dhcp6
+# Prints Kea's answer to status-get, or nothing: the daemon has no control
+# socket under the name the Kea package gives it, the ucode socket module
+# (ucode-mod-socket) is not installed, or no answer came.
+ha_kea_status_get() {
+	local socket="$KEA_RUN_DIR/kea${1#dhcp}-ctrl-socket"
+
+	if [ -n "$KEA_STATUS_GET" ]; then
+		"$KEA_STATUS_GET" "$socket" 2>/dev/null
+		return 0
+	fi
+
+	[ -S "$socket" ] || return 0
+	KEA_SOCKET="$socket" ucode -e "$KEA_STATUS_UCODE" 2>/dev/null
+}
+
+# The switch between dnsmasq and Kea as the DHCP server of the cluster
+# interfaces, the interfaces of the enabled VIPs (option dhcp_backend):
+#   auto     Kea when its init script starts kea-dhcp4 and kea-dhcp4's
+#            config names the device of a cluster interface, unless Kea was
+#            stopped from luci-app-kea since; dnsmasq otherwise. Whether
+#            Kea runs is left to Kea's own settings (luci-app-kea).
+#   kea      Kea; ha-cluster turns kea-dhcp4 on in /etc/config/kea.
+#   dnsmasq  dnsmasq; ha-cluster turns kea-dhcp4 off if it serves a cluster
+#            interface.
+# DHCPv4 only. On the way to Kea the static leases of dnsmasq are imported
+# into Kea first (luci-app-kea), then dnsmasq's DHCPv4 is switched off in the
+# pools of the cluster interfaces, then Kea is started; if it does not run
+# and listen, the pools are switched on again. On the way back the pools get
+# their DHCPv4 back. DNS and the Router Advertisements of dnsmasq stay.
+#
+# A pool is switched off the visible way: dhcpv4 'disabled', with the value
+# it had kept in ha_cluster_dhcpv4 ('unset' when it had none) for the way
+# back. /etc/config/dhcp is usually synced between the nodes, so the nodes
+# must run the same server: a node changes the pools when it switches
+# itself, never because it finds what another node did.
+
+# Usage: _ha_cluster_dhcp_interfaces (ha-cluster config loaded)
+# The logical interfaces of the enabled VIPs, one per line, each once
+_ha_dhcp_ifaces=""
+_ha_collect_dhcp_iface() {
+	local enabled interface
+
+	config_get_bool enabled "$1" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+	config_get interface "$1" interface ""
+	[ -n "$interface" ] || return 0
+	case " $_ha_dhcp_ifaces " in
+		*" $interface "*) return 0 ;;
+	esac
+	_ha_dhcp_ifaces="$_ha_dhcp_ifaces $interface"
+}
+_ha_cluster_dhcp_interfaces() {
+	local interface
+
+	_ha_dhcp_ifaces=""
+	config_foreach _ha_collect_dhcp_iface vip
+	for interface in $_ha_dhcp_ifaces; do
+		printf '%s\n' "$interface"
+	done
+}
+
+# Usage: _ha_dhcp_pools_of <logical interface>
+# The dhcp sections (pools) of /etc/config/dhcp for the interface
+_ha_dhcp_pools_of() {
+	local pool
+
+	for pool in $(uci -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dhcp$/\1/p'); do
+		[ "$(uci -q get "dhcp.$pool.interface")" = "$1" ] && printf '%s\n' "$pool"
+	done
+}
+
+# Usage: _ha_dhcp_pool_serves_v4 <pool>
+_ha_dhcp_pool_serves_v4() {
+	[ "$(uci -q get "dhcp.$1.ignore")" = "1" ] && return 1
+	[ "$(uci -q get "dhcp.$1.dhcpv4")" = "disabled" ] && return 1
+	return 0
+}
+
+# Usage: _ha_dhcp_pool_serves_v6 <pool>
+# dnsmasq answers DHCPv6 in a pool when it is the server of its Router
+# Advertisements and DHCPv6 is not disabled
+_ha_dhcp_pool_serves_v6() {
+	[ "$(uci -q get "dhcp.$1.ignore")" = "1" ] && return 1
+	[ "$(uci -q get "dhcp.$1.ra")" = "server" ] || return 1
+	[ "$(uci -q get "dhcp.$1.dhcpv6")" = "disabled" ] && return 1
+	return 0
+}
+
+# Usage: _ha_dhcp_pools_switched_off (ha-cluster config loaded)
+# The pools of the cluster interfaces whose DHCPv4 was switched off for Kea
+_ha_dhcp_pools_switched_off() {
+	local interface pool
+
+	for interface in $(_ha_cluster_dhcp_interfaces); do
+		for pool in $(_ha_dhcp_pools_of "$interface"); do
+			[ -n "$(uci -q get "dhcp.$pool.ha_cluster_dhcpv4")" ] && printf '%s\n' "$pool"
+		done
+	done
+}
+
+# Usage: _ha_dhcp_uci <uci arguments>
+# Writes go through a save directory of their own, so that a commit of
+# /etc/config/dhcp takes ha-cluster's changes only, not what a user has
+# pending in LuCI
+HA_DHCP_SAVEDIR="${HA_CLUSTER_RUN_DIR}/uci-dhcp"
+_ha_dhcp_uci() {
+	mkdir -m 0700 -p "$HA_DHCP_SAVEDIR" 2>/dev/null
+	uci -t "$HA_DHCP_SAVEDIR" "$@"
+}
+
+# Usage: _ha_dhcp_pools_off
+# Switches dnsmasq's DHCPv4 off in the pools of the cluster interfaces that
+# still give it out, keeping the value each had, and commits. Prints the
+# pools it switched off.
+_ha_dhcp_pools_off() {
+	local interface pool value changed=""
+
+	for interface in $(_ha_cluster_dhcp_interfaces); do
+		for pool in $(_ha_dhcp_pools_of "$interface"); do
+			_ha_dhcp_pool_serves_v4 "$pool" || continue
+			value="$(uci -q get "dhcp.$pool.dhcpv4")"
+			_ha_dhcp_uci -q set "dhcp.$pool.ha_cluster_dhcpv4=${value:-unset}"
+			_ha_dhcp_uci -q set "dhcp.$pool.dhcpv4=disabled"
+			changed="$changed $pool"
+		done
+	done
+	[ -n "$changed" ] || return 0
+	_ha_dhcp_uci commit dhcp
+	for pool in $changed; do
+		printf '%s\n' "$pool"
+	done
+}
+
+# Usage: _ha_dhcp_pools_on [<pool>...] (ha-cluster config loaded)
+# Gives the pools named, else every pool of the cluster interfaces that was
+# switched off for Kea, their DHCPv4 back, and commits. Prints the pools.
+_ha_dhcp_pools_on() {
+	local pool value changed=""
+
+	[ "$#" -gt 0 ] || set -- $(_ha_dhcp_pools_switched_off)
+	for pool in "$@"; do
+		value="$(uci -q get "dhcp.$pool.ha_cluster_dhcpv4")"
+		[ -n "$value" ] || continue
+		if [ "$value" = "unset" ]; then
+			_ha_dhcp_uci -q delete "dhcp.$pool.dhcpv4"
+		else
+			_ha_dhcp_uci -q set "dhcp.$pool.dhcpv4=$value"
+		fi
+		_ha_dhcp_uci -q delete "dhcp.$pool.ha_cluster_dhcpv4"
+		changed="$changed $pool"
+	done
+	[ -n "$changed" ] || return 0
+	_ha_dhcp_uci commit dhcp
+	for pool in $changed; do
+		printf '%s\n' "$pool"
+	done
+}
+
+# Usage: _ha_iface_ipv4 <logical interface>
+# The first IPv4 address of the interface, from netifd, else from the
+# network config; nothing when neither has one
+_ha_iface_ipv4() {
+	local address
+
+	address="$(ubus call "network.interface.$1" status 2>/dev/null |
+		jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	[ -n "$address" ] || address="$(uci -q get "network.$1.ipaddr" | sed 's/[ /].*//')"
+	printf '%s\n' "$address"
+}
+
+# Usage: _ha_kea4_has_subnet_for <logical interface>
+# A subnet4 of kea-dhcp4's config holds the IPv4 address of the interface.
+# True as well when that cannot be told: a config that jsonfilter cannot read
+# (one with comments), an interface without an address.
+_ha_kea4_has_subnet_for() {
+	local conf="$KEA_CONF_DIR/kea-dhcp4.conf" address subnets
+
+	address="$(_ha_iface_ipv4 "$1")"
+	[ -n "$address" ] || return 0
+	jsonfilter -i "$conf" -e '@.Dhcp4' >/dev/null 2>&1 || return 0
+	subnets="$(jsonfilter -i "$conf" -e '@.Dhcp4.subnet4[*].subnet' 2>/dev/null || true)
+$(jsonfilter -i "$conf" -e '@.Dhcp4["shared-networks"][*].subnet4[*].subnet' 2>/dev/null || true)"
+	printf '%s\n' "$subnets" | awk -v ip="$address" '
+		function n(a,  p) { split(a, p, "."); return ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4] }
+		BEGIN { x = n(ip); missing = 1 }
+		/^[0-9.]+\/[0-9]+$/ {
+			split($0, s, "/")
+			size = 2 ^ (32 - s[2])
+			if (int(x / size) == int(n(s[1]) / size)) { missing = 0; exit }
+		}
+		END { exit missing }'
+}
+
+# Usage: _ha_kea_set_up_for_cluster (ha-cluster config loaded)
+# Kea's init script starts kea-dhcp4 at boot, and kea-dhcp4's config names
+# the device of a cluster interface
+_ha_kea_set_up_for_cluster() {
+	local interface device
+
+	[ -x "$KEA_DHCP4_BIN" ] || return 1
+	ha_kea_daemon_enabled dhcp4 || return 1
+	[ -x "$KEA_INIT" ] && "$KEA_INIT" enabled 2>/dev/null || return 1
+	for interface in $(_ha_cluster_dhcp_interfaces); do
+		ha_resolve_device device "$interface" || device="$interface"
+		ha_kea_conf_names_device dhcp4 "$device" && return 0
+	done
+	return 1
+}
+
+# Usage: ha_dhcp_backend_wanted (ha-cluster config loaded)
+# The DHCP server the cluster interfaces are to have: dnsmasq or kea
+ha_dhcp_backend_wanted() {
+	case "$(ha_dhcp_backend_mode)" in
+		kea) echo "kea" ;;
+		dnsmasq) echo "dnsmasq" ;;
+		*)
+			if _ha_kea_set_up_for_cluster && [ ! -e "$HA_KEA_STOPPED_MARK" ]; then
+				echo "kea"
+			else
+				echo "dnsmasq"
+			fi
+			;;
+	esac
+}
+
+# Usage: _ha_kea_usable (ha-cluster config loaded)
+# Kea can take DHCPv4 over on every cluster interface where dnsmasq gives
+# it out. Leaves why not in _ha_kea_unusable_reason and fails.
+_ha_kea_unusable_reason=""
+_ha_kea_usable() {
+	local conf="$KEA_CONF_DIR/kea-dhcp4.conf" interface pool device
+
+	_ha_kea_unusable_reason=""
+	if [ ! -x "$KEA_DHCP4_BIN" ]; then
+		_ha_kea_unusable_reason="kea-dhcp4 is not installed"
+		return 1
+	fi
+	if [ ! -r "$conf" ]; then
+		_ha_kea_unusable_reason="$conf is missing"
+		return 1
+	fi
+	for interface in $(_ha_cluster_dhcp_interfaces); do
+		for pool in $(_ha_dhcp_pools_of "$interface"); do
+			if _ha_dhcp_pool_serves_v6 "$pool"; then
+				_ha_kea_unusable_reason="dnsmasq gives out DHCPv6 addresses on '$interface' (dhcp.$pool): ha-cluster switches DHCPv4 only, and with Kea lease-sync does not keep those leases in step. Set dhcp.$pool.dhcpv6 to 'disabled', or leave the DHCP server on dnsmasq"
+				return 1
+			fi
+			_ha_dhcp_pool_serves_v4 "$pool" ||
+				[ -n "$(uci -q get "dhcp.$pool.ha_cluster_dhcpv4")" ] || continue
+			ha_resolve_device device "$interface" || device="$interface"
+			if ! ha_kea_conf_names_device dhcp4 "$device"; then
+				_ha_kea_unusable_reason="$conf does not name $device, the device of '$interface', in its interfaces"
+				return 1
+			fi
+			if ! _ha_kea4_has_subnet_for "$interface"; then
+				_ha_kea_unusable_reason="$conf has no subnet for the address of '$interface'"
+				return 1
+			fi
+		done
+	done
+	return 0
+}
+
+# Usage: _ha_kea_import
+# Runs luci-app-kea's import of dnsmasq's static leases (the host sections
+# of /etc/config/dhcp) into Kea's DHCP configs: the entries Kea can take as
+# they are, not those it would change or take only in part. Keeps what it
+# printed in $HA_KEA_IMPORT_RESULT, logs what it left, and sets
+# _ha_kea_import_changed to 1 when it wrote Kea's files. Fails when the
+# import failed; without luci-app-kea there is no import, with a warning.
+_ha_kea_import_changed=0
+_ha_kea_import() {
+	local out rc=0 result left i key status name identifier address notes
+
+	_ha_kea_import_changed=0
+	rm -f "$HA_KEA_IMPORT_RESULT"
+	if [ -x "$KEA_IMPORT_BIN" ]; then
+		out="$("$KEA_IMPORT_BIN" 2>/dev/null)" || rc=$?
+	elif ubus -S list luci.kea >/dev/null 2>&1; then
+		out="$(ubus call luci.kea importDnsmasqCommit '{}' 2>/dev/null)" || rc=$?
+	else
+		ha_log_warning "dnsmasq's static leases are not imported into Kea: luci-app-kea is not installed. A client with a static lease in /etc/config/dhcp keeps its address only if Kea has a reservation for it"
+		return 0
+	fi
+	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" 2>/dev/null
+	printf '%s\n' "$out" > "$HA_KEA_IMPORT_RESULT"
+
+	result="$(printf '%s' "$out" | jsonfilter -e '@.result' 2>/dev/null)"
+	if [ "$rc" -ne 0 ] || [ "$result" != "true" ]; then
+		ha_log_error "The import of dnsmasq's static leases into Kea failed: $(printf '%s' "$out" | jsonfilter -e '@.error' 2>/dev/null || echo "exit code $rc")"
+		return 1
+	fi
+	[ "$(printf '%s' "$out" | jsonfilter -e '@.changed' 2>/dev/null)" = "true" ] && _ha_kea_import_changed=1
+	ha_log_info "dnsmasq's static leases imported into Kea: $(printf '%s' "$out" | jsonfilter -e '@.imported' 2>/dev/null || echo 0) new reservations"
+
+	left="$(printf '%s' "$out" | jsonfilter -e '@.left[*].key' 2>/dev/null | wc -l)"
+	[ "$left" -gt 0 ] || return 0
+	ha_log_warning "$left static leases of dnsmasq are not in Kea: they need luci-app-kea's Import page (Kea > Import from dnsmasq)"
+	i=0
+	while [ "$i" -lt "$left" ] && [ "$i" -lt 50 ]; do
+		eval "$(printf '%s' "$out" | jsonfilter \
+			-e "key=@.left[$i].key" -e "status=@.left[$i].status" -e "name=@.left[$i].name" \
+			-e "identifier=@.left[$i].identifier" -e "address=@.left[$i].address" 2>/dev/null)"
+		notes="$(printf '%s' "$out" | jsonfilter -e "@.left[$i].notes[*]" 2>/dev/null | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
+		ha_log_warning "Not imported into Kea ($status): $(echo ${name:-$key} $identifier $address)${notes:+: $notes}"
+		key="" status="" name="" identifier="" address=""
+		i=$((i + 1))
+	done
+	return 0
+}
+
+# Usage: _ha_kea_wait_dhcp4
+# Waits up to $HA_KEA_WAIT seconds (10) for kea-dhcp4 to run with its sockets
+# ready, or retrying while an interface is not up yet. A Kea that cannot be
+# asked (no ucode socket module) counts once it has run for three seconds.
+# Fails when it does not run, or when its sockets are still failed.
+HA_KEA_WAIT="${HA_KEA_WAIT:-10}"
+_ha_kea_wait_failed=""
+_ha_kea_wait_dhcp4() {
+	local tries=0 answer status
+
+	_ha_kea_wait_failed="kea-dhcp4 does not run"
+	while :; do
+		if pgrep kea-dhcp4 >/dev/null 2>&1; then
+			answer="$(ha_kea_status_get dhcp4)"
+			status="$(printf '%s' "$answer" | jsonfilter -e '@.arguments.sockets.status' 2>/dev/null)"
+			case "$status" in
+				ready|retrying) return 0 ;;
+				'') [ "$tries" -ge 3 ] && return 0 ;;
+				*)
+					_ha_kea_wait_failed="kea-dhcp4 does not listen: $(printf '%s' "$answer" |
+						jsonfilter -e '@.arguments.sockets.errors[0]' 2>/dev/null || echo "sockets $status")"
+					;;
+			esac
+		fi
+		[ "$tries" -ge "$HA_KEA_WAIT" ] && return 1
+		sleep 1
+		tries=$((tries + 1))
+	done
+}
+
+# Usage: _ha_kea_uci <uci arguments>
+HA_KEA_SAVEDIR="${HA_CLUSTER_RUN_DIR}/uci-kea"
+_ha_kea_uci() {
+	mkdir -m 0700 -p "$HA_KEA_SAVEDIR" 2>/dev/null
+	uci -t "$HA_KEA_SAVEDIR" "$@"
+}
+
+# Usage: _ha_switch_to_kea <mode> (ha-cluster config loaded)
+_ha_switch_to_kea() {
+	local mode="$1" pools flag_set=0 init_enabled=0
+
+	if ! _ha_kea_usable; then
+		_ha_dhcp_backend_problem "Kea cannot take over: $_ha_kea_unusable_reason"
+		return 1
+	fi
+	if ! _ha_kea_import; then
+		_ha_dhcp_backend_problem "the import of dnsmasq's static leases into Kea failed (see the system log): dnsmasq stays the DHCP server"
+		return 1
+	fi
+
+	# A few seconds without a DHCP server rather than two of them
+	pools="$(_ha_dhcp_pools_off)"
+	ha_restart_dnsmasq
+
+	if [ "$mode" = "kea" ]; then
+		if ! ha_kea_daemon_enabled dhcp4; then
+			[ "$(uci -q get kea.dhcp4)" = "service" ] || _ha_kea_uci -q set kea.dhcp4=service
+			_ha_kea_uci -q set kea.dhcp4.disabled=0
+			_ha_kea_uci commit kea
+			flag_set=1
+		fi
+		if ! "$KEA_INIT" enabled 2>/dev/null; then
+			"$KEA_INIT" enable 2>/dev/null
+			init_enabled=1
+		fi
+		"$KEA_INIT" restart >/dev/null 2>&1
+	elif ! pgrep kea-dhcp4 >/dev/null 2>&1; then
+		"$KEA_INIT" start >/dev/null 2>&1
+	elif [ "$_ha_kea_import_changed" -eq 1 ]; then
+		"$KEA_INIT" reload >/dev/null 2>&1
+	fi
+
+	if ! _ha_kea_wait_dhcp4; then
+		[ -n "$pools" ] && _ha_dhcp_pools_on $pools >/dev/null
+		if [ "$flag_set" -eq 1 ]; then
+			_ha_kea_uci -q set kea.dhcp4.disabled=1
+			_ha_kea_uci commit kea
+		fi
+		[ "$init_enabled" -eq 1 ] && "$KEA_INIT" disable 2>/dev/null
+		[ "$mode" = "kea" ] && "$KEA_INIT" restart >/dev/null 2>&1
+		ha_restart_dnsmasq
+		_ha_dhcp_backend_problem "Kea did not take over ($_ha_kea_wait_failed): dnsmasq is the DHCP server again"
+		return 1
+	fi
+
+	ha_log_info "Kea is the DHCP server of the cluster interfaces${pools:+: dnsmasq's DHCPv4 switched off in $(echo $pools)}"
+	return 0
+}
+
+# Usage: _ha_switch_to_dnsmasq <mode> (ha-cluster config loaded)
+_ha_switch_to_dnsmasq() {
+	local mode="$1" pools interface device
+
+	# Kea off first: a few seconds without a DHCP server rather than two
+	if [ "$mode" = "dnsmasq" ] && ha_kea_daemon_enabled dhcp4; then
+		for interface in $(_ha_cluster_dhcp_interfaces); do
+			ha_resolve_device device "$interface" || device="$interface"
+			ha_kea_conf_names_device dhcp4 "$device" || continue
+			ha_log_warning "dhcp_backend is 'dnsmasq': kea-dhcp4, which serves '$interface', is switched off in /etc/config/kea"
+			_ha_kea_uci -q set kea.dhcp4.disabled=1
+			_ha_kea_uci commit kea
+			"$KEA_INIT" restart >/dev/null 2>&1
+			break
+		done
+	fi
+
+	pools="$(_ha_dhcp_pools_on)"
+	ha_restart_dnsmasq
+	ha_log_info "dnsmasq is the DHCP server of the cluster interfaces${pools:+: its DHCPv4 switched on again in $(echo $pools)}"
+}
+
+# Usage: _ha_dhcp_backend_problem <text>
+_ha_dhcp_backend_problem() {
+	ha_log_error "DHCP server of the cluster interfaces: $1"
+	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" 2>/dev/null
+	printf '%s\n' "$1" > "$HA_DHCP_BACKEND_PROBLEM"
+}
+
+# Usage: _ha_dhcp_backend_save dnsmasq|kea
+_ha_dhcp_backend_save() {
+	local current=""
+
+	[ -r "$HA_DHCP_BACKEND_STATE" ] && read -r current < "$HA_DHCP_BACKEND_STATE"
+	[ "$current" = "$1" ] && return 0
+	mkdir -p "${HA_DHCP_BACKEND_STATE%/*}" &&
+		printf '%s\n' "$1" > "$HA_DHCP_BACKEND_STATE.new" &&
+		mv -f "$HA_DHCP_BACKEND_STATE.new" "$HA_DHCP_BACKEND_STATE"
+}
+
+# Usage: ha_apply_dhcp_backend (ha-cluster config loaded)
+# Brings the DHCP server of the cluster interfaces in line with what is
+# asked for (ha_dhcp_backend_wanted), and remembers which one the node runs.
+# A switch that cannot be made leaves the server as it was, says why in the
+# log and in the status, and is tried again at the next start or reload.
+# One switch at a time.
+ha_apply_dhcp_backend() {
+	local mode current wanted
+
+	mode="$(ha_dhcp_backend_mode)"
+	current="$(ha_dhcp_backend)"
+	wanted="$(ha_dhcp_backend_wanted)"
+	rm -f "$HA_DHCP_BACKEND_PROBLEM"
+
+	if [ "$current" != "$wanted" ]; then
+		exec 7>"$HA_DHCP_BACKEND_LOCK"
+		flock -w 30 7 2>/dev/null || true
+		if [ "$wanted" = "kea" ]; then
+			ha_log_info "Switching the DHCP server of the cluster interfaces from dnsmasq to Kea (dhcp_backend '$mode')"
+			_ha_switch_to_kea "$mode" && current="kea"
+		else
+			ha_log_info "Switching the DHCP server of the cluster interfaces from Kea to dnsmasq (dhcp_backend '$mode')"
+			_ha_switch_to_dnsmasq "$mode"
+			current="dnsmasq"
+		fi
+		exec 7>&-
+	fi
+
+	_ha_dhcp_backend_save "$current"
+}
+
+# Usage: ha_kea_changed (ha-cluster config loaded)
+# luci-app-kea started, restarted, reloaded or stopped Kea. A Kea that is set
+# up for the cluster and does not run now was stopped on purpose: with
+# dhcp_backend 'auto' dnsmasq takes the cluster interfaces back until Kea
+# runs again, at the latest at the next boot.
+ha_kea_changed() {
+	mkdir -m 0700 -p "$HA_CLUSTER_RUN_DIR" 2>/dev/null
+	if _ha_kea_set_up_for_cluster && ! pgrep kea-dhcp4 >/dev/null 2>&1; then
+		: > "$HA_KEA_STOPPED_MARK"
+	else
+		rm -f "$HA_KEA_STOPPED_MARK"
+	fi
 }
 
 # The rules ha-cluster keeps in /etc/config/firewall are ordinary rule
@@ -1937,7 +2521,7 @@ _ha_check_kea_dnsmasq_pool() {
 		[ "$ignore" = "1" ] && continue
 		[ "$dhcpv4" = "disabled" ] && continue
 
-		ha_log_warning "dnsmasq still answers DHCPv4 on interface '$interface' (dhcp.$pool) while dhcp_backend is 'kea'"
+		ha_log_warning "dnsmasq still answers DHCPv4 on interface '$interface' (dhcp.$pool) while Kea is the DHCP server"
 		ha_log_warning "Set dhcp.$pool.dhcpv4='disabled' to keep its router advertisements, or dhcp.$pool.ignore='1'"
 	done
 }

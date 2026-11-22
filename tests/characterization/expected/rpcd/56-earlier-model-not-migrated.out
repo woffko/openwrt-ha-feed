@@ -16,6 +16,7 @@
     ],
     "state": "DEGRADED",
     "dhcp_backend": "dnsmasq",
+    "dhcp_backend_mode": "auto",
     "earlier_model": [
         "service sections",
         "sync_leases"

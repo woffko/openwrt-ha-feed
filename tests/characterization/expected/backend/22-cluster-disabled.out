@@ -105,6 +105,7 @@ config exclude
 rc=0
 == service_triggers
 reload_trigger [ha-cluster]
+raw_trigger [kea.service] [1000] [/etc/init.d/ha-cluster] [kea_changed]
 == log
 == ls /var/run/ha-cluster
 (absent)

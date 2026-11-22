@@ -1,5 +1,5 @@
 #!/bin/sh
-# A process runs iff its name is listed in $FAKE_RUNNING. Only plain name
+# A process runs iff its name is listed in $FAKE_RUNNING, Only plain name
 # matching (with -o) is emulated; other options are refused.
 name=""
 for arg in "$@"; do
@@ -9,7 +9,9 @@ for arg in "$@"; do
 		*) name="$arg" ;;
 	esac
 done
-for p in $FAKE_RUNNING; do
+# ... or in /tmp/fake-running, where a stand-in init script lists what it
+# started
+for p in $FAKE_RUNNING $(cat /tmp/fake-running 2>/dev/null); do
 	[ "$p" = "$name" ] && { echo 99999; exit 0; }
 done
 exit 1

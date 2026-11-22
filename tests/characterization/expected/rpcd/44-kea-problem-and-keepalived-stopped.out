@@ -16,6 +16,7 @@
     ],
     "state": "FAULTY",
     "dhcp_backend": "kea",
+    "dhcp_backend_mode": "kea",
     "services": {
         "keepalived": {
             "required": true,

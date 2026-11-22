@@ -208,8 +208,8 @@ only when they are installed, at least one peer with an address is not
 `vrrp_only`, and:
 
 - owsync: at least one enabled sync group lists files
-- lease-sync: `lease_sync='1'`, and dnsmasq is the DHCP server
-  (`dhcp_backend`, see [Kea as the DHCP Server](#kea-as-the-dhcp-server))
+- lease-sync: `lease_sync='1'`, and the node runs dnsmasq as the DHCP
+  server (see [Kea as the DHCP Server](#kea-as-the-dhcp-server))
 
 A sync daemon that has work but is not installed is logged as a warning;
 the cluster still starts.
@@ -224,7 +224,7 @@ without it ha-cluster refuses to start. Plain mode is an explicit choice,
 these settings must be set identically on every node:
 
 - `encryption_key`, `vrrp_transport`, `lease_sync`, `sync_port`,
-  `sync_dir`, `firewall`
+  `sync_dir`, `firewall`, `dhcp_backend` (and Kea's own setup)
 - the sync groups and exclusions
 - `lease_sync_port` (advanced)
 - for each VRRP instance: `vrid`, `advert_int`, `auth_type`, `auth_pass`,
@@ -321,10 +321,21 @@ cannot sync it.
 
 ## Kea as the DHCP Server
 
-Only in this fork. `option dhcp_backend 'kea'` in the `config` section tells
-ha-cluster that ISC Kea gives out the leases on the cluster interfaces. Kea
-replicates its leases between two servers itself, through its
-high-availability hook (`kea-hook-ha`), so with this setting:
+Only in this fork. ISC Kea can give out the IPv4 leases on the cluster
+interfaces (the interfaces of the enabled VIPs) instead of dnsmasq. Option
+`dhcp_backend` of the `config` section chooses:
+
+| `dhcp_backend` | DHCP server of the cluster interfaces |
+|---|---|
+| `auto` (default, also when the option is absent) | Kea when its init script starts `kea-dhcp4` and `kea-dhcp4`'s config listens on the device of a cluster interface, unless Kea was stopped from luci-app-kea since; dnsmasq otherwise. Whether Kea runs is left to Kea's own settings |
+| `kea` | Kea; ha-cluster turns `kea-dhcp4` on in `/etc/config/kea` and enables Kea's init script |
+| `dnsmasq` | dnsmasq; ha-cluster turns `kea-dhcp4` off if it listens on a cluster interface |
+
+The node switches at a start or reload of ha-cluster when the server asked
+for is not the one it runs, see [Switching between dnsmasq and
+Kea](#switching-between-dnsmasq-and-kea). Kea replicates its leases between
+two servers itself, through its high-availability hook (`kea-hook-ha`), so
+while a node runs Kea:
 
 - lease-sync is not started, whatever `lease_sync` says, and the `force`
   option of the DHCP pools is not asked for;
@@ -333,9 +344,69 @@ high-availability hook (`kea-hook-ha`), so with this setting:
 - the IPv6 BACKUP guard no longer drops DHCPv6 requests on a BACKUP node.
   Kea decides by itself which server answers, whatever VRRP says, and a
   BACKUP may be the one. Router Advertisements stay guarded as before;
-- the Status page and the `status` call name the backend and say how
+- the Status page and the `status` call name the server and say how
   `kea-dhcp4` and `kea-dhcp6` are doing, see
   [What the status says about Kea](#what-the-status-says-about-kea).
+
+### Switching between dnsmasq and Kea
+
+The switch covers DHCPv4. On the way to Kea, in this order:
+
+1. **Kea is checked**: `kea-dhcp4` installed, its config listening on the
+   device of every cluster interface where dnsmasq gives out addresses (in
+   `interfaces-config`, or `"*"`), with a subnet for the interface's IPv4
+   address. A config with comments, which jsonfilter cannot read, is
+   searched as text and its subnets are not checked. A pool where dnsmasq
+   also gives out DHCPv6 (Router Advertisements `server`, `dhcpv6` not
+   `disabled`) stops the switch: with Kea, lease-sync no longer keeps those
+   leases in step. Set `dhcpv6 'disabled'` first, or leave dnsmasq.
+2. **dnsmasq's static leases are imported into Kea**, with luci-app-kea's
+   `/usr/libexec/luci-app-kea/import-dnsmasq` (from 0.11.0), else its rpcd
+   method; without luci-app-kea there is no import, and a warning. Only the
+   entries Kea can take as they are; each one left (to review, that would
+   change a reservation of Kea, or that cannot be taken) is named in the
+   log and on the Status page, and the switch goes on: finish them on
+   luci-app-kea's import page. An import that fails stops the switch.
+3. **dnsmasq's DHCPv4 is switched off in the pools of the cluster
+   interfaces**, the visible way: `dhcpv4 'disabled'` in the pool, as the
+   DHCP page of LuCI shows it, with the value the pool had in
+   `ha_cluster_dhcpv4` (`unset` when it had none). dnsmasq is restarted;
+   DNS, the Router Advertisements and DHCPv6 stay as they were.
+4. **Kea is started** (or restarted, or reloaded after the import changed
+   its files), and given up to ten seconds to run with its sockets ready or
+   retrying. If it does not, the pools get their DHCPv4 back, what was
+   changed in `/etc/config/kea` and Kea's init script is put back, dnsmasq
+   stays the server, and the status says why (`dhcp_backend_problem`,
+   `DEGRADED`). The switch is tried again at the next start or reload.
+
+dnsmasq is switched off before Kea starts: a few seconds without a DHCP
+server rather than two of them. On the way back, Kea off first (with
+`dnsmasq`), then the pools get their DHCPv4 back from `ha_cluster_dhcpv4`,
+and dnsmasq is restarted. Leases are not carried over either way: clients
+ask again; the static leases stay in `/etc/config/dhcp`.
+
+The node remembers the server it runs in `/etc/ha-cluster/dhcp-backend`,
+kept across sysupgrade. A node without that file, after an upgrade from a
+release without switching, runs Kea if `dhcp_backend` is `kea` (and then
+switches nothing: that was set up by hand) and dnsmasq otherwise.
+
+**luci-app-kea's event.** From 0.11.0 luci-app-kea tells procd when it
+has started, restarted, reloaded or stopped Kea (event `kea.service`), and
+procd runs `/etc/init.d/ha-cluster kea_changed`: it notes whether Kea was
+stopped on purpose and has a running cluster check its server, as a
+reload does; a stopped cluster stays stopped. So with `auto`, starting Kea
+in luci-app-kea hands the cluster interfaces to Kea within a second, and
+stopping it hands them back to dnsmasq until Kea runs again, at the latest
+after the next boot. Kea started or stopped by other means
+(`/etc/init.d/kea`) is seen at the next start or reload of ha-cluster.
+
+**Every node runs the same server.** `/etc/config/dhcp` is usually synced
+between the nodes, so the pools are the same everywhere. A node changes
+them only when it switches itself, never because it finds what another
+node did: a node that runs dnsmasq while the pools are switched off for
+Kea, or one that runs Kea while a pool gives out DHCPv4, is `DEGRADED` and
+says so. `/etc/config/ha-cluster` and Kea's config are not synced: set
+`dhcp_backend`, and set Kea up, on every node.
 
 VRRP, the VIPs, file sync and the guard for Router Advertisements work as
 with dnsmasq. Kea's primary need not be the VRRP MASTER: the clients reach
@@ -387,10 +458,12 @@ Kea by broadcast and multicast on the LAN, not through the VIP.
 
 What ha-cluster does not do for Kea:
 
-- It does not start, stop or configure Kea. Set up the subnets and the
-  high-availability hook in Kea on every node, with the peers' addresses on
-  the link the nodes sync over. The signal described above is the one thing
-  it does to a running Kea.
+- It does not configure Kea. Set up the subnets and the high-availability
+  hook in Kea on every node, with the peers' addresses on the link the nodes
+  sync over (luci-app-kea does it). With `auto` it starts Kea only when Kea
+  is set to run and does not; with `kea` and `dnsmasq` it turns
+  `kea-dhcp4` on or off in `/etc/config/kea` and restarts Kea. DHCPv6 of
+  Kea is left as Kea has it.
 - It does not choose the ports of Kea's HA listeners: they are in the
   `"url"`s of Kea's config. It opens them for the nodes, see
   [Firewall](#firewall), and learns of a changed port at its next start or
@@ -398,25 +471,32 @@ What ha-cluster does not do for Kea:
   applying changed URLs in Kea.
 - It does not sync Kea's configuration: owsync works inside `/etc/config`,
   and Kea keeps its files in `/etc/kea`.
-- It does not stop dnsmasq from answering DHCP. Take the pools of the
-  cluster interfaces out of dnsmasq yourself: `dhcpv4 'disabled'` in the
-  pool keeps its Router Advertisements, `ignore '1'` turns the pool off.
-  dnsmasq goes on serving DNS, and Router Advertisements if it did.
-- It does not carry leases over when the backend changes: clients ask
+- It does not carry leases over when the server changes: clients ask
   again.
+- It does not hand the names of Kea's clients to dnsmasq's DNS: dnsmasq
+  answers for the names of its own leases only.
 
 At every start ha-cluster also logs a warning when neither Kea DHCP daemon
 is installed, and when a dnsmasq pool on a VIP interface still answers
 DHCPv4. Neither stops the cluster.
 
-Back to dnsmasq: remove the option or set it to `dnsmasq`, and reload.
-lease-sync starts again if `lease_sync` is `1`, and the guard drops DHCPv6
-on a BACKUP again.
+Back to dnsmasq: set the option to `dnsmasq` (or, with `auto`, stop Kea
+in luci-app-kea), and apply. lease-sync starts again if `lease_sync` is
+`1`, and the guard drops DHCPv6 on a BACKUP again.
 
 ### What the status says about Kea
 
-`ubus call ha-cluster status` lists `kea-dhcp4` and `kea-dhcp6` under
-`services` when the backend is `kea`:
+`ubus call ha-cluster status` gives `dhcp_backend`, the server the node
+runs (`dnsmasq` or `kea`), and `dhcp_backend_mode`, what the config asks
+for (`auto`, `dnsmasq`, `kea`). `dhcp_backend_problem`, when present, says
+why the server asked for is not the one in use, or what the pools say
+against it; the cluster is then `DEGRADED`. After a switch to Kea,
+`kea_import` gives the number of dnsmasq's static leases the import left
+(`left`) and the first 50 of them (`entries`: `name`, `identifier`,
+`address`, `status`).
+
+It lists `kea-dhcp4` and `kea-dhcp6` under `services` when the node runs
+Kea:
 
 | Field | Meaning |
 |-------|---------|
@@ -525,7 +605,7 @@ packet counters, `nft list chain inet fw4 input`.
 | `HA-Cluster-VRRP-<device>` | VRRP (protocol 112), and AH (51) where an instance on that device uses `auth_type 'ah'` | anyone on the device of the instance: the adverts come from the nodes' addresses on that device, which the config does not name |
 | `HA-Cluster-owsync` | TCP `sync_port`, when owsync has work | the nodes that sync |
 | `HA-Cluster-lease-sync` | UDP `lease_sync_port`, when lease-sync has work | the nodes that sync |
-| `HA-Cluster-Kea-HA` | TCP, the ports of the `"url"`s in the config of each enabled Kea DHCP daemon, with `dhcp_backend 'kea'` | the nodes that sync |
+| `HA-Cluster-Kea-HA` | TCP, the ports of the `"url"`s in the config of each enabled Kea DHCP daemon, while the node runs Kea | the nodes that sync |
 | `HA-Cluster-ping` | ICMP and ICMPv6 echo requests, which the status uses to see a peer | all nodes |
 
 "The nodes" are the peers' addresses and this node's own address towards
@@ -602,7 +682,7 @@ All configuration lives in `/etc/config/ha-cluster`.
 | `sync_encryption` | bool | `1` | Encrypt owsync and lease-sync traffic (AES-256-GCM). With `1`, a sync daemon is not started without a valid `encryption_key`; `0` is the explicit choice of plain mode |
 | `encryption_key` | string | | 256-bit hex key (64 hexadecimal characters); use LuCI "Generate" button or `hexdump -n 32 -v -e '1/1 "%02x"' /dev/urandom` |
 | `lease_sync` | bool | `0` | DHCP lease sync (lease-sync and dnsmasq-ha); the shipped config sets it to `1` |
-| `dhcp_backend` | string | `dnsmasq` | DHCP server on the cluster interfaces: `dnsmasq` or `kea`. With `kea`, lease-sync does not run, Kea is reported in the status and told to reread its config when an interface it listens on comes up; ha-cluster refuses to start with any other value. See [Kea as the DHCP Server](#kea-as-the-dhcp-server) |
+| `dhcp_backend` | string | `auto` | DHCPv4 server of the cluster interfaces: `auto` (Kea once it is set up and started for a cluster interface, else dnsmasq), `dnsmasq` or `kea`; the node switches at a start or reload. With Kea, lease-sync does not run, Kea is reported in the status and told to reread its config when an interface it listens on comes up; ha-cluster refuses to start with any other value. See [Kea as the DHCP Server](#kea-as-the-dhcp-server) |
 | `sync_port` | int | `4321` | owsync TCP port |
 | `sync_dir` | string | `/etc/config` | Directory to synchronize |
 | `bind_address` | string | | Local IP for sync traffic (use real IP, not VIP) |
@@ -781,6 +861,7 @@ Available environment variables:
 /etc/init.d/ha-cluster                  procd init script (START=25, STOP=91)
 /usr/lib/ha-cluster/ha-cluster.sh       Core library
 /usr/lib/ha-cluster/migrate-config      The upgrade's migration, for a config put back after it
+/etc/ha-cluster/dhcp-backend            The DHCP server the node runs (dnsmasq or kea), kept across sysupgrade
 /etc/hotplug.d/iface/60-ha-cluster-kea  With Kea as the DHCP server: Kea rereads its config at ifup
 /var/run/ha-cluster/                        Generated configs (runtime)
 ```

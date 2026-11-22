@@ -5,18 +5,17 @@ h3: Cluster Status
 | Cluster Overview
 | Cluster State | DEGRADED
 | Node Role | MASTER
+| DHCP Server | dnsmasq
 | Instance: main | MASTER
 | Instance: main_v6 | MASTER
 | Last Synchronization
 | Config Sync | <time>
-| Lease Sync | By Kea
+| Lease Sync | <time>
 h3: Service Status
 | Service | Status | PID | Uptime
 | keepalived | Running | <pid> | <uptime>
 | owsync | Running | <pid> | <uptime>
 | lease-sync | Running | <pid> | <uptime>
-| kea-dhcp4 | Not installed | - | -
-| kea-dhcp6 | Not installed | - | -
 h3: Peer Status
 | Peer Name | Address | State | Last Seen
 | router2 | 192.168.50.11 | Offline | Unreachable
@@ -55,8 +54,8 @@ config._group_dhcp [CBI.FlagValue] DHCP and DNS: [x]
 config._group_firewall [CBI.FlagValue] Firewall: [ ]
   help: /etc/config/firewall: zones, rules, port forwards. Review the rules before enabling: they apply to every node.
 h3: DHCP Leases
-config.dhcp_backend [CBI.ListValue] DHCP Server: select=kea {dnsmasq,kea}
-  help: The server that gives out the leases on the cluster interfaces. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, which are made in Kea on every node. The IPv6 guard then leaves DHCPv6 to Kea and keeps guarding Router Advertisements.
+config.dhcp_backend [CBI.ListValue] DHCP Server: select=kea {auto,dnsmasq,kea}
+  help: The server that gives out IPv4 leases on the cluster interfaces. Automatic: Kea once it is set up for a cluster interface and started (in the Kea pages), dnsmasq otherwise. Kea or dnsmasq: that one, and the HA cluster switches Kea's DHCPv4 server on or off itself. On a switch to Kea the static leases of dnsmasq are imported into Kea first, then the DHCPv4 of dnsmasq is switched off in the pools of the cluster interfaces (visible on the DHCP page), and switched on again on the way back; DNS and Router Advertisements stay with dnsmasq. With Kea, lease-sync does not run: Kea replicates its leases itself, through its own high availability settings, made in Kea on every node, and the IPv6 guard leaves DHCPv6 to Kea. Set the same on every node.
 ==== simple modal <anon>
 h4: High Availability - General
 <anon>.name [CBI.Value] Peer Name: value=router2 (placeholder "router2")
