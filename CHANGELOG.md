@@ -184,7 +184,7 @@ upgrading a node.
 - The status lists an IPv6 guard handler of an earlier release under
   `earlier_model`, and reads the import's leftovers without eval.
 
-### kea-dnsmasq-hosts (new, 1.0.0-r3)
+### kea-dnsmasq-hosts (new, 1.0.0-r4)
 - The names of Kea's DHCP clients in dnsmasq's DNS, which takes no DDNS
   updates: a service rebuilds `/tmp/hosts/kea-leases` from the lease files
   of the Kea DHCP daemons that run on the node, when Kea's run script hook
@@ -201,6 +201,12 @@ upgrading a node.
   (CA-KEAHOSTS-01). The hosts file is written through `mktemp`, the lease
   files are passed quoted and absolute, and the hook writes nothing through
   a link (CA-KEAHOSTS-02).
+- The name of a static lease of `/etc/config/dhcp` is published for that
+  host's own lease from Kea (its MAC or its address), as dnsmasq did with
+  its own DHCP; before, every static lease name was withheld, and a host
+  whose static lease was imported into Kea had no name in DNS. Other
+  clients still cannot take it, and a `domain` name stays taken (found on
+  the bench, r4).
 
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a
