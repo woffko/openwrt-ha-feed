@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r14, `luci-app-ha-cluster` 2.0.0-r11,
+packages are `ha-cluster` 2.0.0-r15, `luci-app-ha-cluster` 2.0.0-r11,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -109,7 +109,9 @@ upgrading a node.
   of dnsmasq are imported into Kea first (luci-app-kea 0.11.0), the entries
   left are named in the log and the status, dnsmasq's DHCPv4 is switched off
   in the pools of the cluster interfaces (`dhcpv4 'disabled'`, the old value
-  kept in `ha_cluster_dhcpv4`), and Kea is started; if it does not run and
+  kept in `ha_cluster_dhcpv4`), and Kea is restarted (a Kea started while
+  dnsmasq held the DHCP port of the interface could not bind its fallback
+  socket); if it does not run and
   listen within ten seconds everything is put back and the status says
   why. With `kea` and `dnsmasq` ha-cluster also turns kea-dhcp4 on or off in
   `/etc/config/kea`. A switch is refused, before anything changes, when Kea
@@ -150,7 +152,7 @@ upgrading a node.
   Status page shows the server the node runs, why a switch was not made,
   and the static leases of dnsmasq the import left for luci-app-kea.
 
-### kea-dnsmasq-hosts (new, 1.0.0-r1)
+### kea-dnsmasq-hosts (new, 1.0.0-r2)
 - The names of Kea's DHCP clients in dnsmasq's DNS, which takes no DDNS
   updates: a service rebuilds `/tmp/hosts/kea-leases` from the lease files
   of the Kea DHCP daemons that run on the node, when Kea's run script hook

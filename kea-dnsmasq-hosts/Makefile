@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=kea-dnsmasq-hosts
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_MAINTAINER:=woffko
 PKG_LICENSE:=MIT
@@ -46,8 +46,9 @@ define Package/kea-dnsmasq-hosts/install
 	$(INSTALL_BIN) ./files/kea-dnsmasq-hosts.init $(1)/etc/init.d/kea-dnsmasq-hosts
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) ./files/kea-dnsmasq-hosts.sh $(1)/usr/sbin/kea-dnsmasq-hosts
-	$(INSTALL_DIR) $(1)/usr/lib/kea-dnsmasq-hosts
-	$(INSTALL_BIN) ./files/kea-hook.sh $(1)/usr/lib/kea-dnsmasq-hosts/kea-hook
+	# Kea 3 runs scripts of its run script hook from this directory only
+	$(INSTALL_DIR) $(1)/usr/share/kea/scripts
+	$(INSTALL_BIN) ./files/kea-hook.sh $(1)/usr/share/kea/scripts/kea-dnsmasq-hosts
 endef
 
 $(eval $(call BuildPackage,kea-dnsmasq-hosts))
