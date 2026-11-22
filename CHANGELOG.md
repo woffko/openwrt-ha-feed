@@ -150,6 +150,17 @@ upgrading a node.
   Status page shows the server the node runs, why a switch was not made,
   and the static leases of dnsmasq the import left for luci-app-kea.
 
+### kea-dnsmasq-hosts (new, 1.0.0-r1)
+- The names of Kea's DHCP clients in dnsmasq's DNS, which takes no DDNS
+  updates: a service rebuilds `/tmp/hosts/kea-leases` from the lease files
+  of the Kea DHCP daemons that run on the node, when Kea's run script hook
+  says leases changed (at most every five seconds) and every minute, and
+  sends dnsmasq SIGHUP when it changed. In a Kea HA pair each node's lease
+  files hold its partner's leases too, so every node answers for every
+  name. Needs `kea-hook-run-script`, which OpenWrt's Kea package does not
+  build; the hook is set in Kea's config (luci-app-kea's "Client names in
+  DNS"). Independent of ha-cluster.
+
 ### lease-sync, owsync, dnsmasq-ha
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a
   deletion asked of dnsmasq suppressed, peers checked before a message
@@ -176,6 +187,8 @@ upgrading a node.
   OpenWrt rootfs. The expected outputs are the fork's; cases for the
   fork's own behaviour are added.
 - T28, the DHCPv6 BACKUP guard scenario.
+- `tests/unit/test-kea-dnsmasq-hosts.sh`: the hosts file of kea-dnsmasq-hosts
+  from Kea's lease files.
 
 ## [2.0.0] - 2026-10-24
 

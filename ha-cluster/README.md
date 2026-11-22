@@ -474,7 +474,8 @@ What ha-cluster does not do for Kea:
 - It does not carry leases over when the server changes: clients ask
   again.
 - It does not hand the names of Kea's clients to dnsmasq's DNS: dnsmasq
-  answers for the names of its own leases only.
+  answers for the names of its own leases only. Package
+  [`kea-dnsmasq-hosts`](../kea-dnsmasq-hosts/README.md) does.
 
 At every start ha-cluster also logs a warning when neither Kea DHCP daemon
 is installed, and when a dnsmasq pool on a VIP interface still answers

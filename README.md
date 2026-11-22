@@ -20,6 +20,7 @@ A high-availability solution for OpenWrt routers, providing automatic failover, 
 | [`owsync`](https://github.com/pgaufillet/owsync) | Lightweight encrypted file synchronization daemon |
 | [`lease-sync`](https://github.com/pgaufillet/lease-sync) | Real-time DHCP lease replication daemon |
 | [`dnsmasq-ha`](dnsmasq-ha/README.md) | dnsmasq with ubus lease management patches |
+| [`kea-dnsmasq-hosts`](kea-dnsmasq-hosts/README.md) | Fork only: the names of Kea's DHCP clients in dnsmasq's DNS; independent of ha-cluster |
 
 ## Requirements
 
