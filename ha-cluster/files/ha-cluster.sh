@@ -1442,11 +1442,39 @@ ha_check_kea_backend() {
 
 	_ha_check_kea_daemon_conf dhcp4
 	_ha_check_kea_daemon_conf dhcp6
+	_ha_check_kea4_bare_devices
 
 	local port
 	for port in $(ha_kea_ha_ports); do
 		_ha_kea_port_refused "$port" &&
 			ha_log_warning "Kea's high availability listens on port $port (a \"url\" in its config), which the firewall rule of the cluster does not open: below 1024, or a port of owsync or lease-sync. Give Kea another port"
+	done
+	return 0
+}
+
+# Usage: _ha_check_kea4_bare_devices (ha-cluster config loaded)
+# kea-dhcp4 takes a device named without an address, or every device ("*"),
+# on each IPv4 address the device carries, with a socket each that receives
+# the broadcasts. On a cluster interface with a VIP every request of a
+# client is then taken, and answered, once per address. Warns with the
+# entry to write instead: the device and the node's own address on it,
+# which stays on the node (a VIP moves, and a BACKUP has none). A config
+# jsonfilter cannot read is not checked.
+_ha_check_kea4_bare_devices() {
+	local conf="$KEA_CONF_DIR/kea-dhcp4.conf" names name interface device own
+
+	[ -r "$conf" ] || return 0
+	names="$(jsonfilter -i "$conf" -e '@.Dhcp4["interfaces-config"].interfaces[*]' 2>/dev/null)" || return 0
+	for interface in $(_ha_cluster_dhcp_interfaces); do
+		[ -n "$(_ha_vip4_of "$interface")" ] || continue
+		ha_resolve_device device "$interface" || continue
+		for name in $names; do
+			[ "$name" = "$device" ] || [ "$name" = "*" ] || continue
+			own="$(uci -q get "network.$interface.ipaddr" | awk '{ print $1 }')"
+			own="${own%%/*}"
+			ha_log_warning "kea-dhcp4 listens on '$name' without an address while '$interface' ($device) carries a VIP as well: Kea opens a socket for each address there and takes each request of a client, and answers it, once per address. Name '$device/${own:-<this node'"'"'s own address>}' in its interfaces-config instead"
+			break
+		done
 	done
 	return 0
 }

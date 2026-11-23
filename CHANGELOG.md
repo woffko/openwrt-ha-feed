@@ -199,6 +199,12 @@ upgrading a node.
   (`on_change`), which runs `reload_config` once for a burst of sessions.
   Before, a synced DHCP pool or firewall rule stayed out of the peer's
   running service until something else reloaded it (r20).
+- A warning at start when kea-dhcp4 listens on a cluster device with a VIP
+  without an address (or on "*"): Kea then opens a socket for each IPv4
+  address of the device and takes, and answers, each request once per
+  address. It names the entry to write, the device with this node's own
+  address on it (found by the luci-app-kea session in Kea 3.0.4's
+  cfg_iface.cc, measured three times over with three addresses).
 
 ### luci-app-ha-cluster
 - The `nodes` call answers with ha-cluster's `ha_nodes_json`, which adds
