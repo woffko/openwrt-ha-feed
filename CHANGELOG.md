@@ -14,8 +14,8 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r19, `luci-app-ha-cluster` 2.0.0-r13,
-`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r5 and `dnsmasq-ha` 2.93-r4. See
+packages are `ha-cluster` 2.0.0-r20, `luci-app-ha-cluster` 2.0.0-r13,
+`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
 
@@ -184,6 +184,21 @@ upgrading a node.
   Advertisements and DHCPv6"): the switch moves DHCPv4 only, the Router
   Advertisements stay with dnsmasq, why Kea sends none, and what DHCPv6
   from Kea would need in a cluster.
+- With `dhcp_backend 'auto'` the pair switches together: a node follows a
+  switch of the DHCP server made on the other node, as the synced pools
+  tell it, to Kea and back, and turns off again what it turned on in Kea's
+  settings to follow (`/etc/ha-cluster/kea-followed`). It changes no pool,
+  and does not follow while its own switch was cut short, Kea was stopped
+  on it on purpose, or kea-dhcp4 is missing. Kea's high availability wants
+  Kea on both servers; before, the second node stayed on dnsmasq, and with
+  the pools off it gave out no DHCPv4 until it was switched by hand
+  (`/etc/init.d/ha-cluster dhcp_changed`, run by procd when
+  `/etc/config/dhcp` changed) (r20).
+- Files a peer sends are applied: owsync runs
+  `/usr/lib/ha-cluster/owsync-changed` after a session that changed files
+  (`on_change`), which runs `reload_config` once for a burst of sessions.
+  Before, a synced DHCP pool or firewall rule stayed out of the peer's
+  running service until something else reloaded it (r20).
 
 ### luci-app-ha-cluster
 - The `nodes` call answers with ha-cluster's `ha_nodes_json`, which adds
@@ -248,7 +263,9 @@ upgrading a node.
   that address within ten seconds.
 - owsync: connections accepted from the configured peers only, a cap on
   the frame size before the handshake, peer file states validated, and a
-  fix for the crash when a tombstone expires.
+  fix for the crash when a tombstone expires. `on_change` (r6): a program
+  run, without a shell and detached, after a sync session wrote or removed
+  local files.
 - dnsmasq-ha: DHCPv6 leases carry the client DUID over ubus; the
   dhcp-script forwards only `NAME=value` lines to hotplug. The log line
   of an injected DHCPv6 lease shows the whole client id; it showed its

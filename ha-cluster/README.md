@@ -207,6 +207,19 @@ stops.
 Configuration changes are applied on reload (`reload_config`, or LuCI's
 Save & Apply).
 
+**Files a peer sends are applied too.** owsync writes the files of the
+sync groups that come from a peer, and removes those the peer removed, but
+a config file under `/etc/config` takes effect only when the services that
+read it are reloaded. ha-cluster gives owsync a program to run after a sync
+session that changed files (`on_change` in `owsync.conf`, owsync 1.3.0-r6
+of this feed): `/usr/lib/ha-cluster/owsync-changed` runs procd's
+`reload_config`, as LuCI's Save & Apply does, which reloads each service
+whose config changed: dnsmasq for `dhcp`, the firewall for `firewall`, and
+so on. A burst of sessions is taken in one run, after a pause of two
+seconds. Before, a DHCP pool or a firewall rule changed on one node
+reached the other node's file and stayed out of its running service until
+something else reloaded it.
+
 ### Which daemons run
 
 keepalived always runs while ha-cluster is enabled. The sync daemons run
@@ -427,13 +440,37 @@ stopping it hands them back to dnsmasq until Kea runs again, at the latest
 after the next boot. Kea started or stopped by other means
 (`/etc/init.d/kea`) is seen at the next start or reload of ha-cluster.
 
-**Every node runs the same server.** `/etc/config/dhcp` is usually synced
-between the nodes, so the pools are the same everywhere. A node changes
-them only when it switches itself, never because it finds what another
-node did: a node that runs dnsmasq while the pools are switched off for
-Kea, or one that runs Kea while a pool gives out DHCPv4, is `DEGRADED` and
-says so. `/etc/config/ha-cluster` and Kea's config are not synced: set
-`dhcp_backend`, and set Kea up, on every node.
+**The pair switches together.** Kea's high availability wants Kea on both
+servers of a pair: a standby that starts takes the whole lease database
+from its partner, then serves when the primary is gone. `/etc/config/dhcp`
+is usually synced between the nodes, so the pools tell every node which
+server the pair runs, and with `dhcp_backend 'auto'` a node follows a
+switch made on the other node:
+
+- the pools of the cluster interfaces arrive switched off for Kea
+  (`ha_cluster_dhcpv4`) and none gives out DHCPv4, while this node runs
+  dnsmasq: it switches to Kea, as with `kea` (including the setup from
+  dnsmasq's pools when its Kea config is the package's sample). What it
+  turned on in Kea's settings (kea-dhcp4 in `/etc/config/kea`, Kea's init
+  script) is noted in `/etc/ha-cluster/kea-followed`;
+- a pool gives out DHCPv4 again and none is switched off, while this node
+  runs Kea: it switches back to dnsmasq, and turns off again what it had
+  turned on.
+
+A node that follows changes no pool: they are already as the other node
+left them, so the nodes never undo each other. It does not follow while a
+switch of its own was cut short (`switching`), while Kea was stopped on it
+on purpose, or without `kea-dhcp4`. The change reaches it through procd:
+`reload_config`, after LuCI's apply or owsync's `on_change`, sends
+`config.change` for `dhcp`, and `/etc/init.d/ha-cluster dhcp_changed`
+reloads the cluster when its server is not the one asked for. So switching
+one node, with Kea set up or the setup from luci-app-kea at hand, switches
+the pair within seconds.
+
+With `dhcp_backend` set to `kea` or `dnsmasq` a node does as it is told and
+follows nobody: a node that runs dnsmasq while the pools are switched off
+for Kea, or one that runs Kea while a pool gives out DHCPv4, is `DEGRADED`
+and says so. `/etc/config/ha-cluster` and Kea's config are not synced.
 
 VRRP, the VIPs, file sync and the guard for Router Advertisements work as
 with dnsmasq. Kea's primary need not be the VRRP MASTER: the clients reach

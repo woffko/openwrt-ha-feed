@@ -16,7 +16,7 @@
     ],
     "state": "DEGRADED",
     "dhcp_backend": "dnsmasq",
-    "dhcp_backend_mode": "auto",
+    "dhcp_backend_mode": "dnsmasq",
     "dhcp_backend_problem": "dnsmasq's DHCPv4 is switched off for Kea in dhcp.lan while this node runs dnsmasq: another node switched to Kea; set the same DHCP server on every node",
     "services": {
         "keepalived": {
