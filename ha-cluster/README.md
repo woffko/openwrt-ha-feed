@@ -583,6 +583,13 @@ interface.
     link-local address is usable, gives up for good unless this is set.
     Something like `"service-sockets-max-retries": 60` with
     `"service-sockets-retry-wait-time": 2000` is enough.
+- **It warns when kea-dhcp4 listens on a cluster device without an
+  address** (`"br-lan"`, or `"*"`) while a VIP is on it. Kea opens a socket
+  for each IPv4 address of a device named alone, each one taking the
+  broadcasts, so every request of a client is taken and answered once per
+  address: the node's own, and the VIP's on the MASTER. Name the device with
+  the node's own address, which stays on the node (`"br-lan/192.168.1.2"`);
+  the warning gives it. luci-app-kea's setup writes it so from 0.15.1.
 - **It names the nodes for Kea's HA setup**, see
   [Setting up Kea's high availability](#setting-up-keas-high-availability).
 

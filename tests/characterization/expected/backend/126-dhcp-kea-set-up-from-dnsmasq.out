@@ -339,6 +339,7 @@ ha-cluster|daemon.info|Kea is the DHCP server of the cluster interfaces: dnsmasq
 ha-cluster|daemon.info|dnsmasq's leases handed to Kea: 3, 1 skipped
 ha-cluster|daemon.info|Applying HA cluster configuration
 ha-cluster|daemon.info|lease_sync is not used with Kea as the DHCP server: Kea replicates its leases itself
+ha-cluster|daemon.warning|kea-dhcp4 listens on 'br-lan' without an address while 'lan' (br-lan) carries a VIP as well: Kea opens a socket for each address there and takes each request of a client, and answers it, once per address. Name 'br-lan/192.168.50.10' in its interfaces-config instead
 ha-cluster|daemon.info|Taking over service management from standalone init scripts
 ha-cluster|daemon.info|Removed stale dnsmasq HA overlay
 ha-cluster|daemon.info|dnsmasq restarted
