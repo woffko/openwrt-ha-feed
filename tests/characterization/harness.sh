@@ -5,7 +5,7 @@
 #
 # A case file is sourced with errexit set. It may change UCI, remove or
 # create files, set the FAKE_* variables read by the stubs, and set
-# STEP2=reload|stop|firewall|init-reload|kea_changed (with an optional
+# STEP2=reload|stop|firewall|init-reload|kea_changed|dhcp_changed (with an optional
 # step2 function applying changes first) to observe a second step after
 # the first start. rpcd cases may
 # set RPCD_METHOD to call another method than status.
@@ -107,6 +107,7 @@ load_init() {
 	procd_close_instance() { echo "end"; }
 	procd_add_reload_trigger() { printf 'reload_trigger'; args "$@"; }
 	procd_add_raw_trigger() { printf 'raw_trigger'; args "$@"; }
+	procd_add_config_trigger() { printf 'config_trigger'; args "$@"; }
 	procd_running() { [ -z "$_char_killed" ]; }
 	procd_kill() { _char_killed=1; }
 	procd_send_signal() { printf 'signal'; args "$@"; }
@@ -179,6 +180,9 @@ case "$mode" in
 				firewall) firewall ;;
 				# procd runs it on the event luci-app-kea sends
 				kea_changed) kea_changed ;;
+				# procd runs it when reload_config finds /etc/config/dhcp
+				# changed (LuCI's apply, owsync's on_change)
+				dhcp_changed) dhcp_changed ;;
 				# The init script as procd runs it, through rc.common: only
 				# its return code is of interest (procd is not there)
 				init-reload) sh /etc/rc.common /etc/init.d/ha-cluster reload >/dev/null 2>&1 ;;

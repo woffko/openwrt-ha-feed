@@ -8,9 +8,10 @@ STOP=91
 
 USE_PROCD=1
 
-EXTRA_COMMANDS="firewall kea_changed"
+EXTRA_COMMANDS="firewall kea_changed dhcp_changed"
 EXTRA_HELP="	firewall	Bring the rules of the cluster in the firewall config up to date
-	kea_changed	Kea was started or stopped: check the DHCP server of the cluster"
+	kea_changed	Kea was started or stopped: check the DHCP server of the cluster
+	dhcp_changed	/etc/config/dhcp changed: follow a switch of the DHCP server made on the other node"
 
 HA_CLUSTER_LIB="${IPKG_INSTROOT}/usr/lib/ha-cluster/ha-cluster.sh"
 [ -r "$HA_CLUSTER_LIB" ] || HA_CLUSTER_LIB="/usr/lib/ha-cluster/ha-cluster.sh"
@@ -183,6 +184,9 @@ service_triggers() {
 	# luci-app-kea sends it after it started, restarted, reloaded or stopped
 	# Kea
 	procd_add_raw_trigger "kea.service" 1000 /etc/init.d/ha-cluster kea_changed
+	# reload_config sends it for dhcp: after LuCI's apply, and after owsync
+	# took the file from a peer (owsync-changed)
+	procd_add_config_trigger "config.change" "dhcp" /etc/init.d/ha-cluster dhcp_changed
 }
 
 # /etc/init.d/ha-cluster firewall
@@ -219,5 +223,26 @@ kea_changed() {
 	ha_log_init
 	ha_kea_changed
 	procd_running ha-cluster || return 0
+	reload
+}
+
+# /etc/init.d/ha-cluster dhcp_changed
+# Run by procd when /etc/config/dhcp changed: after LuCI's apply, and after
+# owsync took the file from a peer. With dhcp_backend 'auto' the node
+# follows a switch of the DHCP server made on the other node, which the
+# synced pools tell (see ha_dhcp_backend_wanted): a running cluster is
+# reloaded when its server is not the one asked for, and left alone
+# otherwise.
+dhcp_changed() {
+	local enabled
+
+	config_load ha-cluster
+	config_get_bool enabled config enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+
+	procd_running ha-cluster || return 0
+	ha_log_init
+	ha_dhcp_switch_due || return 0
+	ha_log_info "/etc/config/dhcp changed: checking the DHCP server of the cluster interfaces"
 	reload
 }

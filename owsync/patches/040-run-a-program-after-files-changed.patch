@@ -1,0 +1,159 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: run a program after a sync session changed files
+
+owsync writes the files a peer sends, and removes those a peer removed,
+but nothing applies them: on OpenWrt a config file that changes under
+/etc/config takes effect only when the services that read it are
+reloaded. A DHCP pool, a firewall rule or the pools a switch to Kea
+turned off stayed as they were on the peer until something else
+reloaded its service, and the peer's dnsmasq kept serving a config its
+file no longer held.
+
+A new config key, on_change, names a program (an absolute path) that is
+run after a session in which local files were written or removed, from
+the daemon and from a one-shot sync alike. It is run without a shell and
+without arguments, detached through a second fork so that it never
+becomes a zombie of the daemon and does not hold up the session, with
+standard input and output on /dev/null and none of the daemon's other
+descriptors. Between fork and exec only async-signal-safe calls are made:
+the daemon has threads. Without the key nothing changes. A config with
+the key is read by an older owsync with a warning only.
+
+diff -ru a/include/config.h b/include/config.h
+--- a/include/config.h
++++ b/include/config.h
+@@ -51,6 +51,9 @@
+     uint32_t poll_interval;
+     int log_level;  /* 0=error, 1=warning, 2=info, 3=debug */
+ 
++    /* Program run after a sync session wrote or removed local files */
++    char on_change[CONFIG_MAX_PATH_LEN];
++
+     /* Peers (repeatable) */
+     char *peers[CONFIG_MAX_PEERS];
+     size_t peer_count;
+diff -ru a/include/net.h b/include/net.h
+--- a/include/net.h
++++ b/include/net.h
+@@ -81,6 +81,13 @@
+  * server accepts any client (standalone "owsync server" mode). */
+ void net_set_allowed_peers(char **peers, size_t count);
+ 
++/*
++ * Program to run, without arguments and without a shell, after a sync
++ * session wrote or removed local files: for the system to apply what came
++ * from a peer (on OpenWrt, reload_config). NULL or "" for none.
++ */
++void net_set_on_change(const char *path);
++
+ /* Server mode: listen for incoming connections, spawn threads */
+ int start_server(const char *host, const char *port, const char *key,
+                  const char *root, const char *db_path, file_filter_t *filter,
+diff -ru a/src/config.c b/src/config.c
+--- a/src/config.c
++++ b/src/config.c
+@@ -203,6 +203,12 @@
+                 config->log_level = 0;
+             if (config->log_level > 3)
+                 config->log_level = 3;
++        } else if (strcmp(key, "on_change") == 0) {
++            if (value[0] != '/') {
++                fprintf(stderr, "Warning: on_change on line %d is not an absolute path, ignored\n", line_num);
++            } else {
++                strncpy(config->on_change, value, sizeof(config->on_change) - 1);
++            }
+         } else if (strcmp(key, "peer") == 0) {
+             if (config_add_peer(config, value) != OWSYNC_OK) {
+                 fclose(fp);
+diff -ru a/src/main.c b/src/main.c
+--- a/src/main.c
++++ b/src/main.c
+@@ -182,6 +182,8 @@
+     opts->log_level = config.log_level;
+     opts->plain = config.plain_mode;
+     opts->clock_offset = 0;
++    /* Run after a session that changed local files (daemon and one-shot) */
++    net_set_on_change(config.on_change);
+ 
+     /* Copy encryption key from config if present */
+     if (config.encryption_key[0] != '\0') {
+diff -ru a/src/net.c b/src/net.c
+--- a/src/net.c
++++ b/src/net.c
+@@ -20,6 +20,7 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <limits.h>
++#include <sys/wait.h>
+ 
+ #define MAX_CONNECTIONS 50  /* Limit concurrent connections to prevent resource exhaustion */
+ 
+@@ -803,6 +804,58 @@
+  *   6. Receive and apply files from peer
+  *   7. Exchange END_OF_SYNC
+  */
++static char on_change_program[MAX_PATH_LEN];
++
++void net_set_on_change(const char *path) {
++    on_change_program[0] = '\0';
++    if (path && path[0] == '/' && strlen(path) < sizeof(on_change_program)) {
++        strcpy(on_change_program, path);
++    }
++}
++
++/*
++ * Runs on_change_program detached: a child forks the program and exits at
++ * once, so the program is not a child of this process and is never left a
++ * zombie, and a slow program does not hold up the session. Only
++ * async-signal-safe calls between fork and exec: the process has threads.
++ */
++static void run_on_change(void) {
++    if (on_change_program[0] == '\0')
++        return;
++
++    pid_t pid = fork();
++    if (pid < 0) {
++        log_warning("Cannot run %s: fork failed: %s", on_change_program, strerror(errno));
++        return;
++    }
++    if (pid == 0) {
++        pid_t grandchild = fork();
++        if (grandchild == 0) {
++            setsid();
++            int fd = open("/dev/null", O_RDWR);
++            if (fd >= 0) {
++                dup2(fd, 0);
++                dup2(fd, 1);
++                dup2(fd, 2);
++            }
++            /* The program gets none of the sockets and files of the daemon */
++            for (int i = 3; i < 1024; i++)
++                close(i);
++            char *const argv[] = { on_change_program, NULL };
++            execv(on_change_program, argv);
++            _exit(127);
++        }
++        _exit(grandchild < 0 ? 1 : 0);
++    }
++    int status = 0;
++    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
++        ;
++    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
++        log_info("Files changed: ran %s", on_change_program);
++    else
++        log_warning("Files changed: could not run %s", on_change_program);
++}
++
+ static int handle_protocol(channel_t *channel, const char *root, const char *db_path,
+                            file_filter_t *filter, int64_t clock_offset) {
+     uint64_t now = get_time_sec() + clock_offset;
+@@ -1190,6 +1243,9 @@
+ 
+     file_state_list_free(local_files);
+     database_free(db);
++
++    if (received_new_files || deletion_performed)
++        run_on_change();
+     return OWSYNC_OK;
+ }
+ 

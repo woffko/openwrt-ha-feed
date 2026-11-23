@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=19
+PKG_RELEASE:=20
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -32,6 +32,7 @@ endef
 define Package/ha-cluster/conffiles
 /etc/config/ha-cluster
 /etc/ha-cluster/dhcp-backend
+/etc/ha-cluster/kea-followed
 /etc/hotplug.d/keepalived/
 /etc/keepalived/scripts/
 /etc/keepalived/keys/
@@ -52,6 +53,7 @@ define Package/ha-cluster/install
 	$(INSTALL_DIR) $(1)/usr/lib/ha-cluster
 	$(INSTALL_BIN) ./files/ha-cluster.sh $(1)/usr/lib/ha-cluster/
 	$(INSTALL_BIN) ./files/check-dataplane.sh $(1)/usr/lib/ha-cluster/check-dataplane
+	$(INSTALL_BIN) ./files/owsync-changed.sh $(1)/usr/lib/ha-cluster/owsync-changed
 
 	# The handler is installed twice. /etc/hotplug.d/keepalived/ is kept
 	# across sysupgrade as a whole (see conffiles), so the copy there may be

@@ -16,6 +16,8 @@ KEEPALIVED_CONF="${HA_CLUSTER_RUN_DIR}/keepalived.conf"
 OWSYNC_CONF="${HA_CLUSTER_RUN_DIR}/owsync.conf"
 LEASE_SYNC_CONF="${HA_CLUSTER_RUN_DIR}/lease-sync.conf"
 OWSYNC_BIN="${OWSYNC_BIN:-/usr/bin/owsync}"
+# Run by owsync after it wrote or removed files a peer sent
+HA_OWSYNC_ON_CHANGE="${HA_OWSYNC_ON_CHANGE:-/usr/lib/ha-cluster/owsync-changed}"
 LEASE_SYNC_BIN="${LEASE_SYNC_BIN:-/usr/sbin/lease-sync}"
 KEA_DHCP4_BIN="${KEA_DHCP4_BIN:-/usr/sbin/kea-dhcp4}"
 KEA_DHCP6_BIN="${KEA_DHCP6_BIN:-/usr/sbin/kea-dhcp6}"
@@ -44,6 +46,9 @@ HA_KEA_IMPORT_RESULT="${HA_CLUSTER_RUN_DIR}/kea-import.json"
 HA_DNSMASQ_LEASES_COPY="${HA_CLUSTER_RUN_DIR}/dnsmasq-leases"
 # Kea was stopped from luci-app-kea while its config says it runs
 HA_KEA_STOPPED_MARK="${HA_CLUSTER_RUN_DIR}/kea-stopped"
+# What a switch to Kea that followed the other node turned on in Kea's
+# settings ("flag", "init"), for the way back; kept across reboots
+HA_KEA_FOLLOWED="${HA_KEA_FOLLOWED:-${HA_CLUSTER_ROOT}/etc/ha-cluster/kea-followed}"
 HA_DHCP_BACKEND_LOCK="${HA_DHCP_BACKEND_LOCK:-/var/lock/ha-cluster-dhcp-backend.lock}"
 FW4_BIN="${FW4_BIN:-/sbin/fw4}"
 HA_FIREWALL_LOCK="${HA_FIREWALL_LOCK:-/var/lock/ha-cluster-firewall.lock}"
@@ -900,6 +905,9 @@ database=/etc/owsync/owsync.db
 # Daemon settings
 poll_interval=${sync_interval}
 log_level=${owsync_log_level}
+# Applies what came from a peer (owsync 1.3.0-r6 and later; an older one
+# warns about the key and goes on)
+on_change=${HA_OWSYNC_ON_CHANGE}
 
 EOF
 
@@ -2015,20 +2023,67 @@ _ha_kea_set_up_for_cluster() {
 	return 1
 }
 
+# Usage: _ha_dhcp_pair_follow <server this node runs> (ha-cluster config
+# loaded)
+# Kea's high availability wants Kea on both servers of a pair, so with
+# dhcp_backend 'auto' a node follows a switch made on the other node, as the
+# synced pools of the cluster interfaces tell it: kea when they are
+# switched off for Kea (ha_cluster_dhcpv4) and none gives out DHCPv4 while
+# this node runs dnsmasq, with Kea installed and not stopped here on
+# purpose; dnsmasq when one gives out DHCPv4 and none is switched off while
+# this node runs Kea. Nothing otherwise. A node that follows changes no
+# pool: they are already as the other node left them. Nothing either while
+# a switch of this node was cut short (state 'switching'): the pools are
+# then as this node left them, and that switch is made again or undone.
+_ha_dhcp_pair_follow() {
+	local current="$1" interface pool off=0 serving=0 state=""
+
+	[ -r "$HA_DHCP_BACKEND_STATE" ] && read -r state < "$HA_DHCP_BACKEND_STATE"
+	[ "$state" = "switching" ] && return 0
+
+	for interface in $(_ha_cluster_dhcp_interfaces); do
+		for pool in $(_ha_dhcp_pools_of "$interface"); do
+			if [ -n "$(_ha_dhcp_read -q get "dhcp.$pool.ha_cluster_dhcpv4")" ]; then
+				off=1
+			elif _ha_dhcp_pool_serves_v4 "$pool"; then
+				serving=1
+			fi
+		done
+	done
+	if [ "$current" = "dnsmasq" ] && [ "$off" -eq 1 ] && [ "$serving" -eq 0 ] &&
+		[ -x "$KEA_DHCP4_BIN" ] && [ ! -e "$HA_KEA_STOPPED_MARK" ]; then
+		echo "kea"
+	elif [ "$current" = "kea" ] && [ "$off" -eq 0 ] && [ "$serving" -eq 1 ]; then
+		echo "dnsmasq"
+	fi
+	return 0
+}
+
 # Usage: ha_dhcp_backend_wanted (ha-cluster config loaded)
 # The DHCP server the cluster interfaces are to have: dnsmasq or kea
 ha_dhcp_backend_wanted() {
+	local follow
+
 	case "$(ha_dhcp_backend_mode)" in
 		kea) echo "kea" ;;
 		dnsmasq) echo "dnsmasq" ;;
 		*)
-			if _ha_kea_set_up_for_cluster && [ ! -e "$HA_KEA_STOPPED_MARK" ]; then
+			follow="$(_ha_dhcp_pair_follow "$(ha_dhcp_backend)")"
+			if [ -n "$follow" ]; then
+				echo "$follow"
+			elif _ha_kea_set_up_for_cluster && [ ! -e "$HA_KEA_STOPPED_MARK" ]; then
 				echo "kea"
 			else
 				echo "dnsmasq"
 			fi
 			;;
 	esac
+}
+
+# Usage: ha_dhcp_switch_due (ha-cluster config loaded)
+# The node runs another DHCP server than the one asked for
+ha_dhcp_switch_due() {
+	[ "$(ha_dhcp_backend)" != "$(ha_dhcp_backend_wanted)" ]
 }
 
 # Usage: _ha_kea_usable (ha-cluster config loaded)
@@ -2299,6 +2354,10 @@ _ha_kea4_serves_cluster() {
 
 # Usage: _ha_switch_to_kea <mode> (ha-cluster config loaded, copy of dhcp
 # taken)
+# Leaves in $_ha_kea_turned_on what it turned on in Kea's settings (with
+# 'kea': "flag" for kea-dhcp4 in /etc/config/kea, "init" for Kea's init
+# script at boot).
+_ha_kea_turned_on=""
 _ha_switch_to_kea() {
 	local mode="$1" pools flag_set=0 init_enabled=0
 
@@ -2344,6 +2403,7 @@ _ha_switch_to_kea() {
 			init_enabled=1
 		fi
 	fi
+	_ha_kea_turned_on="$([ "$flag_set" -eq 1 ] && echo flag) $([ "$init_enabled" -eq 1 ] && echo init)"
 	# Started anew in any case (a start when it does not run). A Kea that
 	# ran before dnsmasq let the DHCP port go, as when it was started from
 	# luci-app-kea, could not bind its fallback socket on the interface and
@@ -2369,7 +2429,16 @@ _ha_switch_to_kea() {
 # Usage: _ha_switch_to_dnsmasq <mode> (ha-cluster config loaded, copy of
 # dhcp taken)
 _ha_switch_to_dnsmasq() {
-	local mode="$1" pools
+	local mode="$1" pools what
+
+	# What a switch that followed the other node turned on is turned off
+	# again: Kea is the user's, set up or not, as before
+	if [ -r "$HA_KEA_FOLLOWED" ]; then
+		read -r what < "$HA_KEA_FOLLOWED"
+		case " $what " in *" flag "*) _ha_kea_flag 1 ;; esac
+		case " $what " in *" init "*) "$KEA_INIT" disable 2>/dev/null ;; esac
+		rm -f "$HA_KEA_FOLLOWED"
+	fi
 
 	# Kea off first: a few seconds without a DHCP server rather than two.
 	# With 'dnsmasq' the HA cluster turns kea-dhcp4 off. With 'auto' Kea's
@@ -2424,7 +2493,7 @@ _ha_dhcp_backend_save() {
 # switch to Kea that was cut short (state 'switching') is made again, or
 # undone when Kea is no longer asked for.
 ha_apply_dhcp_backend() {
-	local mode current wanted state="" i
+	local mode current wanted state="" i follow="" what
 
 	rm -f "$HA_DHCP_BACKEND_PROBLEM"
 	mkdir -p "${HA_DHCP_BACKEND_LOCK%/*}" 2>/dev/null
@@ -2446,6 +2515,7 @@ ha_apply_dhcp_backend() {
 	mode="$(ha_dhcp_backend_mode)"
 	current="$(ha_dhcp_backend)"
 	wanted="$(ha_dhcp_backend_wanted)"
+	[ "$mode" = "auto" ] && follow="$(_ha_dhcp_pair_follow "$current")"
 
 	[ -r "$HA_DHCP_BACKEND_STATE" ] && read -r state < "$HA_DHCP_BACKEND_STATE"
 	if [ "$state" = "switching" ]; then
@@ -2457,11 +2527,27 @@ ha_apply_dhcp_backend() {
 	fi
 
 	if [ "$current" != "$wanted" ]; then
-		if [ "$wanted" = "kea" ]; then
+		if [ "$wanted" = "kea" ] && [ "$follow" = "kea" ]; then
+			# Kea turned on here as with 'kea', and off again on the way back
+			ha_log_info "The other node switched the DHCP server of the cluster interfaces to Kea: following it (dhcp_backend 'auto')"
+			if _ha_switch_to_kea kea; then
+				current="kea"
+				what="$(echo $_ha_kea_turned_on)"
+				if [ -n "$what" ]; then
+					mkdir -p "${HA_KEA_FOLLOWED%/*}" && printf '%s\n' "$what" > "$HA_KEA_FOLLOWED"
+				fi
+			fi
+		elif [ "$wanted" = "kea" ]; then
 			ha_log_info "Switching the DHCP server of the cluster interfaces from dnsmasq to Kea (dhcp_backend '$mode')"
+			# Kea is the user's now (or the setting's), not the follower's
+			rm -f "$HA_KEA_FOLLOWED"
 			_ha_switch_to_kea "$mode" && current="kea"
 		else
-			ha_log_info "Switching the DHCP server of the cluster interfaces from Kea to dnsmasq (dhcp_backend '$mode')"
+			if [ "$follow" = "dnsmasq" ]; then
+				ha_log_info "The other node switched the DHCP server of the cluster interfaces back to dnsmasq: following it (dhcp_backend 'auto')"
+			else
+				ha_log_info "Switching the DHCP server of the cluster interfaces from Kea to dnsmasq (dhcp_backend '$mode')"
+			fi
 			_ha_switch_to_dnsmasq "$mode"
 			current="dnsmasq"
 		fi
