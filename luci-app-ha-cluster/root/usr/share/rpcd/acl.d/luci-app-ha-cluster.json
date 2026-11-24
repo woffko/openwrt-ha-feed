@@ -21,7 +21,8 @@
 				"/etc/hotplug.d/keepalived/*": [ "write" ]
 			},
 			"ubus": {
-				"file": [ "write", "remove" ]
+				"file": [ "write", "remove" ],
+				"ha-cluster": [ "maintenance" ]
 			},
 			"uci": [ "ha-cluster" ]
 		}

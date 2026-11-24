@@ -256,6 +256,10 @@ case "$1" in
 		json_close_object
 		json_add_object "apply"
 		json_close_object
+		json_add_object "maintenance"
+		json_add_string action "on"
+		json_add_boolean force 0
+		json_close_object
 		json_dump
 		;;
 	call)
@@ -428,6 +432,28 @@ case "$1" in
 				done
 				json_close_array
 
+				# The interfaces that follow the role: an uplink missing on
+				# the MASTER for longer than its grace makes the cluster
+				# degraded, an 'always' uplink missing on a BACKUP is a warning
+				uplinks_problem=""
+				config_load ha-cluster
+				if [ "$ha_enabled" = "1" ] && [ -n "$(ha_uplinks)" ]; then
+					ha_uplinks_json "$node_role"
+					uplinks_problem="$_ha_uplinks_problem"
+				fi
+
+				# A maintenance on this node, and the last word of the command
+				maint_mode=$(ha_maintenance_mode)
+				if [ "$maint_mode" != "none" ]; then
+					json_add_object maintenance
+					json_add_string mode "$maint_mode"
+					json_add_int since "$(ha_maintenance_since)"
+					json_close_object
+				fi
+				if [ -s "$HA_CLUSTER_RUN_DIR/maintenance.last" ]; then
+					json_add_string maintenance_result "$(grep -v '^$' "$HA_CLUSTER_RUN_DIR/maintenance.last" | tail -n 3)"
+				fi
+
 				# Kea is not run by ha-cluster and so is never what makes the
 				# cluster faulty; but a cluster whose DHCP server is down, deaf
 				# or alone on this node is not healthy either
@@ -440,6 +466,10 @@ case "$1" in
 					kea_probe dhcp4 kea-dhcp4
 					kea_probe dhcp6 kea-dhcp6
 					[ -n "$kea_dhcp4_problem$kea_dhcp6_problem" ] && kea_problem=1
+					# The peer in a maintenance, as its Kea tells this one
+					case "$kea_dhcp4_ha_partner_state $kea_dhcp6_ha_partner_state" in
+						*in-maintenance*) json_add_boolean peer_maintenance 1 ;;
+					esac
 				fi
 
 				# A config of the releases before 2.0 that the service has not
@@ -454,6 +484,10 @@ case "$1" in
 					cluster_state="STOPPED"
 				elif [ "$services_ok" -eq 0 ]; then
 					cluster_state="FAULTY"
+				elif [ "$maint_mode" != "none" ]; then
+					cluster_state="MAINTENANCE"
+				elif [ "$uplinks_problem" = "degraded" ]; then
+					cluster_state="DEGRADED"
 				elif [ "$peers_online" -lt "$peers_total" ] && [ "$peers_total" -gt 0 ]; then
 					cluster_state="DEGRADED"
 				elif [ "$kea_problem" -eq 1 ]; then
@@ -597,6 +631,52 @@ case "$1" in
 					json_dump
 					exit 1
 				fi
+				;;
+
+			# Maintenance of this node: temp (until reboot), on (kept across
+			# reboots) or off. Refused at once while the peer could not take
+			# over, unless forced; otherwise run in the background, since the
+			# hand-over takes some seconds: the status says when it is done
+			# (maintenance, maintenance_result).
+			maintenance)
+				read -r input
+				json_load "$input" 2>/dev/null
+				json_get_var action action
+				json_get_var force force
+				json_init
+				case "$action" in
+					temp|on|off) ;;
+					*)
+						json_add_boolean success 0
+						json_add_string error "action must be temp, on or off"
+						json_dump
+						exit 0
+						;;
+				esac
+				if [ "$(get_bool "$(uci -q get ha-cluster.config.enabled)" 0)" != "1" ]; then
+					json_add_boolean success 0
+					json_add_string error "The HA cluster is not enabled"
+					json_dump
+					exit 0
+				fi
+				force_arg=""
+				[ "$force" = "1" ] && force_arg="force"
+				if [ "$action" != "off" ] && [ -z "$force_arg" ] &&
+					[ "$(ha_maintenance_mode)" = "none" ]; then
+					config_load ha-cluster
+					if problem=$(ha_maintenance_peer_problem); then
+						json_add_boolean success 0
+						json_add_string error "Refused: $problem"
+						json_dump
+						exit 0
+					fi
+				fi
+				ha_ensure_run_dir
+				echo "Started: maintenance $action${force_arg:+ $force_arg}" > "$HA_CLUSTER_RUN_DIR/maintenance.last"
+				( /etc/init.d/ha-cluster maintenance "$action" $force_arg \
+					>> "$HA_CLUSTER_RUN_DIR/maintenance.last" 2>&1 ) </dev/null >/dev/null 2>&1 &
+				json_add_boolean success 1
+				json_dump
 				;;
 
 			*)
