@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# ha-cluster: keepalived reports a state change of an instance (ACTION,
+# TYPE, NAME). The uplinks that follow the role (config uplink) and Kea
+# during a maintenance are seen to by the program of the installed package:
+# this file may be a copy kept across a sysupgrade, and must not hold the
+# logic of an earlier release.
+[ -x /usr/lib/ha-cluster/role ] &&
+	/usr/lib/ha-cluster/role event </dev/null >/dev/null 2>&1

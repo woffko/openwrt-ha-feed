@@ -740,6 +740,150 @@ package keeps its lease files in `/var/lib/kea`, which is in RAM: after a
 reboot a node has the leases its partner sends it, and after both nodes
 were down at once there are none, as with dnsmasq's lease file.
 
+## Uplinks: interfaces that follow the role (Advanced WAN)
+
+An uplink section names an interface of `/etc/config/network` that follows
+this node's VRRP role. It is meant for a line or a login that allows one
+session, such as PPPoE: only the MASTER dials. LuCI has it under High
+Availability → Advanced WAN.
+
+```
+config uplink 'wan'
+	option interface 'wan'
+	option vrrp_instance 'lan'
+	option mode 'master'
+
+config uplink 'wanb'
+	option interface 'wanb'
+	option mode 'always'
+```
+
+- **`master`**: the interface is up only while this node is MASTER of
+  the keepalived instance of `vrrp_instance`. It goes down at once in
+  BACKUP and FAULT, when the service stops, and during a hand-over. `ifdown`
+  ends a PPPoE session with PADT, so the provider frees it for the peer.
+- **`always`**: the interface is up on every node whatever the role.
+  ha-cluster only watches it. When a node that is not MASTER has lost it
+  for longer than `grace`, the status warns: a failover would leave the new
+  MASTER without it.
+
+An uplink follows the role and never changes it. A MASTER whose uplink does
+not come up stays MASTER and the status turns `DEGRADED` after `grace`.
+Moving the role because of an uplink would only make the nodes hand it back
+and forth: when the line or the login is the problem, the peer fails too,
+and each move is a new wait at the provider.
+
+**At boot.** An interface with a `master` uplink gets `auto '0'` in
+`/etc/config/network`. Otherwise netifd would bring it up on every node
+before VRRP has chosen the MASTER. The value it had is kept in
+`ha_cluster_auto` (`unset` when it had none). It is given back when the
+uplink is disabled or removed, is moved to `always`, or the node leaves the
+cluster (HA disabled, the service disabled). The interface is then brought
+up if that value asks for it. netifd is told to read the network config
+again when `auto` changes. Otherwise a later reload of the network would
+take the interface down once.
+
+**Retries.** netifd retries a protocol by itself as long as the interface
+is up on its side. A PPPoE server that refuses or does not answer gets
+another attempt at once. ha-cluster brings the interface up once and
+watches. It brings it up again, every `retry` seconds, only when netifd has
+stopped trying: after an authentication failure on an interface with
+`option authfail '1'`, or after someone's `ifdown`. It does not retry after
+an error of the interface's configuration (`OPTION_ERROR`). With one session
+per login, `authfail '1'` on the interface is worth setting: without it,
+netifd asks the provider every few seconds while the provider still holds
+the old session, and some providers lock a login after many failed
+attempts.
+
+**By hand.** An interface brought up on a node that is not MASTER (LuCI's
+Connect, `ifup`) is taken down again within a few seconds, with a warning in
+the log. To manage the interface by hand, disable its uplink section.
+
+**Hooks of your own.** A handler in `/etc/hotplug.d/keepalived/` that brings
+the same interface up or down at VRRP changes would act on it besides
+ha-cluster. The start warns about it, and so does the Advanced WAN page:
+remove it once an uplink section manages the interface.
+
+**How it runs.** keepalived reports each state change through
+`/etc/hotplug.d/keepalived/10-ha-cluster-role`. That handler records the
+state and brings the uplinks in line at once. The service also runs a
+monitor (procd instance `monitor`) that does the same every five seconds
+and checks the states recorded against keepalived's every minute. Routes
+and load balancing between several uplinks stay with mwan3, which follows
+the interfaces going up and down.
+
+The status (`ubus call ha-cluster status`, LuCI's Status page) lists each
+uplink with its role, what it should be (`up`, `down`, `wait` during
+`up_delay`), what it is (`up`, `connecting`, `retrying`, `down`), netifd's
+last error, ha-cluster's attempts and how long it has been down.
+
+## Maintenance
+
+A node in maintenance hands its VRRP roles, its part of DHCP (Kea) and its
+`master` uplinks to the peer. There are two modes, as pfSense has them:
+
+| | Until reboot (`temp`) | Persistent (`on`) |
+|---|---|---|
+| Mark | `/var/run/ha-cluster/maintenance` | `option maintenance '1'` in `config global` |
+| After a reboot or upgrade | gone: the node rejoins, and takes the role back if preemption allows | kept: the node does not take the role back until you leave maintenance |
+| VRRP | every instance in FAULT: the node is no candidate | every instance at the lowest priority: the node stays the last candidate |
+| The peer fails meanwhile | no node holds the role until `off` | this node takes over, and its Kea serves again |
+| For | an upgrade with a reboot after which the node may rejoin by itself; a short check | work after which the node must be checked before it gets the role back; several reboots |
+
+```
+/etc/init.d/ha-cluster maintenance temp    # until off or the next reboot
+/etc/init.d/ha-cluster maintenance on      # until off, across reboots
+/etc/init.d/ha-cluster maintenance off
+/etc/init.d/ha-cluster maintenance         # prints none, temp or persistent
+```
+
+LuCI's Status page has the same three buttons. Entering is refused while the
+peer could not take over: a peer that does not answer ping, or, with Kea, a
+partner out of touch or itself in maintenance. `force` (the button LuCI
+offers after a refusal) enters anyway. keepalived does not tell this node
+whether the peer is in maintenance, so without Kea the check is ping only:
+do not put both nodes in maintenance.
+
+What entering does, in this order:
+
+1. **Kea**: this node's server goes `in-maintenance`. Its partner sees that
+   at its next heartbeat and goes `partner-in-maintenance`, serving every
+   client. Kea takes `ha-maintenance-start` only from the control socket of
+   the server that stays, so the node does from its side what that command
+   would make the partner do.
+2. **Uplinks**: the `master` uplinks go down while the node still holds the
+   role. The session is closed (PADT) before the peer dials.
+3. **VRRP**: keepalived follows two files (`track_file`) that its config
+   names only during a maintenance. Every instance goes to FAULT and the
+   peer takes the VIPs at once, even with `nopreempt`. In persistent mode
+   the instances then come back as BACKUP with 253 taken off their
+   priority.
+
+Leaving gives the instances their priorities back, takes the marks away,
+puts this node's Kea back in the state it had and sends `ha-reset` to the
+partner's HA listener. The partner leaves `partner-in-maintenance` for
+`waiting` and syncs with this node. A partner reached over HTTPS is not
+sent that: run `ha-maintenance-cancel` on it. Whether the node takes the
+role back is VRRP's decision: at once with preemption, not with
+`nopreempt`.
+
+**sysupgrade.** `/lib/upgrade/ha-cluster.sh` does the same hand-over as
+maintenance until reboot at the start of the second stage of a sysupgrade,
+once the image has been checked and before the services stop. Kea's partner
+takes over, the `master` uplinks go down, and keepalived is stopped, so
+that the peer becomes MASTER at once and finds the sessions closed. It
+takes 20 seconds at most and never stops the upgrade. Without it, sysupgrade
+stops keepalived before the network: the peer dialed while the old PPPoE
+session was still held, and the provider refused it for minutes.
+
+An upgrade of the pair, then:
+
+1. upgrade the BACKUP;
+2. on the MASTER, `maintenance on`, and check that the peer serves LAN,
+   DHCP and WAN;
+3. upgrade the node in maintenance;
+4. `maintenance off`.
+
 ## Firewall
 
 Only in this fork. The nodes of a cluster talk to each other, and a
@@ -857,6 +1001,7 @@ All configuration lives in `/etc/config/ha-cluster`.
 | `sync_dir` | string | `/etc/config` | Directory to synchronize |
 | `bind_address` | string | | Local IP for sync traffic (use real IP, not VIP) |
 | `firewall` | bool | `1` | Keep the rules the cluster needs from its peers in `/etc/config/firewall` (rules named `HA-Cluster-...`); `0` removes them. See [Firewall](#firewall) |
+| `maintenance` | bool | `0` | Persistent maintenance, written by `/etc/init.d/ha-cluster maintenance on` and removed by `off` (with `maintenance_since`, when it began). See [Maintenance](#maintenance) |
 
 ### VRRP Instances (`config vrrp_instance '<name>'`)
 
@@ -992,6 +1137,20 @@ config script 'check_lan_dataplane'
 	option fall '3'
 ```
 
+### Uplinks (`config uplink '<name>'`)
+
+See [Uplinks](#uplinks-interfaces-that-follow-the-role-advanced-wan).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `1` | Manage the interface |
+| `interface` | string | | Logical interface of `/etc/config/network`; one uplink section per interface |
+| `mode` | string | `master` | `master`: up only on the MASTER of `vrrp_instance`; `always`: up on every node, watched |
+| `vrrp_instance` | string | | The `vrrp_instance` section whose role the uplink follows; required in mode `master` |
+| `up_delay` | int | `0` | Seconds after becoming MASTER before the interface is brought up (0-3600); 5-10 when the role flaps |
+| `grace` | int | `180` | Seconds the interface may be down while it should be up before the status says so (0-86400) |
+| `retry` | int | `30` | Seconds between ha-cluster's own attempts once netifd has stopped trying (5-3600) |
+
 ### Advanced settings (`config advanced 'advanced'`)
 
 The section must carry the name `advanced`: the backend reads it by name
@@ -1019,6 +1178,9 @@ keepalived state transitions trigger the OpenWrt hotplug system.
 Custom scripts can be placed in `/etc/hotplug.d/keepalived/` with a
 numeric prefix above 50 (e.g. `60-vpn-failover`).
 
+ha-cluster installs two handlers there: `10-ha-cluster-role` (uplinks,
+Kea during a maintenance) and `20-ipv6-backup-guard`.
+
 Available environment variables:
 - `ACTION` — `MASTER`, `BACKUP` or `FAULT`
 - `TYPE` — `INSTANCE`
@@ -1033,6 +1195,9 @@ Available environment variables:
 /usr/lib/ha-cluster/migrate-config      The upgrade's migration, for a config put back after it
 /etc/ha-cluster/dhcp-backend            The DHCP server the node runs (dnsmasq or kea), kept across sysupgrade
 /etc/hotplug.d/iface/60-ha-cluster-kea  With Kea as the DHCP server: Kea rereads its config at ifup
+/etc/hotplug.d/keepalived/10-ha-cluster-role  Runs /usr/lib/ha-cluster/role at each VRRP state change
+/usr/lib/ha-cluster/role                The uplinks and Kea at VRRP changes; the uplink monitor
+/lib/upgrade/ha-cluster.sh              Hands the roles over at the start of a sysupgrade
 /var/run/ha-cluster/                        Generated configs (runtime)
 ```
 

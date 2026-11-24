@@ -8,10 +8,11 @@ STOP=91
 
 USE_PROCD=1
 
-EXTRA_COMMANDS="firewall kea_changed dhcp_changed"
+EXTRA_COMMANDS="firewall kea_changed dhcp_changed maintenance"
 EXTRA_HELP="	firewall	Bring the rules of the cluster in the firewall config up to date
 	kea_changed	Kea was started or stopped: check the DHCP server of the cluster
-	dhcp_changed	/etc/config/dhcp changed: follow a switch of the DHCP server made on the other node"
+	dhcp_changed	/etc/config/dhcp changed: follow a switch of the DHCP server made on the other node
+	maintenance	temp|on|off [force]: hand this node's roles to the peer until reboot (temp) or until off (on), or take them back"
 
 HA_CLUSTER_LIB="${IPKG_INSTROOT}/usr/lib/ha-cluster/ha-cluster.sh"
 [ -r "$HA_CLUSTER_LIB" ] || HA_CLUSTER_LIB="/usr/lib/ha-cluster/ha-cluster.sh"
@@ -67,6 +68,11 @@ start_service() {
 	# What the peers must reach on this node, as rules in the firewall config
 	ha_apply_firewall
 
+	# The interfaces that follow the role: their auto, before keepalived
+	# reports a state
+	config_load ha-cluster
+	ha_apply_uplinks
+
 	ha_log_info "Starting keepalived daemon"
 	procd_open_instance keepalived
 	procd_set_param command /usr/sbin/keepalived
@@ -78,6 +84,15 @@ start_service() {
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+
+	# The uplinks in line between keepalived's reports: netifd that stopped
+	# retrying, an interface brought up by hand on a node that is not MASTER
+	if [ -n "$(ha_uplinks)" ]; then
+		procd_open_instance monitor
+		procd_set_param command "$HA_ROLE_BIN" monitor
+		procd_set_param respawn
+		procd_close_instance
+	fi
 
 	if [ -f "$OWSYNC_CONF" ]; then
 		ha_log_info "Starting owsync daemon"
@@ -112,6 +127,15 @@ start_service() {
 # whoever reloads by hand. Before, both returned 0 with no daemon running.
 service_started() {
 	ha_reconcile_ipv6_guard
+	if [ -z "${HA_START_FAILED:-}" ]; then
+		# The uplinks in line with the states recorded: keepalived reports
+		# no state that a reload keeps
+		config_load ha-cluster
+		[ -n "$(ha_uplinks)" ] && "$HA_ROLE_BIN" reconcile </dev/null >/dev/null 2>&1 &
+		# Kea back in-maintenance once it has joined its partner
+		[ "$(ha_maintenance_mode)" = "persistent" ] &&
+			( ha_maintenance_kea_resume ) </dev/null >/dev/null 2>&1 &
+	fi
 	[ -z "${HA_START_FAILED:-}" ]
 }
 
@@ -138,6 +162,10 @@ service_stopped() {
 	# longer report a state: closed for a node that only stops, removed
 	# for a node that leaves the cluster
 	ha_stop_ipv6_guard
+
+	# The 'master' uplinks down for a node that only stops, their auto back
+	# for one that leaves
+	ha_stop_uplinks
 
 	# Kept for a node that only stops, removed for one that leaves
 	ha_stop_firewall
@@ -224,6 +252,41 @@ kea_changed() {
 	ha_kea_changed
 	procd_running ha-cluster || return 0
 	reload
+}
+
+# /etc/init.d/ha-cluster maintenance temp|on|off [force]
+# temp: this node hands its VRRP roles, DHCP (Kea) and 'master' uplinks to
+# the peer and takes none until "off" or the next reboot. on: the same,
+# kept across reboots and upgrades; the node stays the last candidate and
+# takes the roles only when the peer is gone. off: back to normal. Refused
+# while the peer could not take over, unless forced. Without an argument:
+# prints the mode (none, temp, persistent).
+maintenance() {
+	local action="$1" force="$2" mode
+
+	ha_log_init
+	case "$action" in
+		""|status)
+			ha_maintenance_mode
+			return 0
+			;;
+		temp) mode="temp" ;;
+		on|persistent) mode="persistent" ;;
+		off) mode="" ;;
+		*)
+			echo "Usage: $0 maintenance temp|on|off [force]" >&2
+			return 1
+			;;
+	esac
+	if [ -n "$mode" ]; then
+		ha_maintenance_enter "$mode" "$force" || return 1
+	else
+		ha_maintenance_leave || return 1
+	fi
+	# keepalived's config with the files of the maintenance, or without
+	procd_running ha-cluster && reload
+	ha_maintenance_settle
+	return 0
 }
 
 # /etc/init.d/ha-cluster dhcp_changed

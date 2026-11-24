@@ -8,6 +8,27 @@ if [ -n "$FAKE_UBUS_RECORD" ]; then
 			;;
 	esac
 fi
+# What ha-cluster does to netifd's interfaces is recorded in $CHAR_LOG. The
+# status of an interface comes from $FAKE_IFSTATUS_DIR/<interface>.json;
+# netifd knows no other.
+case "$1 $2 $3" in
+	"call network reload")
+		echo "ubus|$*" >> "${CHAR_LOG:-/dev/null}"
+		exit 0
+		;;
+	"call network.interface."*" up"|"call network.interface."*" down")
+		echo "ubus|$*" >> "${CHAR_LOG:-/dev/null}"
+		exit 0
+		;;
+	"call network.interface."*" status")
+		iface="${2#network.interface.}"
+		if [ -n "$FAKE_IFSTATUS_DIR" ] && [ -f "$FAKE_IFSTATUS_DIR/$iface.json" ]; then
+			cat "$FAKE_IFSTATUS_DIR/$iface.json"
+			exit 0
+		fi
+		exit 4
+		;;
+esac
 # Only "call keepalived dump" answers, from the $FAKE_KEEPALIVED fixtures:
 # the next one at each call, the last one repeated.
 if [ "$1 $2 $3" = "call keepalived dump" ] && [ -n "$FAKE_KEEPALIVED" ]; then

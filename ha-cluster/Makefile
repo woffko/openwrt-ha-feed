@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=20
+PKG_RELEASE:=21
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -54,6 +54,7 @@ define Package/ha-cluster/install
 	$(INSTALL_BIN) ./files/ha-cluster.sh $(1)/usr/lib/ha-cluster/
 	$(INSTALL_BIN) ./files/check-dataplane.sh $(1)/usr/lib/ha-cluster/check-dataplane
 	$(INSTALL_BIN) ./files/owsync-changed.sh $(1)/usr/lib/ha-cluster/owsync-changed
+	$(INSTALL_BIN) ./files/role.sh $(1)/usr/lib/ha-cluster/role
 
 	# The handler is installed twice. /etc/hotplug.d/keepalived/ is kept
 	# across sysupgrade as a whole (see conffiles), so the copy there may be
@@ -62,6 +63,13 @@ define Package/ha-cluster/install
 	$(INSTALL_BIN) ./files/ipv6-backup-guard.hotplug $(1)/usr/lib/ha-cluster/ipv6-backup-guard
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/keepalived
 	$(INSTALL_BIN) ./files/ipv6-backup-guard.hotplug $(1)/etc/hotplug.d/keepalived/20-ipv6-backup-guard
+	# Uplinks and maintenance at VRRP changes: a stub that runs the program
+	# under /usr/lib, harmless when an older copy is kept
+	$(INSTALL_BIN) ./files/role.hotplug $(1)/etc/hotplug.d/keepalived/10-ha-cluster-role
+
+	# Hands the node's roles over at the start of a sysupgrade's second stage
+	$(INSTALL_DIR) $(1)/lib/upgrade
+	$(INSTALL_DATA) ./files/sysupgrade.sh $(1)/lib/upgrade/ha-cluster.sh
 
 	# With Kea as the DHCP server: Kea reads its config again when an
 	# interface it listens on has come up

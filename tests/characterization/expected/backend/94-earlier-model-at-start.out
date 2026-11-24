@@ -264,6 +264,7 @@ config exclude
 == guard handlers
 01-ubus
 01-user
+10-ha-cluster-role
 20-ipv6-backup-guard
 501-rpcd
 505-system
