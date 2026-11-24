@@ -37,6 +37,15 @@
 		}
 	},
 
+	"admin/services/ha-cluster/uplinks": {
+		"title": "Advanced WAN",
+		"order": 35,
+		"action": {
+			"type": "view",
+			"path": "ha-cluster/uplinks"
+		}
+	},
+
 	"admin/services/ha-cluster/owsync-advanced": {
 		"title": "Advanced Config Sync",
 		"order": 40,

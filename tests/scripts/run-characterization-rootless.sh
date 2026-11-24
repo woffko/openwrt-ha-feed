@@ -68,10 +68,13 @@ run_case() {
 	cp "$FEED_DIR/ha-cluster/files/check-dataplane.sh" "$WORK/ha-lib/check-dataplane"
 	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/ha-lib/ipv6-backup-guard"
 	cp "$FEED_DIR/ha-cluster/files/ha-cluster.uci-defaults" "$WORK/ha-lib/migrate-config"
+	cp "$FEED_DIR/ha-cluster/files/role.sh" "$WORK/ha-lib/role"
 	mkdir -p "$WORK/etc/hotplug.d/keepalived"
 	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
-	chmod 0755 "$WORK/ha-lib/check-dataplane" "$WORK/ha-lib/ipv6-backup-guard" \
-		"$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
+	cp "$FEED_DIR/ha-cluster/files/role.hotplug" "$WORK/etc/hotplug.d/keepalived/10-ha-cluster-role"
+	chmod 0755 "$WORK/ha-lib/check-dataplane" "$WORK/ha-lib/ipv6-backup-guard" "$WORK/ha-lib/role" \
+		"$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard" \
+		"$WORK/etc/hotplug.d/keepalived/10-ha-cluster-role"
 	mkdir -p "$WORK/tmp/run" "$WORK/tmp/lock"
 	for entry in $CHAR_HIDE_INITD; do
 		rm -f "$WORK/etc/init.d/$entry" "$WORK/etc/rc.d/"[SK][0-9][0-9]"$entry"

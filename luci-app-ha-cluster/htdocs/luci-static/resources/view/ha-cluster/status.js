@@ -16,6 +16,13 @@ var callHAClusterStatus = rpc.declare({
 	expect: { }
 });
 
+var callMaintenance = rpc.declare({
+	object: 'ha-cluster',
+	method: 'maintenance',
+	params: [ 'action', 'force' ],
+	expect: { }
+});
+
 return view.extend({
 	__init__: function() {
 		this.super('__init__', arguments);
@@ -188,6 +195,9 @@ return view.extend({
 			case 'FAULTY':
 				stateClass = 'label important';
 				break;
+			case 'MAINTENANCE':
+				stateClass = 'label notice';
+				break;
 			default:
 				stateClass = 'label';
 		}
@@ -240,6 +250,24 @@ return view.extend({
 					return E('li', {}, [ entry.name || '-', ' ', entry.identifier || '', ' ', entry.address || '',
 						' (', entry.status || '', ')' ].join(''));
 				}))
+			]));
+
+		// A maintenance of this node, or of the peer as its Kea tells
+		var maintenance = status.maintenance || null;
+		if (maintenance)
+			earlierWarning.push(E('div', { 'class': 'alert-message notice' }, [
+				E('p', {}, (maintenance.mode === 'persistent'
+					? _('This node is in maintenance until you leave it (kept across reboots and upgrades), since %s: the peer holds the roles.')
+					: _('This node is in maintenance until you leave it or it reboots, since %s: the peer holds the roles.'))
+					.format(maintenance.since ? new Date(maintenance.since * 1000).toLocaleString() : '?'))
+			]));
+		if (status.peer_maintenance)
+			earlierWarning.push(E('div', { 'class': 'alert-message notice' },
+				_('The peer is in maintenance: this node holds the roles and serves every DHCP client.')));
+		if (status.maintenance_result)
+			earlierWarning.push(E('div', { 'class': 'alert-message' }, [
+				E('strong', {}, _('Last maintenance command:')), ' ',
+				E('span', { 'style': 'white-space: pre-line' }, status.maintenance_result)
 			]));
 
 		return earlierWarning.concat([
@@ -323,6 +351,7 @@ return view.extend({
 				] : []))
 			]),
 
+		].concat(this.renderUplinks(status.uplinks), this.renderMaintenance(maintenance), [
 			E('h3', {}, _('Peer Status')),
 			E('div', { 'class': 'cbi-section cbi-section-node' }, [
 				peers.length > 0 ?
@@ -349,7 +378,120 @@ return view.extend({
 					}))) :
 					E('div', { 'class': 'alert-message warning' }, _('No peers configured'))
 			])
-		]);
+		]));
+	},
+
+	// The interfaces that follow the role (Advanced WAN)
+	renderUplinks: function(uplinks) {
+		if (!Array.isArray(uplinks) || !uplinks.length)
+			return [];
+
+		var self = this;
+		var stateLabels = {
+			'up': [ 'label success', _('Up') ],
+			'connecting': [ 'label notice', _('Connecting') ],
+			'retrying': [ 'label warning', _('Retrying') ],
+			'down': [ 'label', _('Down') ],
+			'unknown': [ 'label important', _('Unknown interface') ]
+		};
+
+		return [
+			E('h3', {}, _('Uplinks')),
+			E('div', { 'class': 'cbi-section cbi-section-node' }, [
+				E('table', { 'class': 'table' }, [
+					E('tr', { 'class': 'tr table-titles' }, [
+						E('th', { 'class': 'th' }, _('Uplink')),
+						E('th', { 'class': 'th' }, _('Mode')),
+						E('th', { 'class': 'th' }, _('Role')),
+						E('th', { 'class': 'th' }, _('Should be')),
+						E('th', { 'class': 'th' }, _('State')),
+						E('th', { 'class': 'th' }, _('Details'))
+					])
+				].concat(uplinks.map(function(u) {
+					var label = stateLabels[u.state] || [ 'label', u.state || '?' ];
+					var details = [];
+					if (u.state === 'up' && u.uptime)
+						details.push(_('up for %s').format(self.formatUptime(u.uptime)));
+					if (u.error)
+						details.push(u.error);
+					if (u.retries)
+						details.push(_('%d attempts by ha-cluster').format(u.retries));
+					if (u.down_for)
+						details.push(_('down for %s').format(self.formatUptime(u.down_for)));
+					if (u.up_in)
+						details.push(_('up in %d s').format(u.up_in));
+					var stateCell = [ E('span', { 'class': label[0] }, label[1]) ];
+					if (u.problem === 'down')
+						stateCell.push(' ', E('span', { 'class': 'label important' }, _('MASTER without uplink')));
+					else if (u.problem === 'down-on-backup')
+						stateCell.push(' ', E('span', { 'class': 'label warning' }, _('Missing on this backup')));
+					var desired = { 'up': _('up'), 'down': _('down'), 'wait': _('up after the delay') }[u.desired] || u.desired || '-';
+					return E('tr', { 'class': 'tr' }, [
+						E('td', { 'class': 'td left', 'data-title': _('Uplink') },
+							u.name === u.interface ? u.name : u.name + ' (' + u.interface + ')'),
+						E('td', { 'class': 'td left', 'data-title': _('Mode') },
+							u.mode === 'always' ? _('Always') : _('Master only')),
+						E('td', { 'class': 'td left', 'data-title': _('Role') },
+							(u.role || '-') + (u.vrrp_instance ? ' (' + u.vrrp_instance + ')' : '')),
+						E('td', { 'class': 'td left', 'data-title': _('Should be') }, desired),
+						E('td', { 'class': 'td left', 'data-title': _('State') }, stateCell),
+						E('td', { 'class': 'td left', 'data-title': _('Details') }, details.join(', ') || '-')
+					]);
+				})))
+			])
+		];
+	},
+
+	handleMaintenance: function(action, force) {
+		return callMaintenance(action, force ? true : false).then(L.bind(function(res) {
+			if (res && res.success) {
+				ui.addNotification(null, E('p', _('Maintenance command started: the status shows when the hand-over is done.')), 'info');
+				return;
+			}
+			var error = (res && res.error) || _('No answer');
+			var body = [ E('p', {}, error) ];
+			if (action !== 'off' && /^Refused/.test(error))
+				body.push(E('div', { 'class': 'right' }, E('button', {
+					'class': 'btn cbi-button cbi-button-negative',
+					'click': ui.createHandlerFn(this, 'handleMaintenance', action, true)
+				}, _('Enter anyway (force)'))));
+			ui.addNotification(_('Maintenance'), body, 'warning');
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', _('Maintenance command failed: %s').format(err.message || err)), 'danger');
+		});
+	},
+
+	// Maintenance of this node, as pfSense has it: until reboot, or kept
+	renderMaintenance: function(maintenance) {
+		var mode = (maintenance && maintenance.mode) || 'none';
+		var button = L.bind(function(action, title, description, disabled, style) {
+			return E('div', { 'class': 'cbi-value' }, [
+				E('label', { 'class': 'cbi-value-title' }, title),
+				E('div', { 'class': 'cbi-value-field' }, [
+					E('button', {
+						'class': 'btn cbi-button ' + (style || 'cbi-button-action'),
+						'disabled': disabled ? '' : null,
+						'click': ui.createHandlerFn(this, 'handleMaintenance', action, false)
+					}, title),
+					E('div', { 'class': 'cbi-value-description' }, description)
+				])
+			]);
+		}, this);
+
+		return [
+			E('h3', {}, _('Maintenance')),
+			E('div', { 'class': 'cbi-section cbi-section-node' }, [
+				button('temp', _('Enter maintenance until reboot'),
+					_('This node hands its VRRP roles, DHCP (Kea) and Master only uplinks to the peer and stays out until you leave maintenance or the node reboots. Also entered automatically before a sysupgrade. The peer must be healthy.'),
+					mode === 'temp'),
+				button('on', _('Enter persistent maintenance'),
+					_('Like maintenance until reboot, but kept across reboots and upgrades: the node stays a low-priority backup and does not take the role back until you leave maintenance. Use it for work after which the node must be checked first. The peer must be healthy.'),
+					mode === 'persistent'),
+				button('off', _('Leave maintenance'),
+					_('The node rejoins: VRRP priorities, Kea and uplinks return to normal. Whether it takes the role back depends on preemption.'),
+					mode === 'none', 'cbi-button-positive')
+			])
+		];
 	},
 
 	render: function(data) {

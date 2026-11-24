@@ -14,12 +14,35 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r20, `luci-app-ha-cluster` 2.0.0-r13,
+packages are `ha-cluster` 2.0.0-r21, `luci-app-ha-cluster` 2.0.0-r14,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
 
 ### ha-cluster
+- Uplinks (`config uplink`): interfaces that follow the node's VRRP role.
+  In mode `master` an interface, such as a PPPoE line with one session per
+  login, is up only on the MASTER of the instance it follows; in mode
+  `always` it is up on every node and watched. ha-cluster sets `auto '0'`
+  on the interface of a `master` uplink and keeps the value it had in
+  `ha_cluster_auto`, takes down an interface brought up by hand on a node
+  that is not MASTER, brings it up again when netifd has stopped retrying,
+  and reports each uplink in the status: `DEGRADED` when the MASTER has
+  been without it longer than `grace`. An uplink never moves the role. See
+  [Uplinks](ha-cluster/README.md#uplinks-interfaces-that-follow-the-role-advanced-wan).
+- Maintenance, in two modes as pfSense has them:
+  `/etc/init.d/ha-cluster maintenance temp` (until reboot: every instance
+  in FAULT) and `maintenance on` (kept across reboots: the lowest
+  priority, the node stays the last candidate), `maintenance off` to
+  leave. Kea's partner is made to serve every client first, the `master`
+  uplinks go down before the peer dials, and entering is refused while
+  the peer could not take over, unless forced. The status is
+  `MAINTENANCE`. See [Maintenance](ha-cluster/README.md#maintenance).
+- At the start of a sysupgrade's second stage the node hands its roles
+  over the same way (`/lib/upgrade/ha-cluster.sh`), so the peer serves at
+  once and finds the PPPoE sessions closed. Before, keepalived went before
+  the network and the peer's PPPoE was refused while the provider held the
+  old session.
 - Sync encryption is fail closed. A sync daemon that has work does not
   start without a valid `encryption_key`, and ha-cluster refuses to
   start; plain mode is the explicit `sync_encryption '0'`, never a
@@ -207,6 +230,13 @@ upgrading a node.
   cfg_iface.cc, measured three times over with three addresses).
 
 ### luci-app-ha-cluster
+- Advanced WAN page for the uplink sections, with a description under
+  every option and a warning about keepalived handlers of the user's that
+  bring interfaces up or down. The Status page lists the uplinks, shows a
+  maintenance of the node or of its peer, and has the maintenance
+  buttons; the `maintenance` call (write ACL) runs the command in the
+  background and refuses at once while the peer could not take over,
+  unless forced. Needs ha-cluster 2.0.0-r21 (r14).
 - The `nodes` call answers with ha-cluster's `ha_nodes_json`, which adds
   `dhcp_interfaces`; it needs ha-cluster 2.0.0-r19 (r13).
 - "Encrypt Sync Traffic" switch on the General page, for the backend's
