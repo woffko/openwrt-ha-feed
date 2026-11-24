@@ -133,8 +133,7 @@ service_started() {
 		config_load ha-cluster
 		[ -n "$(ha_uplinks)" ] && "$HA_ROLE_BIN" reconcile </dev/null >/dev/null 2>&1 &
 		# Kea back in-maintenance once it has joined its partner
-		[ "$(ha_maintenance_mode)" = "persistent" ] &&
-			( ha_maintenance_kea_resume ) </dev/null >/dev/null 2>&1 &
+		[ "$(ha_maintenance_mode)" = "persistent" ] && ha_maintenance_kea_resume_bg
 	fi
 	[ -z "${HA_START_FAILED:-}" ]
 }

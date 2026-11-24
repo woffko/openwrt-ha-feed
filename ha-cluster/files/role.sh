@@ -60,24 +60,6 @@ ha_uplinks_reconcile_wake() {
 	fi
 }
 
-# The states recorded against keepalived's: a report that came out of
-# order, or that no handler got, is set right
-role_check_states() {
-	local name state role since
-
-	_ha_keepalived_states | while read -r name state; do
-		case "$state" in
-			MASTER|BACKUP|FAULT) ;;
-			*) continue ;;
-		esac
-		role=""
-		[ -r "$HA_ROLE_DIR/instance.$name" ] &&
-			read -r role since < "$HA_ROLE_DIR/instance.$name"
-		[ "$role" = "$state" ] && continue
-		ha_log_info "keepalived has instance $name $state, recorded ${role:-nothing}: corrected"
-		ha_role_record "$name" "$state"
-	done
-}
 
 case "$1" in
 	event)
@@ -101,9 +83,8 @@ case "$1" in
 		n=0
 		while :; do
 			if role_enabled && [ -n "$(ha_uplinks)" ]; then
-				if [ "$n" -eq 0 ]; then
-					role_check_states
-				fi
+				# The states recorded against keepalived's own
+				[ "$n" -eq 0 ] && ha_role_sync
 				ha_role_locked ha_uplinks_reconcile
 			fi
 			n=$(((n + 1) % 12))
