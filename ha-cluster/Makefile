@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=21
+PKG_RELEASE:=22
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -67,7 +67,8 @@ define Package/ha-cluster/install
 	# under /usr/lib, harmless when an older copy is kept
 	$(INSTALL_BIN) ./files/role.hotplug $(1)/etc/hotplug.d/keepalived/10-ha-cluster-role
 
-	# Hands the node's roles over at the start of a sysupgrade's second stage
+	# Hands the node's roles over at a sysupgrade, before procd stops the
+	# services
 	$(INSTALL_DIR) $(1)/lib/upgrade
 	$(INSTALL_DATA) ./files/sysupgrade.sh $(1)/lib/upgrade/ha-cluster.sh
 

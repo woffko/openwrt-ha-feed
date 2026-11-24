@@ -15,11 +15,6 @@
 #                    brought up by hand on a node that is not MASTER), and
 #                    every minute the states recorded checked against
 #                    keepalived's own
-#   role sysupgrade  from /lib/upgrade/ha-cluster.sh at the start of the
-#                    second stage of a sysupgrade: Kea's partner serves every
-#                    client, the 'master' uplinks go down (PADT), then
-#                    keepalived, so that the peer takes over at once and
-#                    finds the sessions closed
 
 HA_CLUSTER_LIB="${HA_CLUSTER_LIB:-/usr/lib/ha-cluster/ha-cluster.sh}"
 . "$HA_CLUSTER_LIB"
@@ -91,21 +86,8 @@ case "$1" in
 			sleep "$HA_ROLE_MONITOR_INTERVAL"
 		done
 		;;
-	sysupgrade)
-		role_enabled || exit 0
-		pgrep -x keepalived >/dev/null 2>&1 || pgrep keepalived >/dev/null 2>&1 || exit 0
-		ha_log_warning "sysupgrade: this node hands its roles over"
-		ha_dhcp_backend_is_kea && ha_kea_maintenance enter
-		ha_ensure_run_dir && mkdir -p "$HA_ROLE_DIR" && : > "$HA_ROLE_DIR/hold"
-		ha_role_locked ha_uplinks_reconcile
-		# The monitor would only find the same; keepalived goes with its
-		# VIPs and tells the peer (priority 0)
-		ubus call service delete '{"name":"ha-cluster","instance":"monitor"}' >/dev/null 2>&1
-		ubus call service delete '{"name":"ha-cluster","instance":"keepalived"}' >/dev/null 2>&1
-		ha_log_info "sysupgrade: roles handed over"
-		;;
 	*)
-		echo "Usage: $0 event|reconcile|monitor|sysupgrade" >&2
+		echo "Usage: $0 event|reconcile|monitor" >&2
 		exit 1
 		;;
 esac

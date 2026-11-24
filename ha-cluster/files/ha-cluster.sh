@@ -4239,6 +4239,10 @@ ha_apply_uplinks() {
 ha_stop_uplinks() {
 	local enabled section
 
+	# A hold left by a hand-over cut short (a maintenance command killed
+	# halfway) does not outlive the service
+	rm -f "$HA_ROLE_DIR/hold"
+
 	config_load ha-cluster
 	config_get_bool enabled config enabled 0
 	if [ "$enabled" -eq 1 ] && ha_service_enabled; then
