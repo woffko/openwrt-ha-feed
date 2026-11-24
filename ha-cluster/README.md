@@ -867,14 +867,19 @@ sent that: run `ha-maintenance-cancel` on it. Whether the node takes the
 role back is VRRP's decision: at once with preemption, not with
 `nopreempt`.
 
-**sysupgrade.** `/lib/upgrade/ha-cluster.sh` does the same hand-over as
-maintenance until reboot at the start of the second stage of a sysupgrade,
-once the image has been checked and before the services stop. Kea's partner
-takes over, the `master` uplinks go down, and keepalived is stopped, so
-that the peer becomes MASTER at once and finds the sessions closed. It
-takes 20 seconds at most and never stops the upgrade. Without it, sysupgrade
-stops keepalived before the network: the peer dialed while the old PPPoE
-session was still held, and the provider refused it for minutes.
+**sysupgrade.** A sysupgrade that keeps the settings puts the node in
+maintenance until reboot first (`/lib/upgrade/ha-cluster.sh`), once the image
+has been checked: Kea's partner takes over, the `master` uplinks go down
+(PADT), and the peer becomes MASTER. It runs among the hooks that
+`/sbin/sysupgrade` calls while it writes the backup of the settings, takes
+40 seconds at most and never stops the upgrade. It cannot wait any longer:
+as soon as `/sbin/sysupgrade` hands the image to procd, procd stops every
+service with a signal, netifd and pppd go without a PADT, and the provider
+holds the session. That is what refused the peer's PPPoE for minutes before.
+An upgrade without the settings (`sysupgrade -n`) writes no backup and gets
+no hand-over: run `maintenance temp` first. If an upgrade fails after the
+hand-over, the node stays in maintenance until `maintenance off` or a
+reboot, as its status says.
 
 An upgrade of the pair, then:
 
@@ -1197,7 +1202,7 @@ Available environment variables:
 /etc/hotplug.d/iface/60-ha-cluster-kea  With Kea as the DHCP server: Kea rereads its config at ifup
 /etc/hotplug.d/keepalived/10-ha-cluster-role  Runs /usr/lib/ha-cluster/role at each VRRP state change
 /usr/lib/ha-cluster/role                The uplinks and Kea at VRRP changes; the uplink monitor
-/lib/upgrade/ha-cluster.sh              Hands the roles over at the start of a sysupgrade
+/lib/upgrade/ha-cluster.sh              Hands the roles over at a sysupgrade (maintenance until reboot)
 /var/run/ha-cluster/                        Generated configs (runtime)
 ```
 
