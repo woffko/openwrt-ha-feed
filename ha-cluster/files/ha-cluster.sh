@@ -4407,13 +4407,37 @@ _ha_keepalived_states() {
 	done
 }
 
+# Usage: ha_role_sync
+# The states recorded set to keepalived's own: a report that came out of
+# order or late, or that no handler got. Prints nothing; logs what it set.
+ha_role_sync() {
+	local name state role since
+
+	_ha_keepalived_states | while read -r name state; do
+		case "$state" in
+			MASTER|BACKUP|FAULT) ;;
+			*) continue ;;
+		esac
+		role=""
+		[ -r "$HA_ROLE_DIR/instance.$name" ] &&
+			read -r role since < "$HA_ROLE_DIR/instance.$name"
+		[ "$role" = "$state" ] && continue
+		ha_log_info "keepalived has instance $name $state, recorded ${role:-nothing}: corrected"
+		ha_role_record "$name" "$state"
+	done
+}
+
 # Usage: _ha_keepalived_wait_none <state> <seconds>
-# Waits until no instance of the node is in the state; fails at the end
+# Waits until keepalived reports its instances and none in the state; fails
+# at the end. Right after a reload keepalived may report none at all.
 _ha_keepalived_wait_none() {
-	local i=0
+	local i=0 states
 
 	while [ "$i" -lt "$2" ]; do
-		_ha_keepalived_states | grep -q " $1\$" || return 0
+		states="$(_ha_keepalived_states)"
+		if [ -n "$states" ] && ! printf '%s\n' "$states" | grep -q " $1\$"; then
+			return 0
+		fi
 		sleep 1
 		i=$((i + 1))
 	done
@@ -4556,23 +4580,35 @@ ha_kea_maintenance() {
 # Usage: ha_maintenance_peer_problem (ha-cluster config loaded)
 # Why the peer cannot take over now, or nothing: a peer that does not
 # answer, Kea's partner out of touch or in a maintenance itself
-ha_maintenance_peer_problem() {
-	local section address daemon count=0
+_ha_maint_peers=0
+_ha_maint_problem=""
+_ha_maint_peer_check() {
+	local vrrp_only address
 
-	for section in $(uci -q show ha-cluster | sed -n 's/^ha-cluster\.\([A-Za-z0-9_]*\)=peer$/\1/p'); do
-		[ "$(uci -q get "ha-cluster.$section.vrrp_only")" = "1" ] && continue
-		address="$(uci -q get "ha-cluster.$section.address")"
-		[ -n "$address" ] || continue
-		count=$((count + 1))
-		case "$address" in
-			*:*) ping6 -c 1 -W 1 -- "$address" >/dev/null 2>&1 ;;
-			*) ping -c 1 -W 1 -- "$address" >/dev/null 2>&1 ;;
-		esac || {
-			echo "the peer at $address does not answer"
-			return 0
-		}
-	done
-	[ "$count" -gt 0 ] || {
+	[ -z "$_ha_maint_problem" ] || return 0
+	config_get_bool vrrp_only "$1" vrrp_only 0
+	[ "$vrrp_only" -eq 1 ] && return 0
+	config_get address "$1" address ""
+	[ -n "$address" ] || return 0
+	_ha_maint_peers=$((_ha_maint_peers + 1))
+	case "$address" in
+		*:*) ping6 -c 1 -W 1 -- "$address" >/dev/null 2>&1 ;;
+		*) ping -c 1 -W 1 -- "$address" >/dev/null 2>&1 ;;
+	esac || _ha_maint_problem="the peer at $address does not answer"
+}
+
+ha_maintenance_peer_problem() {
+	local daemon
+
+	# Peer sections are often anonymous (config peer)
+	_ha_maint_peers=0
+	_ha_maint_problem=""
+	config_foreach _ha_maint_peer_check peer
+	if [ -n "$_ha_maint_problem" ]; then
+		echo "$_ha_maint_problem"
+		return 0
+	fi
+	[ "$_ha_maint_peers" -gt 0 ] || {
 		echo "no peer is configured"
 		return 0
 	}
@@ -4658,6 +4694,10 @@ ha_maintenance_settle() {
 				# last candidate
 				_ha_maintenance_files 0 1
 			fi
+			# The uplinks follow the recorded states once the hold goes:
+			# those keepalived has now, not a MASTER whose FAULT report is
+			# still on its way
+			ha_role_sync
 			rm -f "$HA_ROLE_DIR/hold"
 			ha_log_info "Maintenance ($mode) on: the peer holds the roles"
 			;;
@@ -4695,12 +4735,34 @@ ha_maintenance_leave() {
 # Usage: ha_maintenance_on_role <keepalived instance> <state>
 # keepalived made an instance MASTER while the node is in maintenance: the
 # peer is gone (persistent mode keeps the node a candidate). Kea serves again.
+# An instance back to BACKUP in persistent maintenance: the peer is back,
+# and Kea goes in-maintenance again once it has joined it.
 ha_maintenance_on_role() {
-	[ "$2" = "MASTER" ] || return 0
-	[ "$(ha_maintenance_mode)" = "none" ] && return 0
-	ha_log_warning "Instance $1 became MASTER during maintenance: the peer is gone, this node takes over"
-	ha_dhcp_backend_is_kea && ha_kea_maintenance takeover
+	local mode
+
+	mode="$(ha_maintenance_mode)"
+	[ "$mode" = "none" ] && return 0
+	case "$2" in
+		MASTER)
+			ha_log_warning "Instance $1 became MASTER during maintenance: the peer is gone, this node takes over"
+			ha_dhcp_backend_is_kea && ha_kea_maintenance takeover
+			;;
+		BACKUP)
+			[ "$mode" = "persistent" ] && ha_maintenance_kea_resume_bg
+			;;
+	esac
 	return 0
+}
+
+# Usage: ha_maintenance_kea_resume_bg
+# ha_maintenance_kea_resume in the background, one at a time
+ha_maintenance_kea_resume_bg() {
+	ha_dhcp_backend_is_kea || return 0
+	ha_ensure_run_dir || return 0
+	(
+		flock -n 8 || exit 0
+		ha_maintenance_kea_resume
+	) 8>"$HA_CLUSTER_RUN_DIR/kea-resume.lock" </dev/null >/dev/null 2>&1 &
 }
 
 # Usage: ha_maintenance_kea_resume
@@ -4708,23 +4770,36 @@ ha_maintenance_on_role() {
 # normal member of the pair. Puts it in-maintenance again once it is in
 # touch with its partner and the node holds no role (two minutes at most).
 ha_maintenance_kea_resume() {
-	local i=0 daemon ready
+	local i=0 daemon ready seen
 
 	[ "$(ha_maintenance_mode)" = "persistent" ] || return 0
 	ha_dhcp_backend_is_kea || return 0
 	while [ "$i" -lt 24 ]; do
 		[ "$(ha_maintenance_mode)" = "persistent" ] || return 0
-		_ha_keepalived_states | grep -q ' MASTER$' && return 0
+		# Not while the node holds a role: the peer is gone, or not back
+		if _ha_keepalived_states | grep -q ' MASTER$'; then
+			sleep 5
+			i=$((i + 1))
+			continue
+		fi
 		ready=1
+		seen=0
+		# A Kea that does not run yet, or not with its HA, is not ready
 		for daemon in dhcp4 dhcp6; do
 			_ha_kea_ha_state "$daemon"
 			[ "$_hk_ha" -eq 1 ] || continue
+			seen=$((seen + 1))
 			case "$_hk_state" in
 				hot-standby|load-balancing|in-maintenance) ;;
 				*) ready=0 ;;
 			esac
 		done
-		if [ "$ready" -eq 1 ]; then
+		if [ "$seen" -gt 0 ] && [ "$ready" -eq 1 ]; then
+			for daemon in dhcp4 dhcp6; do
+				_ha_kea_ha_state "$daemon"
+				[ "$_hk_ha" -eq 1 ] && [ "$_hk_state" != "in-maintenance" ] &&
+					ha_log_info "Maintenance (persistent): Kea $daemon has joined its partner, in-maintenance again"
+			done
 			ha_kea_maintenance enter
 			return 0
 		fi

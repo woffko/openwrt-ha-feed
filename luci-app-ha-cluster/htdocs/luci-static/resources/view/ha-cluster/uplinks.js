@@ -53,6 +53,9 @@ return view.extend({
 			_('Each uplink names one interface of Network → Interfaces. The IPv6 alias of an interface (for example wan_6) follows it. Routes between several uplinks stay with mwan3.'));
 		s.addremove = true;
 		s.anonymous = false;
+		// The descriptions are shown under each field of the edit dialog;
+		// in the table of named sections LuCI puts them one column off
+		s.nodescriptions = true;
 		s.modaltitle = function(section_id) {
 			return _('Uplink') + ' » ' + section_id;
 		};
@@ -74,6 +77,9 @@ return view.extend({
 		o.value('master', _('Master only'));
 		o.value('always', _('Always'));
 		o.default = 'master';
+		o.textvalue = function(section_id) {
+			return (this.cfgvalue(section_id) || this.default) === 'always' ? _('Always') : _('Master only');
+		};
 
 		o = s.option(form.ListValue, 'vrrp_instance', _('VRRP instance'),
 			_('Whose role the uplink follows. Usually the LAN instance: the node that holds the gateway address goes online. Not used in Always mode.'));

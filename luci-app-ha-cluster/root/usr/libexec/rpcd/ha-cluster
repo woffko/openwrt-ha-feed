@@ -467,9 +467,12 @@ case "$1" in
 					kea_probe dhcp6 kea-dhcp6
 					[ -n "$kea_dhcp4_problem$kea_dhcp6_problem" ] && kea_problem=1
 					# The peer in a maintenance, as its Kea tells this one
-					case "$kea_dhcp4_ha_partner_state $kea_dhcp6_ha_partner_state" in
-						*in-maintenance*) json_add_boolean peer_maintenance 1 ;;
-					esac
+					# (partner-in-maintenance is the partner serving for a
+					# node in maintenance, this one)
+					if [ "$kea_dhcp4_ha_partner_state" = "in-maintenance" ] ||
+						[ "$kea_dhcp6_ha_partner_state" = "in-maintenance" ]; then
+						json_add_boolean peer_maintenance 1
+					fi
 				fi
 
 				# A config of the releases before 2.0 that the service has not
