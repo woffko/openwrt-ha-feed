@@ -899,12 +899,18 @@ has 254, so that persistent maintenance demotes the node. Whether the node takes
 role back is VRRP's decision: at once with preemption, not with
 `nopreempt`.
 
-**sysupgrade.** A sysupgrade that keeps the settings puts the node in
-maintenance until reboot first (`/lib/upgrade/ha-cluster.sh`), once the image
-has been checked: Kea's partner takes over, the `master` uplinks go down
-(PADT), and the peer becomes MASTER. It runs among the hooks that
-`/sbin/sysupgrade` calls while it writes the backup of the settings, takes
-40 seconds at most (its own timer) and never stops the upgrade. It cannot wait any longer:
+**sysupgrade.** A sysupgrade that keeps the settings hands the node's roles
+over first (`/lib/upgrade/ha-cluster.sh`), once the image has been checked:
+the mark of maintenance until reboot, Kea's partner takes over, the `master`
+uplinks go down (PADT), and keepalived is removed from procd, so that the
+peer becomes MASTER at once. It runs among the hooks that `/sbin/sysupgrade`
+calls while it writes the backup of the settings, takes a few seconds (15
+at most, its own timer) and never stops the upgrade. It has to be quick:
+LuCI runs sysupgrade through rpcd, which kills it after 30 seconds
+(`option timeout` of `/etc/config/rpcd`), and a sysupgrade killed after the
+hand-over leaves a node in maintenance that never upgraded. LuCI's web
+server is stopped first, so that the flash page waits for the reboot: it
+takes the device as back as soon as a page of it answers. It cannot wait any longer:
 as soon as `/sbin/sysupgrade` hands the image to procd, procd stops every
 service with a signal, netifd and pppd go without a PADT, and the provider
 holds the session. That is what refused the peer's PPPoE for minutes before.

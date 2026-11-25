@@ -15,6 +15,15 @@
 #                    brought up by hand on a node that is not MASTER), and
 #                    every minute the states recorded checked against
 #                    keepalived's own
+#   role sysupgrade  from /lib/upgrade/ha-cluster.sh while /sbin/sysupgrade
+#                    writes the backup of the settings, before it hands the
+#                    image to procd: the hand-over of maintenance until
+#                    reboot, done quickly (a few seconds; rpcd kills a
+#                    sysupgrade run from LuCI after 30): the mark, Kea
+#                    in-maintenance (four seconds for the partner), the
+#                    'master' uplinks down (PADT), and keepalived and the
+#                    monitor removed from procd, so that the peer is MASTER
+#                    at once. A reboot or "maintenance off" ends it.
 
 HA_CLUSTER_LIB="${HA_CLUSTER_LIB:-/usr/lib/ha-cluster/ha-cluster.sh}"
 . "$HA_CLUSTER_LIB"
@@ -86,8 +95,23 @@ case "$1" in
 			sleep "$HA_ROLE_MONITOR_INTERVAL"
 		done
 		;;
+	sysupgrade)
+		role_enabled || exit 0
+		pgrep keepalived >/dev/null 2>&1 || exit 0
+		ha_ensure_run_dir || exit 0
+		# The node says it is in maintenance if the upgrade stops after this
+		echo "temp $(date +%s)" > "$HA_MAINTENANCE_TEMP"
+		echo "$(date '+%Y-%m-%d %H:%M:%S') sysupgrade: roles handed over (maintenance until reboot)" > "$HA_MAINTENANCE_LAST"
+		ha_log_warning "sysupgrade: this node hands its roles over"
+		ha_dhcp_backend_is_kea && HA_KEA_ENTER_WAIT=4 ha_kea_maintenance enter
+		mkdir -p "$HA_ROLE_DIR" && : > "$HA_ROLE_DIR/hold"
+		ha_role_locked ha_uplinks_reconcile
+		ubus call service delete '{"name":"ha-cluster","instance":"monitor"}' >/dev/null 2>&1
+		ubus call service delete '{"name":"ha-cluster","instance":"keepalived"}' >/dev/null 2>&1
+		ha_log_info "sysupgrade: roles handed over"
+		;;
 	*)
-		echo "Usage: $0 event|reconcile|monitor" >&2
+		echo "Usage: $0 event|reconcile|monitor|sysupgrade" >&2
 		exit 1
 		;;
 esac

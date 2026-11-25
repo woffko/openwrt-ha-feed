@@ -81,6 +81,8 @@ HA_MAINTENANCE_DEMOTE="${HA_CLUSTER_RUN_DIR}/maintenance.demote"
 # partner (ucode otherwise), and of a command to the local Kea
 KEA_PARTNER_POST="${KEA_PARTNER_POST:-}"
 KEA_COMMAND_BIN="${KEA_COMMAND_BIN:-}"
+# Seconds Kea's partner is given to go partner-in-maintenance
+HA_KEA_ENTER_WAIT="${HA_KEA_ENTER_WAIT:-10}"
 
 HA_LOG_LEVEL_ERROR=0
 HA_LOG_LEVEL_WARNING=1
@@ -4747,7 +4749,7 @@ ha_kea_maintenance() {
 					continue
 				fi
 				i=0
-				while [ "$i" -lt 10 ]; do
+				while [ "$i" -lt "$HA_KEA_ENTER_WAIT" ]; do
 					_ha_kea_ha_state "$daemon"
 					[ "$_hk_partner_state" = "partner-in-maintenance" ] && break
 					sleep 1
