@@ -450,9 +450,12 @@ case "$1" in
 					json_add_int since "$(ha_maintenance_since)"
 					json_close_object
 				fi
-				if [ -s "$HA_CLUSTER_RUN_DIR/maintenance.last" ]; then
-					json_add_string maintenance_result "$(grep -v '^$' "$HA_CLUSTER_RUN_DIR/maintenance.last" | tail -n 3)"
+				# Written by every maintenance command (LuCI, the command
+				# line, a sysupgrade)
+				if [ -s "$HA_MAINTENANCE_LAST" ]; then
+					json_add_string maintenance_result "$(grep -v '^$' "$HA_MAINTENANCE_LAST" | tail -n 3)"
 				fi
+				ha_maintenance_running && json_add_boolean maintenance_running 1
 
 				# Kea is not run by ha-cluster and so is never what makes the
 				# cluster faulty; but a cluster whose DHCP server is down, deaf
@@ -637,10 +640,11 @@ case "$1" in
 				;;
 
 			# Maintenance of this node: temp (until reboot), on (kept across
-			# reboots) or off. Refused at once while the peer could not take
-			# over, unless forced; otherwise run in the background, since the
-			# hand-over takes some seconds: the status says when it is done
-			# (maintenance, maintenance_result).
+			# reboots) or off. Refused at once while another maintenance
+			# command runs, or while the peer could not take over, unless
+			# forced; otherwise run in the background, since the hand-over
+			# takes some seconds: the status says when it is done
+			# (maintenance_running, maintenance, maintenance_result).
 			maintenance)
 				read -r input
 				json_load "$input" 2>/dev/null
@@ -664,8 +668,18 @@ case "$1" in
 				fi
 				force_arg=""
 				[ "$force" = "1" ] && force_arg="force"
+				if ha_maintenance_running; then
+					json_add_boolean success 0
+					json_add_string error "Another maintenance command is still running"
+					json_dump
+					exit 0
+				fi
+				# As ha_maintenance_enter checks: from none, and to temp
+				current="$(ha_maintenance_mode)"
 				if [ "$action" != "off" ] && [ -z "$force_arg" ] &&
-					[ "$(ha_maintenance_mode)" = "none" ]; then
+					{ [ "$current" = "none" ] || [ "$action" = "temp" ]; } &&
+					{ [ "$action" != "temp" ] || [ "$current" != "temp" ]; } &&
+					{ [ "$action" != "on" ] || [ "$current" != "persistent" ]; }; then
 					config_load ha-cluster
 					if problem=$(ha_maintenance_peer_problem); then
 						json_add_boolean success 0
@@ -674,10 +688,7 @@ case "$1" in
 						exit 0
 					fi
 				fi
-				ha_ensure_run_dir
-				echo "Started: maintenance $action${force_arg:+ $force_arg}" > "$HA_CLUSTER_RUN_DIR/maintenance.last"
-				( /etc/init.d/ha-cluster maintenance "$action" $force_arg \
-					>> "$HA_CLUSTER_RUN_DIR/maintenance.last" 2>&1 ) </dev/null >/dev/null 2>&1 &
+				( /etc/init.d/ha-cluster maintenance "$action" $force_arg ) </dev/null >/dev/null 2>&1 &
 				json_add_boolean success 1
 				json_dump
 				;;
