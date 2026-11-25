@@ -38,7 +38,7 @@
 	},
 
 	"admin/services/ha-cluster/uplinks": {
-		"title": "Advanced WAN",
+		"title": "Advanced Multi-WAN Management",
 		"order": 35,
 		"action": {
 			"type": "view",

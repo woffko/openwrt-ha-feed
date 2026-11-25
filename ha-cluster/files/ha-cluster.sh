@@ -3672,10 +3672,14 @@ ha_migrate_earlier_model() {
 
 # ---------------------------------------------------------------------------
 # Uplinks (config uplink): interfaces that follow this node's VRRP role.
-#   mode 'master'  up only while this node is MASTER of the keepalived
-#                  instance of the section's vrrp_instance, down otherwise:
-#                  for a line or a login that allows one session (PPPoE)
-#   mode 'always'  up on every node whatever the role, and watched
+#   mode 'master'     up only while this node is MASTER of the keepalived
+#                     instance of the section's vrrp_instance, down
+#                     otherwise: for a line or a login that allows one
+#                     session (PPPoE)
+#   mode 'always'     up on every node whatever the role, and watched
+#   mode 'unmanaged'  listed only (LuCI lists every WAN interface so):
+#                     ha-cluster leaves the interface alone, as without a
+#                     section
 # An uplink follows the role and never changes it: a MASTER whose uplink
 # does not come up stays MASTER, and the status says so after `grace`.
 #
@@ -3723,12 +3727,13 @@ _ha_uplinks_found=""
 _ha_uplink_collect() {
 	_ha_uplink_load "$1"
 	[ "$_hu_enabled" -eq 1 ] || return 0
+	[ "$_hu_mode" = "unmanaged" ] && return 0
 	_ha_is_safe_identifier "$1" || return 0
 	_ha_uplinks_found="${_ha_uplinks_found:+$_ha_uplinks_found }$1"
 }
 
 # Usage: ha_uplinks (ha-cluster config loaded)
-# The enabled uplink sections, one per line
+# The enabled uplink sections that manage their interface, one per line
 ha_uplinks() {
 	local section
 
@@ -3820,6 +3825,8 @@ _ha_check_uplink() {
 	fi
 	_ha_uplink_load "$section"
 	[ "$_hu_enabled" -eq 1 ] || return 0
+	# Listed only: nothing of it is used
+	[ "$_hu_mode" = "unmanaged" ] && return 0
 
 	if [ -z "$_hu_interface" ]; then
 		_ha_validation_error "uplink $section: interface is required"
@@ -3841,7 +3848,7 @@ _ha_check_uplink() {
 
 	case "$_hu_mode" in
 		master|always) ;;
-		*) _ha_validation_error "uplink $section: mode must be 'master' or 'always' (got: $_hu_mode)" ;;
+		*) _ha_validation_error "uplink $section: mode must be 'master', 'always' or 'unmanaged' (got: $_hu_mode)" ;;
 	esac
 	if [ -n "$_hu_instance" ]; then
 		config_get type "$_hu_instance" TYPE ""
@@ -4268,7 +4275,7 @@ ha_uplinks_auto_sync() {
 			_ha_iso_uci network -q delete "network.$iface.ha_cluster_auto"
 			changed="$changed $iface"
 			[ "$marker" = "${value:-unset}" ] || _ha_auto_changed=1
-			ha_log_info "Interface '$iface' has no uplink section any more: its auto back as it was ('$marker')"
+			ha_log_info "Interface '$iface' is no longer managed by an uplink section: its auto back as it was ('$marker')"
 			_ha_net_false "$marker" || _ha_auto_restored="$_ha_auto_restored $iface"
 		done
 		for iface in $managed; do
