@@ -273,7 +273,7 @@ lease-sync=1
 == firewall rules of the cluster
 (none)
 == disable
-ha-cluster|daemon.info|Interface 'wan' has no uplink section any more: its auto back as it was ('unset')
+ha-cluster|daemon.info|Interface 'wan' is no longer managed by an uplink section: its auto back as it was ('unset')
 ubus|call network reload
 ha-cluster|daemon.info|Interface 'wan': up, as its auto asks now
 ubus|call network.interface.wan up

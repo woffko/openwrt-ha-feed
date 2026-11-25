@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r23, `luci-app-ha-cluster` 2.0.0-r15,
+packages are `ha-cluster` 2.0.0-r24, `luci-app-ha-cluster` 2.0.0-r16,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -28,8 +28,9 @@ upgrading a node.
   `ha_cluster_auto`, takes down an interface brought up by hand on a node
   that is not MASTER, brings it up again when netifd has stopped retrying,
   and reports each uplink in the status: `DEGRADED` when the MASTER has
-  been without it longer than `grace`. An uplink never moves the role. See
-  [Uplinks](ha-cluster/README.md#uplinks-interfaces-that-follow-the-role-advanced-wan).
+  been without it longer than `grace`. An uplink never moves the role.
+  Mode `unmanaged` (r24) lists an interface without touching it. See
+  [Uplinks](ha-cluster/README.md#uplinks-interfaces-that-follow-the-role-advanced-multi-wan-management).
 - Maintenance, in two modes as pfSense has them:
   `/etc/init.d/ha-cluster maintenance temp` (until reboot: every instance
   in FAULT) and `maintenance on` (kept across reboots: the lowest
@@ -263,6 +264,12 @@ upgrading a node.
   buttons; the `maintenance` call (write ACL) runs the command in the
   background and refuses at once while the peer could not take over,
   unless forced. Needs ha-cluster 2.0.0-r21 or later (r14).
+- r16: the page is called Advanced Multi-WAN Management and lists every WAN
+  interface (mwan3's, and those of the firewall zones that masquerade) as
+  Unmanaged; mode and VRRP instance are chosen in the table, the other
+  settings in the edit dialog, and Add picks another interface from a list.
+  Reads the firewall and mwan3 configs (read ACL). Needs ha-cluster
+  2.0.0-r24.
 - r15: the maintenance buttons are greyed while a command runs
   (`maintenance_running`), the `maintenance` call refuses a second command
   at once, and Advanced WAN refuses a Master only uplink on an interface the

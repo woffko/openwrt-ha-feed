@@ -9,11 +9,14 @@
 'require tools.widgets as widgets';
 
 var HOOK_DIR = '/etc/hotplug.d/keepalived';
+var OWN_HOOKS = /-(ha-cluster-role|ipv6-backup-guard)$/;
+var PPP_PROTOS = [ 'pppoe', 'pppoa', 'ppp' ];
 
 // The logical interfaces the cluster runs on, as ha-cluster's validation
-// finds them: loopback, those of the VRRP instances and VIPs (named or by
-// their device), and those carrying bind_address or a peer's
-// source_address. A Master only uplink there would go down on the BACKUP.
+// finds them: loopback, those of the VRRP instances and VIPs (named, or
+// holding the addresses of the device they name), and those carrying
+// bind_address or a peer's source_address. A Master only uplink there
+// would go down on the BACKUP.
 function clusterInterfaces() {
 	var own = { loopback: true };
 	var ifaces = uci.sections('network', 'interface');
@@ -29,7 +32,7 @@ function clusterInterfaces() {
 		// A device: the interfaces that hold its addresses; a PPP session
 		// on it has a device of its own and leaves it up when it goes
 		ifaces.forEach(function(i) {
-			if (i.device == name && ['pppoe', 'pppoa', 'ppp'].indexOf(i.proto) < 0)
+			if (i.device == name && PPP_PROTOS.indexOf(i.proto) < 0)
 				own[i['.name']] = true;
 		});
 	};
@@ -54,13 +57,62 @@ function clusterInterfaces() {
 	});
 	return own;
 }
-var OWN_HOOKS = /-(ha-cluster-role|ipv6-backup-guard)$/;
+
+// The WAN interfaces the page lists by default: those of mwan3 and those of
+// the firewall zones that masquerade, in the order of the network config.
+// Left out: loopback, and an interface on the device of another one's
+// session or an alias of it (wan_6 on pppoe-wan, @wan), which follows it.
+function wanInterfaces() {
+	var ifaces = uci.sections('network', 'interface');
+	var wanted = {};
+
+	var known = function(name) {
+		return ifaces.some(function(i) { return i['.name'] == name; });
+	};
+	(uci.sections('mwan3', 'interface') || []).forEach(function(s) {
+		if (known(s['.name']))
+			wanted[s['.name']] = true;
+	});
+	uci.sections('firewall', 'zone').forEach(function(z) {
+		if (z.masq != '1')
+			return;
+		L.toArray(z.network).forEach(function(name) {
+			if (known(name))
+				wanted[name] = true;
+		});
+	});
+
+	var follows = function(i) {
+		var dev = i.device || '';
+		if (dev.charAt(0) == '@')
+			return true;
+		return ifaces.some(function(o) {
+			return PPP_PROTOS.indexOf(o.proto) >= 0 && dev == o.proto + '-' + o['.name'];
+		});
+	};
+
+	return ifaces.filter(function(i) {
+		return wanted[i['.name']] && i['.name'] != 'loopback' && !follows(i);
+	}).map(function(i) { return i['.name']; });
+}
+
+// The VRRP instance a new uplink follows by default: the one on the LAN
+function defaultInstance() {
+	var instances = uci.sections('ha-cluster', 'vrrp_instance');
+	var lan = instances.filter(function(s) {
+		return s.interface == 'lan' || s.interface == uci.get('network', 'lan', 'device');
+	});
+	var pick = lan.length ? lan[0] : instances[0];
+	return pick ? pick['.name'] : null;
+}
 
 return view.extend({
 	load: function() {
 		return Promise.all([
 			uci.load('ha-cluster'),
 			uci.load('network'),
+			L.resolveDefault(uci.load('firewall'), null),
+			L.resolveDefault(uci.load('mwan3'), null),
 			// The user's own handlers that bring interfaces up or down at
 			// VRRP changes, besides ha-cluster's
 			L.resolveDefault(fs.list(HOOK_DIR), []).then(function(entries) {
@@ -78,10 +130,30 @@ return view.extend({
 	},
 
 	render: function(data) {
-		var foreignHooks = data[2] || [];
+		var foreignHooks = data[4] || [];
 		var m, s, o;
 
-		m = new form.Map('ha-cluster', _('High Availability - Advanced WAN'),
+		// Every WAN interface is listed, Unmanaged unless it has an uplink
+		// section: those it lacks are added here, and reach the config
+		// only when the page is saved
+		var listed = {};
+		uci.sections('ha-cluster', 'uplink').forEach(function(u) {
+			if (u.interface)
+				listed[u.interface] = true;
+		});
+		var instance = defaultInstance();
+		wanInterfaces().forEach(function(name) {
+			if (listed[name])
+				return;
+			var sid = uci.add('ha-cluster', 'uplink',
+				/^[A-Za-z0-9_]+$/.test(name) && !uci.get('ha-cluster', name) ? name : null);
+			uci.set('ha-cluster', sid, 'interface', name);
+			uci.set('ha-cluster', sid, 'mode', 'unmanaged');
+			if (instance)
+				uci.set('ha-cluster', sid, 'vrrp_instance', instance);
+		});
+
+		m = new form.Map('ha-cluster', _('High Availability - Advanced Multi-WAN Management'),
 			_('Uplinks follow this node\'s VRRP role. A "Master only" uplink is up only while this node is MASTER of the chosen VRRP instance, so a login that allows one session is never dialed by both nodes. An uplink never changes the role: a MASTER whose uplink fails stays MASTER and the cluster status shows DEGRADED.'));
 
 		if (foreignHooks.length) {
@@ -95,41 +167,35 @@ return view.extend({
 		}
 
 		s = m.section(form.GridSection, 'uplink', _('Uplinks'),
-			_('Each uplink names one interface of Network → Interfaces. The IPv6 alias of an interface (for example wan_6) follows it. Routes between several uplinks stay with mwan3.'));
+			_('Every WAN interface is listed: those of mwan3 and of the firewall zones that masquerade, Unmanaged until a mode is chosen. An IPv6 interface on the device of another one\'s session (wan_6 on pppoe-wan) follows it and is not listed. Add lists another interface. Routes between several uplinks stay with mwan3.'));
 		s.addremove = true;
-		s.anonymous = false;
-		// The descriptions are shown under each field of the edit dialog;
-		// in the table of named sections LuCI puts them one column off
+		s.anonymous = true;
+		// The descriptions are shown under each field of the edit dialog
 		s.nodescriptions = true;
 		s.modaltitle = function(section_id) {
-			return _('Uplink') + ' » ' + section_id;
+			return _('Uplink') + ' » ' + (uci.get('ha-cluster', section_id, 'interface') || _('new'));
 		};
 
-		o = s.option(form.Flag, 'enabled', _('Enabled'),
-			_('Manage this interface. When disabled, ha-cluster leaves the interface alone and restores its "Bring up on boot" setting.'));
-		o.default = '1';
-		o.rmempty = false;
-		o.editable = true;
-
 		o = s.option(widgets.NetworkSelect, 'interface', _('Interface'),
-			_('Logical network interface: PPPoE, DHCP, static, LTE. Its IPv6 alias (for example wan_6) follows it. In Master only mode ha-cluster turns "Bring up on boot" off for this interface and keeps the previous value, which it restores when the uplink is disabled or removed or the cluster is turned off.'));
+			_('Logical network interface: PPPoE, DHCP, static, LTE. An IPv6 interface on the device of its session (wan_6 on pppoe-wan) follows it. In Master only mode ha-cluster turns "Bring up on boot" off for this interface and keeps the previous value, which it restores when the uplink goes back to Unmanaged, is removed, or the cluster is turned off.'));
 		o.nocreate = true;
 		o.rmempty = false;
 		o.exclude = 'loopback';
-		o.validate = function(section_id, value) {
-			var mode = this.section.formvalue(section_id, 'mode') || 'master';
-			if (mode == 'master' && value && clusterInterfaces()[value])
-				return _('The cluster runs on this interface (a VRRP instance, a VIP or the sync link): in Master only mode it would go down on the backup node and stay down at boot');
-			return true;
-		};
 
 		o = s.option(form.ListValue, 'mode', _('Mode'),
-			_('Master only: up only on the MASTER of the VRRP instance below; for a line or a login that allows one session. Always: up on every node whatever the role; ha-cluster only watches it and warns when the backup node\'s uplink is down, since a failover would then leave the new MASTER without it.'));
+			_('Unmanaged: ha-cluster leaves the interface alone. Master only: up only on the MASTER of the VRRP instance; for a line or a login that allows one session. Always: up on every node whatever the role; ha-cluster only watches it and warns when the backup node\'s uplink is down, since a failover would then leave the new MASTER without it.'));
+		o.value('unmanaged', _('Unmanaged'));
 		o.value('master', _('Master only'));
 		o.value('always', _('Always'));
-		o.default = 'master';
-		o.textvalue = function(section_id) {
-			return (this.cfgvalue(section_id) || this.default) === 'always' ? _('Always') : _('Master only');
+		o.default = 'unmanaged';
+		o.rmempty = false;
+		o.editable = true;
+		o.validate = function(section_id, value) {
+			var iface = this.section.formvalue(section_id, 'interface') ||
+				uci.get('ha-cluster', section_id, 'interface');
+			if (value == 'master' && iface && clusterInterfaces()[iface])
+				return _('The cluster runs on this interface (a VRRP instance, a VIP or the sync link): in Master only mode it would go down on the backup node and stay down at boot');
+			return true;
 		};
 
 		o = s.option(form.ListValue, 'vrrp_instance', _('VRRP instance'),
@@ -138,9 +204,10 @@ return view.extend({
 		uci.sections('ha-cluster', 'vrrp_instance').forEach(function(section) {
 			o.value(section['.name'], section['.name'] + (section.interface ? ' (' + section.interface + ')' : ''));
 		});
+		o.editable = true;
 		o.validate = function(section_id, value) {
 			var mode = this.section.formvalue(section_id, 'mode');
-			if (mode != 'always' && !value)
+			if (mode == 'master' && !value)
 				return _('A Master only uplink needs a VRRP instance');
 			return true;
 		};

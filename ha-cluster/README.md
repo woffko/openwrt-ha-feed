@@ -740,12 +740,14 @@ package keeps its lease files in `/var/lib/kea`, which is in RAM: after a
 reboot a node has the leases its partner sends it, and after both nodes
 were down at once there are none, as with dnsmasq's lease file.
 
-## Uplinks: interfaces that follow the role (Advanced WAN)
+## Uplinks: interfaces that follow the role (Advanced Multi-WAN Management)
 
 An uplink section names an interface of `/etc/config/network` that follows
 this node's VRRP role. It is meant for a line or a login that allows one
 session, such as PPPoE: only the MASTER dials. LuCI has it under High
-Availability → Advanced WAN.
+Availability → Advanced Multi-WAN Management, which lists every WAN
+interface (those of mwan3 and of the firewall zones that masquerade) in
+mode `unmanaged` until a mode is chosen.
 
 ```
 config uplink 'wan'
@@ -762,6 +764,8 @@ config uplink 'wanb'
   the keepalived instance of `vrrp_instance`. It goes down at once in
   BACKUP and FAULT, when the service stops, and during a hand-over. `ifdown`
   ends a PPPoE session with PADT, so the provider frees it for the peer.
+- **`unmanaged`**: listed only; ha-cluster leaves the interface alone, as
+  without a section, and gives a `master` interface its `auto` back.
 - **`always`**: the interface is up on every node whatever the role.
   ha-cluster only watches it. When a node that is not MASTER has lost it
   for longer than `grace`, the status warns: a failover would leave the new
@@ -810,7 +814,7 @@ the log. To manage the interface by hand, disable its uplink section.
 
 **Hooks of your own.** A handler in `/etc/hotplug.d/keepalived/` that brings
 the same interface up or down at VRRP changes would act on it besides
-ha-cluster. The start warns about it, and so does the Advanced WAN page:
+ha-cluster. The start warns about it, and so does the Advanced Multi-WAN Management page:
 remove it once an uplink section manages the interface.
 
 **How it runs.** keepalived reports each state change through
@@ -1173,13 +1177,13 @@ config script 'check_lan_dataplane'
 
 ### Uplinks (`config uplink '<name>'`)
 
-See [Uplinks](#uplinks-interfaces-that-follow-the-role-advanced-wan).
+See [Uplinks](#uplinks-interfaces-that-follow-the-role-advanced-multi-wan-management).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool | `1` | Manage the interface |
 | `interface` | string | | Logical interface of `/etc/config/network`; one uplink section per interface |
-| `mode` | string | `master` | `master`: up only on the MASTER of `vrrp_instance`; `always`: up on every node, watched |
+| `mode` | string | `master` | `master`: up only on the MASTER of `vrrp_instance`; `always`: up on every node, watched; `unmanaged`: listed only, not touched (what LuCI writes for a WAN interface left alone) |
 | `vrrp_instance` | string | | The `vrrp_instance` section whose role the uplink follows; required in mode `master` |
 | `up_delay` | int | `0` | Seconds after becoming MASTER before the interface is brought up (0-3600); 5-10 when the role flaps |
 | `grace` | int | `180` | Seconds the interface may be down while it should be up before the status says so (0-86400) |

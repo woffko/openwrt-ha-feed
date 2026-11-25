@@ -152,7 +152,7 @@ ha-cluster|daemon.info|lease-sync will use AES-256-GCM encryption
 ha-cluster|daemon.info|lease-sync configuration generated at /var/run/ha-cluster/lease-sync.conf
 ha-cluster|daemon.info|HA cluster configuration applied successfully
 ha-cluster|daemon.warning|Firewall rules of the cluster not written: this node's own address towards 172.30.0.11 is not known. Set bind_address, or source_address of the peer, or reload ha-cluster once the interface is up
-ha-cluster|daemon.info|Interface 'wan' has no uplink section any more: its auto back as it was ('unset')
+ha-cluster|daemon.info|Interface 'wan' is no longer managed by an uplink section: its auto back as it was ('unset')
 ubus|call network reload
 ha-cluster|daemon.info|Interface 'wan': up, as its auto asks now
 ubus|call network.interface.wan up

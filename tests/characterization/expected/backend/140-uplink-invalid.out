@@ -171,7 +171,7 @@ ha-cluster|daemon.info|Applying HA cluster configuration
 ha-cluster|daemon.err|uplink u1: interface is required
 ha-cluster|daemon.err|uplink u1: vrrp_instance is required in mode 'master'
 ha-cluster|daemon.err|uplink u2: 'wan3' is not an interface of /etc/config/network
-ha-cluster|daemon.err|uplink u3: mode must be 'master' or 'always' (got: sometimes)
+ha-cluster|daemon.err|uplink u3: mode must be 'master', 'always' or 'unmanaged' (got: sometimes)
 ha-cluster|daemon.err|uplink u4: vrrp_instance is required in mode 'master'
 ha-cluster|daemon.err|uplink u5: interface 'wanb' has another uplink section
 ha-cluster|daemon.err|uplink u5: vrrp_instance 'nosuch' does not exist

@@ -14,7 +14,7 @@
 				"luci-rpc": [ "getBoardJSON", "getHostHints", "getNetworkDevices", "getWirelessDevices" ],
 				"network.interface": [ "dump" ]
 			},
-			"uci": [ "ha-cluster", "dhcp", "network" ]
+			"uci": [ "ha-cluster", "dhcp", "network", "firewall", "mwan3" ]
 		},
 		"write": {
 			"file": {

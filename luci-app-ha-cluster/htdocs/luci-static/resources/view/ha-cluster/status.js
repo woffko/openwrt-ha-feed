@@ -381,7 +381,7 @@ return view.extend({
 		]));
 	},
 
-	// The interfaces that follow the role (Advanced WAN)
+	// The interfaces that follow the role (Advanced Multi-WAN Management)
 	renderUplinks: function(uplinks) {
 		if (!Array.isArray(uplinks) || !uplinks.length)
 			return [];
