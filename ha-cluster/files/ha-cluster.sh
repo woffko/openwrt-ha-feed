@@ -3764,7 +3764,16 @@ _ha_own_iface_of() {
 
 	config_get name "$1" interface ""
 	[ -n "$name" ] || return 0
+	if [ "$(uci -q get "network.$name")" = "interface" ]; then
+		_ha_own_iface_add "$name"
+		return 0
+	fi
+	# A device: the interfaces that hold its addresses. A PPP session on it
+	# (pppoe, pppoa) has a device of its own and leaves it up when it goes.
 	for logical in $(_ha_logical_ifaces_of "$name"); do
+		case "$(uci -q get "network.$logical.proto")" in
+			pppoe|pppoa|ppp) continue ;;
+		esac
 		_ha_own_iface_add "$logical"
 	done
 }

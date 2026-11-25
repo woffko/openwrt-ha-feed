@@ -22,11 +22,14 @@ function clusterInterfaces() {
 	var add = function(name) {
 		if (!name)
 			return;
-		var logical = ifaces.filter(function(i) { return i['.name'] == name; });
-		if (logical.length)
+		if (ifaces.some(function(i) { return i['.name'] == name; })) {
 			own[name] = true;
+			return;
+		}
+		// A device: the interfaces that hold its addresses; a PPP session
+		// on it has a device of its own and leaves it up when it goes
 		ifaces.forEach(function(i) {
-			if (i.device == name)
+			if (i.device == name && ['pppoe', 'pppoa', 'ppp'].indexOf(i.proto) < 0)
 				own[i['.name']] = true;
 		});
 	};
