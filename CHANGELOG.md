@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r24, `luci-app-ha-cluster` 2.0.0-r16,
+packages are `ha-cluster` 2.0.0-r25, `luci-app-ha-cluster` 2.0.0-r16,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -39,6 +39,13 @@ upgrading a node.
   uplinks go down before the peer dials, and entering is refused while
   the peer could not take over, unless forced. The status is
   `MAINTENANCE`. See [Maintenance](ha-cluster/README.md#maintenance).
+- r25: the hand-over at a sysupgrade is quick (a few seconds: the mark,
+  Kea with four seconds for its partner, the uplinks down, keepalived
+  removed from procd) instead of a full maintenance with a reload of the
+  service. Flashed from LuCI on the routers, the full one went past the 30
+  seconds after which rpcd kills sysupgrade: the node handed its roles over
+  and never upgraded. LuCI's web server stops first, so that the flash page
+  waits for the reboot instead of going to the overview.
 - A sysupgrade that keeps the settings puts the node in maintenance until
   reboot first (`/lib/upgrade/ha-cluster.sh`, among the hooks
   `/sbin/sysupgrade` runs once the image is checked), so the peer serves at
