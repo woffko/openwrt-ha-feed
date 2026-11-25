@@ -9,6 +9,48 @@
 'require tools.widgets as widgets';
 
 var HOOK_DIR = '/etc/hotplug.d/keepalived';
+
+// The logical interfaces the cluster runs on, as ha-cluster's validation
+// finds them: loopback, those of the VRRP instances and VIPs (named or by
+// their device), and those carrying bind_address or a peer's
+// source_address. A Master only uplink there would go down on the BACKUP.
+function clusterInterfaces() {
+	var own = { loopback: true };
+	var ifaces = uci.sections('network', 'interface');
+	var addresses = {};
+
+	var add = function(name) {
+		if (!name)
+			return;
+		var logical = ifaces.filter(function(i) { return i['.name'] == name; });
+		if (logical.length)
+			own[name] = true;
+		ifaces.forEach(function(i) {
+			if (i.device == name)
+				own[i['.name']] = true;
+		});
+	};
+
+	uci.sections('ha-cluster', 'vrrp_instance').forEach(function(s) { add(s.interface); });
+	uci.sections('ha-cluster', 'vip').forEach(function(s) { add(s.interface); });
+
+	var bind = uci.get('ha-cluster', 'config', 'bind_address');
+	if (bind)
+		addresses[bind] = true;
+	uci.sections('ha-cluster', 'peer').forEach(function(s) {
+		if (s.source_address)
+			addresses[s.source_address] = true;
+	});
+	ifaces.forEach(function(i) {
+		if (i.device == 'lo')
+			own[i['.name']] = true;
+		L.toArray(i.ipaddr).forEach(function(a) {
+			if (addresses[String(a).split('/')[0]])
+				own[i['.name']] = true;
+		});
+	});
+	return own;
+}
 var OWN_HOOKS = /-(ha-cluster-role|ipv6-backup-guard)$/;
 
 return view.extend({
@@ -71,6 +113,12 @@ return view.extend({
 		o.nocreate = true;
 		o.rmempty = false;
 		o.exclude = 'loopback';
+		o.validate = function(section_id, value) {
+			var mode = this.section.formvalue(section_id, 'mode') || 'master';
+			if (mode == 'master' && value && clusterInterfaces()[value])
+				return _('The cluster runs on this interface (a VRRP instance, a VIP or the sync link): in Master only mode it would go down on the backup node and stay down at boot');
+			return true;
+		};
 
 		o = s.option(form.ListValue, 'mode', _('Mode'),
 			_('Master only: up only on the MASTER of the VRRP instance below; for a line or a login that allows one session. Always: up on every node whatever the role; ha-cluster only watches it and warns when the backup node\'s uplink is down, since a failover would then leave the new MASTER without it.'));

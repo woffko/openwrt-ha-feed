@@ -351,7 +351,7 @@ return view.extend({
 				] : []))
 			]),
 
-		].concat(this.renderUplinks(status.uplinks), this.renderMaintenance(maintenance), [
+		].concat(this.renderUplinks(status.uplinks), this.renderMaintenance(maintenance, status.maintenance_running), [
 			E('h3', {}, _('Peer Status')),
 			E('div', { 'class': 'cbi-section cbi-section-node' }, [
 				peers.length > 0 ?
@@ -462,7 +462,7 @@ return view.extend({
 	},
 
 	// Maintenance of this node, as pfSense has it: until reboot, or kept
-	renderMaintenance: function(maintenance) {
+	renderMaintenance: function(maintenance, running) {
 		var mode = (maintenance && maintenance.mode) || 'none';
 		var button = L.bind(function(action, title, description, disabled, style) {
 			return E('div', { 'class': 'cbi-value' }, [
@@ -470,7 +470,7 @@ return view.extend({
 				E('div', { 'class': 'cbi-value-field' }, [
 					E('button', {
 						'class': 'btn cbi-button ' + (style || 'cbi-button-action'),
-						'disabled': disabled ? '' : null,
+						'disabled': (disabled || running) ? '' : null,
 						'click': ui.createHandlerFn(this, 'handleMaintenance', action, false)
 					}, title),
 					E('div', { 'class': 'cbi-value-description' }, description)
@@ -480,6 +480,8 @@ return view.extend({
 
 		return [
 			E('h3', {}, _('Maintenance')),
+			running ? E('div', { 'class': 'alert-message notice' },
+				_('A maintenance command is running: the hand-over takes a few seconds.')) : '',
 			E('div', { 'class': 'cbi-section cbi-section-node' }, [
 				button('temp', _('Enter maintenance until reboot'),
 					_('This node hands its VRRP roles, DHCP (Kea) and Master only uplinks to the peer and stays out until you leave maintenance or the node reboots. Also entered automatically before a sysupgrade. The peer must be healthy.'),

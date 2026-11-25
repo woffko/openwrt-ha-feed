@@ -133,7 +133,7 @@ service_started() {
 		config_load ha-cluster
 		[ -n "$(ha_uplinks)" ] && "$HA_ROLE_BIN" reconcile </dev/null >/dev/null 2>&1 &
 		# Kea back in-maintenance once it has joined its partner
-		[ "$(ha_maintenance_mode)" = "persistent" ] && ha_maintenance_kea_resume_bg
+		[ "$(ha_maintenance_mode)" != "none" ] && ha_maintenance_kea_resume_bg
 	fi
 	[ -z "${HA_START_FAILED:-}" ]
 }
@@ -166,12 +166,32 @@ service_stopped() {
 	# for one that leaves
 	ha_stop_uplinks
 
+	# Kept for a node that only stops, ended for one that leaves
+	ha_stop_maintenance
+
 	# Kept for a node that only stops, removed for one that leaves
 	ha_stop_firewall
 
 	ha_release_dnsmasq
 
 	ha_manage_services "release"
+}
+
+# Taking the service out of boot takes the node out of the cluster. A stop
+# done before kept, for a node that stays, what it closed: the IPv6 guard,
+# the firewall rules, the uplinks with their auto '0', a maintenance. They
+# are released here, as the stop of a node that leaves does; a running
+# service releases them at the stop that follows (the package's prerm).
+disable() {
+	rm -f "${IPKG_INSTROOT}"/etc/rc.d/S??ha-cluster "${IPKG_INSTROOT}"/etc/rc.d/K??ha-cluster
+	[ -z "${IPKG_INSTROOT}" ] || return 0
+	procd_running ha-cluster && return 0
+	ha_log_init
+	ha_stop_ipv6_guard
+	ha_stop_uplinks
+	ha_stop_maintenance
+	ha_stop_firewall
+	return 0
 }
 
 reload_service() {
@@ -261,7 +281,7 @@ kea_changed() {
 # while the peer could not take over, unless forced. Without an argument:
 # prints the mode (none, temp, persistent).
 maintenance() {
-	local action="$1" force="$2" mode
+	local action="$1" force="$2" mode out rc
 
 	ha_log_init
 	case "$action" in
@@ -277,15 +297,33 @@ maintenance() {
 			return 1
 			;;
 	esac
-	if [ -n "$mode" ]; then
-		ha_maintenance_enter "$mode" "$force" || return 1
-	else
-		ha_maintenance_leave || return 1
+	[ "$force" = "force" ] || force=""
+	ha_ensure_run_dir || return 1
+	# One at a time (LuCI, the command line, a sysupgrade), and what each
+	# said, for the status
+	exec 8>>"$HA_MAINTENANCE_LOCK"
+	if ! flock -n -x 8; then
+		echo "Another maintenance command is still running"
+		exec 8>&-
+		return 1
 	fi
-	# keepalived's config with the files of the maintenance, or without
-	procd_running ha-cluster && reload
-	ha_maintenance_settle
-	return 0
+	echo "$(date '+%Y-%m-%d %H:%M:%S') maintenance $action${force:+ $force}: running" > "$HA_MAINTENANCE_LAST"
+	if [ -n "$mode" ]; then
+		out="$(ha_maintenance_enter "$mode" "$force")"
+	else
+		out="$(ha_maintenance_leave)"
+	fi
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		# keepalived's config with the files of the maintenance, or without
+		procd_running ha-cluster && reload >/dev/null 2>&1
+		ha_maintenance_settle
+	fi
+	[ -n "$out" ] && echo "$out"
+	echo "$(date '+%Y-%m-%d %H:%M:%S') maintenance $action${force:+ $force}: $(printf '%s\n' "$out" | tail -n 1)" > "$HA_MAINTENANCE_LAST"
+	flock -u 8
+	exec 8>&-
+	return "$rc"
 }
 
 # /etc/init.d/ha-cluster dhcp_changed

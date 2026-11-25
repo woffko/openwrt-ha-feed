@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r22, `luci-app-ha-cluster` 2.0.0-r14,
+packages are `ha-cluster` 2.0.0-r23, `luci-app-ha-cluster` 2.0.0-r15,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -44,6 +44,31 @@ upgrading a node.
   once and finds the PPPoE sessions closed. Before, procd stopped every
   service with a signal, pppd went without a PADT, and the peer's PPPoE
   was refused while the provider held the old session.
+- Fixes from the third code audit (r23):
+  - a `master` uplink may not name loopback, the interface of a VRRP
+    instance or of a VIP, or the sync link: it would go down on the BACKUP
+    and stay down at boot (and a delegated LuCI user could change
+    `/etc/config/network` through it); refused at validation and in LuCI,
+    and left alone by the rounds that read the config on their own;
+  - `disable` of a stopped service releases what the stop kept for a node
+    that stays: the auto of the uplinks, the IPv6 guard, the firewall rules,
+    a maintenance; a node that leaves the cluster ends its maintenance;
+  - the locks of the uplinks and of maintenance are in the run directory
+    (0700), not in `/var/lock`, and bounded; one maintenance command at a
+    time, Kea's resume under the same lock, the result written by the
+    command itself;
+  - going from persistent maintenance to maintenance until reboot checks
+    the peer too; the check refuses a Kea of this node that does not
+    answer and a partner that does not serve every client;
+  - the mark of a maintenance is written first, and the hold of the
+    uplinks never outlives a failed hand-over;
+  - leaving maintenance checks that Kea is out after eight seconds and does
+    it once more; the partners come from the running Kea (`config-get`)
+    and get `ha-reset` only at a peer's address, on a port of Kea's HA, over
+    HTTP/1.0 with a bounded answer;
+  - `priority 255` is written as 254 during a maintenance, so that the
+    demotion takes;
+  - the sysupgrade hook has its own 40-second timer.
 - Sync encryption is fail closed. A sync daemon that has work does not
   start without a valid `encryption_key`, and ha-cluster refuses to
   start; plain mode is the explicit `sync_encryption '0'`, never a
@@ -238,6 +263,10 @@ upgrading a node.
   buttons; the `maintenance` call (write ACL) runs the command in the
   background and refuses at once while the peer could not take over,
   unless forced. Needs ha-cluster 2.0.0-r21 or later (r14).
+- r15: the maintenance buttons are greyed while a command runs
+  (`maintenance_running`), the `maintenance` call refuses a second command
+  at once, and Advanced WAN refuses a Master only uplink on an interface the
+  cluster runs on. Needs ha-cluster 2.0.0-r23.
 - The `nodes` call answers with ha-cluster's `ha_nodes_json`, which adds
   `dhcp_interfaces`; it needs ha-cluster 2.0.0-r19 (r13).
 - "Encrypt Sync Traffic" switch on the General page, for the backend's

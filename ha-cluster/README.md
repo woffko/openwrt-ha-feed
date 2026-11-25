@@ -778,7 +778,7 @@ and each move is a new wait at the provider.
 before VRRP has chosen the MASTER. The value it had is kept in
 `ha_cluster_auto` (`unset` when it had none). It is given back when the
 uplink is disabled or removed, is moved to `always`, or the node leaves the
-cluster (HA disabled, the service disabled). The interface is then brought
+cluster (HA disabled, the service disabled, also after a stop). The interface is then brought
 up if that value asks for it. netifd is told to read the network config
 again when `auto` changes. Otherwise a later reload of the network would
 take the interface down once.
@@ -794,6 +794,14 @@ per login, `authfail '1'` on the interface is worth setting: without it,
 netifd asks the provider every few seconds while the provider still holds
 the old session, and some providers lock a login after many failed
 attempts.
+
+**Not on the cluster's own interfaces.** A `master` uplink may not name
+loopback, the interface of a VRRP instance or of a VIP (by name or by
+device), or the sync link (the interface carrying `bind_address` or a
+peer's `source_address`): it would go down on the BACKUP and stay down at
+boot. The validation refuses it, LuCI too, and the rounds that read the
+config on their own leave it alone. Mode `always` only brings an interface
+up and may name any.
 
 **By hand.** An interface brought up on a node that is not MASTER (LuCI's
 Connect, `ifup`) is taken down again within a few seconds, with a warning in
@@ -844,6 +852,13 @@ offers after a refusal) enters anyway. keepalived does not tell this node
 whether the peer is in maintenance, so without Kea the check is ping only:
 do not put both nodes in maintenance.
 
+One maintenance command runs at a time: a second one, from LuCI, the
+command line or a sysupgrade, is refused while the first runs, and LuCI
+greys its buttons meanwhile. The last command's result is in the status
+(`maintenance_result`). Going from persistent maintenance to maintenance
+until reboot is checked like entering: in persistent maintenance the node
+is still a candidate.
+
 What entering does, in this order:
 
 1. **Kea**: this node's server goes `in-maintenance`. Its partner sees that
@@ -862,8 +877,20 @@ What entering does, in this order:
 Leaving gives the instances their priorities back, takes the marks away,
 puts this node's Kea back in the state it had and sends `ha-reset` to the
 partner's HA listener. The partner leaves `partner-in-maintenance` for
-`waiting` and syncs with this node. A partner reached over HTTPS is not
-sent that: run `ha-maintenance-cancel` on it. Whether the node takes the
+`waiting` and syncs with this node. The partners come from the config the
+running Kea holds (`config-get`), and ha-cluster sends `ha-reset` only to
+plain HTTP at the address of a peer of the cluster, on a port the firewall
+rule of Kea's HA opens; a partner it does not reach this way stays
+`partner-in-maintenance`, and this node's Kea goes back in-maintenance at
+its next heartbeat. ha-cluster checks that after eight seconds, does it once
+more, and otherwise logs that `ha-maintenance-cancel` must be run on the
+partner. `maintenance off` also brings back a Kea of this node left
+in-maintenance without a maintenance of the node. A node that leaves the
+cluster (HA disabled, the service disabled) ends its maintenance.
+
+With `priority 255` (the address owner) keepalived ignores weighted
+tracking and resets `nopreempt`: during a maintenance the generated config
+has 254, so that persistent maintenance demotes the node. Whether the node takes the
 role back is VRRP's decision: at once with preemption, not with
 `nopreempt`.
 
@@ -872,12 +899,13 @@ maintenance until reboot first (`/lib/upgrade/ha-cluster.sh`), once the image
 has been checked: Kea's partner takes over, the `master` uplinks go down
 (PADT), and the peer becomes MASTER. It runs among the hooks that
 `/sbin/sysupgrade` calls while it writes the backup of the settings, takes
-40 seconds at most and never stops the upgrade. It cannot wait any longer:
+40 seconds at most (its own timer) and never stops the upgrade. It cannot wait any longer:
 as soon as `/sbin/sysupgrade` hands the image to procd, procd stops every
 service with a signal, netifd and pppd go without a PADT, and the provider
 holds the session. That is what refused the peer's PPPoE for minutes before.
-An upgrade without the settings (`sysupgrade -n`) writes no backup and gets
-no hand-over: run `maintenance temp` first. If an upgrade fails after the
+An upgrade that writes no backup gets no hand-over: without the settings
+(`sysupgrade -n`) or with the settings of an archive (`sysupgrade -f`). Run
+`maintenance temp` first. If an upgrade fails after the
 hand-over, the node stays in maintenance until `maintenance off` or a
 reboot, as its status says.
 

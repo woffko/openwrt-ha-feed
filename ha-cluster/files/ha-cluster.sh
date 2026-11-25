@@ -59,7 +59,13 @@ HA_IPV6_GUARD_STATE_DIR="${HA_CLUSTER_RUN_DIR}/ipv6-backup-guard"
 # The VRRP states keepalived reported (instance.<name>), the states of the
 # uplinks (uplink.<section>) and the hold of the uplinks during a hand-over
 HA_ROLE_DIR="${HA_CLUSTER_RUN_DIR}/role"
-HA_ROLE_LOCK="${HA_ROLE_LOCK:-/var/lock/ha-cluster-role.lock}"
+# In the run directory (0700, root's): not in /var/lock, where any local
+# process could hold the lock
+HA_ROLE_LOCK="${HA_CLUSTER_RUN_DIR}/role.lock"
+# One maintenance command at a time (and Kea's resume against them), and
+# what the last one said, for the status
+HA_MAINTENANCE_LOCK="${HA_CLUSTER_RUN_DIR}/maintenance.lock"
+HA_MAINTENANCE_LAST="${HA_CLUSTER_RUN_DIR}/maintenance.last"
 HA_ROLE_BIN="${HA_ROLE_BIN:-/usr/lib/ha-cluster/role}"
 # Seconds between two rounds of the uplink monitor
 HA_ROLE_MONITOR_INTERVAL="${HA_ROLE_MONITOR_INTERVAL:-5}"
@@ -668,12 +674,21 @@ _ha_write_vrrp_instance() {
 	local vips="$3"
 	local evips="$4"
 
+	# keepalived ignores weighted tracking for priority 255 (the address
+	# owner) and resets nopreempt: during a maintenance 254, so that the
+	# demotion takes
+	local inst_priority="$priority"
+	if [ "${_ha_maintenance_tracked:-0}" -eq 1 ] && [ "$priority" = "255" ]; then
+		inst_priority=254
+		ha_log_info "vrrp_instance $name: priority 254 instead of 255 during the maintenance"
+	fi
+
 	cat >> "$KEEPALIVED_CONF" <<EOF
 vrrp_instance ${name} {
     state BACKUP
     interface $interface
     virtual_router_id $inst_vrid
-    priority $priority
+    priority $inst_priority
     advert_int $advert_int
 EOF
 
@@ -1325,7 +1340,10 @@ ha_validate_config() {
 
 	# Interfaces that follow the role of the node
 	_ha_uplink_ifaces_seen=""
-	config_foreach _ha_check_uplink uplink
+	if [ -n "$(ha_uplinks)" ]; then
+		_ha_cluster_own_ifaces
+		config_foreach _ha_check_uplink uplink
+	fi
 
 	# owsync is the only sync backend
 	local sync_method
@@ -1721,7 +1739,9 @@ ha_kea_command() {
 # Sends the command $KEA_COMMAND (JSON) to Kea's partner at $KEA_URL
 # (http://host:port/), the way the partner's own high availability does:
 # to its HA listener, which takes only the commands partners send each
-# other. Prints the body of the answer; gives up after three seconds.
+# other. HTTP/1.0, so that the answer comes whole and the connection
+# closes. Prints the body of the answer, 64 KiB at most; gives up after
+# three seconds.
 KEA_PARTNER_UCODE='
 import * as socket from "socket";
 let m = match(getenv("KEA_URL"), /^http:\/\/\[?([0-9A-Za-z.:-]+?)\]?:([0-9]+)(\/.*)?$/);
@@ -1731,7 +1751,7 @@ let s = socket.connect(m[1], m[2], { socktype: socket.SOCK_STREAM }, 2000);
 if (!s)
 	exit(1);
 let body = getenv("KEA_COMMAND");
-s.send(sprintf("POST %s HTTP/1.1\r\nHost: %s:%s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+s.send(sprintf("POST %s HTTP/1.0\r\nHost: %s:%s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
 	m[3] || "/", index(m[1], ":") >= 0 ? "[" + m[1] + "]" : m[1], m[2], length(body), body));
 let answer = "";
 for (let tries = 0; tries < 30; tries++) {
@@ -1741,6 +1761,8 @@ for (let tries = 0; tries < 30; tries++) {
 	if (!length(chunk))
 		break;
 	answer += chunk;
+	if (length(answer) > 65536)
+		break;
 }
 let at = index(answer, "\r\n\r\n");
 print(at >= 0 ? substr(answer, at + 4) : "");
@@ -3724,7 +3746,61 @@ _ha_uplink_uint() {
 	fi
 }
 
-# Usage: _ha_check_uplink <uplink section> (in ha_validate_config)
+# The logical interfaces the cluster itself runs on, which an uplink must
+# not take down on a BACKUP or at boot: loopback, those of the VRRP
+# instances and VIPs (named or by their device), and those that carry
+# bind_address or a peer's source_address (the sync link). Set by
+# _ha_cluster_own_ifaces in _ha_own_ifaces, " name name ".
+_ha_own_ifaces=""
+_ha_own_addresses=""
+_ha_own_iface_add() {
+	case " $_ha_own_ifaces " in
+		*" $1 "*) ;;
+		*) _ha_own_ifaces="$_ha_own_ifaces $1 " ;;
+	esac
+}
+_ha_own_iface_of() {
+	local name logical
+
+	config_get name "$1" interface ""
+	[ -n "$name" ] || return 0
+	for logical in $(_ha_logical_ifaces_of "$name"); do
+		_ha_own_iface_add "$logical"
+	done
+}
+_ha_own_address_of_peer() {
+	local address
+
+	config_get address "$1" source_address ""
+	[ -n "$address" ] && _ha_own_addresses="$_ha_own_addresses $address"
+	return 0
+}
+
+# Usage: _ha_cluster_own_ifaces (ha-cluster config loaded)
+_ha_cluster_own_ifaces() {
+	local iface address own device
+
+	_ha_own_ifaces=" loopback "
+	config_foreach _ha_own_iface_of vrrp_instance
+	config_foreach _ha_own_iface_of vip
+	config_get _ha_own_addresses config bind_address ""
+	config_foreach _ha_own_address_of_peer peer
+	for iface in $(uci -q show network | sed -n 's/^network\.\([A-Za-z0-9_]*\)=interface$/\1/p'); do
+		device="$(uci -q get "network.$iface.device")"
+		[ "$device" = "lo" ] && _ha_own_iface_add "$iface"
+		[ -n "$_ha_own_addresses" ] || continue
+		# The configured addresses only: the sync link is static, and the
+		# monitor runs this every few seconds
+		for address in $(uci -q get "network.$iface.ipaddr"); do
+			for own in $_ha_own_addresses; do
+				[ "${address%%/*}" = "$own" ] && _ha_own_iface_add "$iface"
+			done
+		done
+	done
+}
+
+# Usage: _ha_check_uplink <uplink section> (in ha_validate_config, after
+# _ha_cluster_own_ifaces)
 _ha_uplink_ifaces_seen=""
 _ha_check_uplink() {
 	local section="$1" type
@@ -3741,6 +3817,10 @@ _ha_check_uplink() {
 	elif ! _ha_is_safe_identifier "$_hu_interface" ||
 		[ "$(uci -q get "network.$_hu_interface")" != "interface" ]; then
 		_ha_validation_error "uplink $section: '$_hu_interface' is not an interface of /etc/config/network"
+	elif [ "$_hu_mode" = "master" ] &&
+		case "$_ha_own_ifaces" in *" $_hu_interface "*) true ;; *) false ;; esac; then
+		# Mode always only brings an interface up: it may be one of these
+		_ha_validation_error "uplink $section: '$_hu_interface' is an interface the cluster runs on (loopback, a VRRP instance, a VIP or the sync link): in mode master it would go down on the BACKUP and stay down at boot"
 	else
 		case " $_ha_uplink_ifaces_seen " in
 			*" $_hu_interface "*)
@@ -3918,12 +3998,31 @@ _ha_uplink_desired() {
 	fi
 }
 
+# Usage: _ha_uplink_refused (section loaded, _ha_cluster_own_ifaces run)
+# A 'master' uplink on an interface the cluster runs on: the validation
+# refuses it at a start, and the rounds that read the config on their own
+# (keepalived's reports, the monitor) leave it alone
+_ha_uplink_refused() {
+	[ "$_hu_mode" = "master" ] || return 1
+	case "$_ha_own_ifaces" in
+		*" $_hu_interface "*) return 0 ;;
+	esac
+	return 1
+}
+
 # Usage: _ha_uplink_reconcile <section> <now> (ha-cluster config loaded)
 _ha_uplink_reconcile() {
 	local section="$1" now="$2"
 
 	_ha_uplink_load "$section"
 	_ha_uplink_state_read "$section"
+	if _ha_uplink_refused; then
+		[ "$_hs_desired" = "refused" ] ||
+			ha_log_error "uplink $section: '$_hu_interface' is an interface the cluster runs on; left alone"
+		_hs_desired="refused"
+		_ha_uplink_state_write "$section"
+		return 0
+	fi
 	_ha_uplink_desired "$section" "$now"
 	if [ "$_hu_wait" -gt 0 ] && { [ "$_ha_uplinks_wake" -eq 0 ] || [ "$_hu_wait" -lt "$_ha_uplinks_wake" ]; }; then
 		_ha_uplinks_wake="$_hu_wait"
@@ -4001,6 +4100,7 @@ ha_uplinks_reconcile() {
 
 	_ha_uplinks_wake=0
 	now="$(_ha_uptime)"
+	_ha_cluster_own_ifaces
 	for section in $(ha_uplinks); do
 		_ha_uplink_reconcile "$section" "$now"
 	done
@@ -4028,11 +4128,13 @@ ha_uplinks_json() {
 
 	_ha_uplinks_problem=""
 	now="$(_ha_uptime)"
+	_ha_cluster_own_ifaces
 	json_add_array uplinks
 	for section in $(ha_uplinks); do
 		_ha_uplink_load "$section"
 		_ha_uplink_state_read "$section"
 		_ha_uplink_desired "$section" "$now"
+		_ha_uplink_refused && _hu_desired="refused"
 		role="$_hr_role"
 		[ -n "$role" ] || role="$node_role"
 		if ! _ha_ifstatus "$_hu_interface"; then
@@ -4051,7 +4153,11 @@ ha_uplinks_json() {
 			down_for=$((now - _hs_down))
 		fi
 		problem=""
-		if [ "$down_for" -gt "$_hu_grace" ]; then
+		if [ "$_hu_desired" = "refused" ]; then
+			# An interface the cluster runs on: not managed
+			problem="refused"
+			_ha_uplinks_problem="degraded"
+		elif [ "$down_for" -gt "$_hu_grace" ]; then
 			if [ "$_hu_mode" = "master" ] || [ "$role" = "MASTER" ]; then
 				problem="down"
 				_ha_uplinks_problem="degraded"
@@ -4082,17 +4188,23 @@ ha_uplinks_json() {
 }
 
 # Usage: ha_role_locked <command...>
-# Runs the command under the lock of the role work (uplinks, maintenance)
+# Runs the command under the lock of the role work (uplinks, maintenance),
+# waiting 30 seconds at most for it: a round that hangs does not hold up
+# the others for ever
 ha_role_locked() {
-	local rc
-
-	mkdir -p "${HA_ROLE_LOCK%/*}" 2>/dev/null
+	ha_ensure_run_dir || return 1
 	(
-		flock -x 9 || exit 1
+		i=0
+		until flock -n -x 9; do
+			i=$((i + 1))
+			if [ "$i" -gt 30 ]; then
+				ha_log_error "The uplinks were not brought in line: another round has held their lock for 30 seconds"
+				exit 1
+			fi
+			sleep 1
+		done
 		"$@"
 	) 9>>"$HA_ROLE_LOCK"
-	rc=$?
-	return "$rc"
 }
 
 # Usage: _ha_net_false <value>
@@ -4116,9 +4228,12 @@ ha_uplinks_auto_sync() {
 	_ha_auto_changed=0
 	_ha_auto_restored=""
 	if [ "$1" != "release" ]; then
+		_ha_cluster_own_ifaces
 		for section in $(ha_uplinks); do
 			_ha_uplink_load "$section"
-			[ "$_hu_mode" = "master" ] && managed="$managed $_hu_interface"
+			[ "$_hu_mode" = "master" ] || continue
+			_ha_uplink_refused && continue
+			managed="$managed $_hu_interface"
 		done
 	fi
 	# Nothing to do, and nothing touched, without uplinks nor a value kept
@@ -4246,9 +4361,11 @@ ha_stop_uplinks() {
 	config_load ha-cluster
 	config_get_bool enabled config enabled 0
 	if [ "$enabled" -eq 1 ] && ha_service_enabled; then
+		_ha_cluster_own_ifaces
 		for section in $(ha_uplinks); do
 			_ha_uplink_load "$section"
 			[ "$_hu_mode" = "master" ] || continue
+			_ha_uplink_refused && continue
 			ha_log_info "uplink $section: '$_hu_interface' down: HA cluster stopped"
 			_ha_iface_down "$_hu_interface"
 		done
@@ -4449,17 +4566,20 @@ _ha_keepalived_wait_none() {
 }
 
 # Usage: _ha_kea_ha_state dhcp4|dhcp6
-# Sets _hk_ha (1 when the daemon runs with high availability), _hk_state,
-# _hk_partner_state and _hk_in_touch from its status-get
+# Sets _hk_answered (1 when the daemon answered status-get), _hk_ha (1 when
+# it runs with high availability), _hk_state, _hk_partner_state and
+# _hk_in_touch
 _ha_kea_ha_state() {
 	local answer mode="" state="" partner="" touch=""
 
+	_hk_answered=0
 	_hk_ha=0
 	_hk_state=""
 	_hk_partner_state=""
 	_hk_in_touch=""
 	answer="$(ha_kea_status_get "$1")"
 	[ -n "$answer" ] || return 0
+	_hk_answered=1
 	eval "$(printf '%s' "$answer" | jsonfilter \
 		-e 'mode=@.arguments["high-availability"][0]["ha-mode"]' \
 		-e 'state=@.arguments["high-availability"][0]["ha-servers"].local.state' \
@@ -4479,18 +4599,26 @@ _ha_kea_answer_ok() {
 	[ "$(printf '%s' "$1" | jsonfilter -e '@.result' -e '@[0].result' 2>/dev/null | head -n 1)" = "0" ]
 }
 
-# Usage: _ha_kea_partner_urls dhcp4|dhcp6
-# The URLs of the partners of this server in Kea's config, one per line
-_ha_kea_partner_urls() {
-	local conf="$KEA_CONF_DIR/kea-$1.conf" name ha i peer url
-	local key="Dhcp${1#dhcp}"
+# Usage: _ha_kea_short <answer>
+# The answer as it goes into the log: one line, 200 characters at most
+_ha_kea_short() {
+	printf '%s' "${1:-no answer}" | tr -c '[:print:]' ' ' | cut -c1-200
+}
 
-	[ -r "$conf" ] || return 0
+# Usage: _ha_kea_partner_urls dhcp4|dhcp6
+# The URLs of the partners of this server, one per line, from the config
+# the running daemon holds (config-get): the file may carry comments, which
+# Kea reads and jsonfilter does not
+_ha_kea_partner_urls() {
+	local key="Dhcp${1#dhcp}" answer name ha i peer url
+
+	answer="$(ha_kea_command "$1" '{"command":"config-get"}')"
+	[ -n "$answer" ] || return 0
 	i=0
 	while :; do
-		ha="$(jsonfilter -i "$conf" -e "@.$key[\"hooks-libraries\"][$i].parameters[\"high-availability\"][0]" 2>/dev/null)" || {
+		ha="$(printf '%s' "$answer" | jsonfilter -e "@.arguments.$key[\"hooks-libraries\"][$i].parameters[\"high-availability\"][0]" 2>/dev/null)" || {
 			# A hook without parameters, or the end of the list
-			jsonfilter -i "$conf" -e "@.$key[\"hooks-libraries\"][$i]" >/dev/null 2>&1 || break
+			printf '%s' "$answer" | jsonfilter -e "@.arguments.$key[\"hooks-libraries\"][$i]" >/dev/null 2>&1 || break
 			i=$((i + 1))
 			continue
 		}
@@ -4504,6 +4632,71 @@ _ha_kea_partner_urls() {
 	done
 }
 
+_ha_peer_addresses_all=""
+_ha_peer_address_collect() {
+	local address
+
+	config_get address "$1" address ""
+	[ -n "$address" ] && _ha_peer_addresses_all="$_ha_peer_addresses_all $address"
+	config_get address "$1" source_address ""
+	[ -n "$address" ] && _ha_peer_addresses_all="$_ha_peer_addresses_all $address"
+	return 0
+}
+
+# Usage: _ha_kea_partner_refused <url> (ha-cluster config loaded)
+# Prints why ha-cluster does not send the URL anything, or nothing: it sends
+# only to plain HTTP, on a port the firewall rule of Kea's HA would open,
+# at an address of a peer of the cluster. Kea's config may be written by a
+# user of luci-app-kea who may not make root send requests elsewhere.
+_ha_kea_partner_refused() {
+	local url="$1" rest host port
+
+	case "$url" in
+		http://*) rest="${url#http://}" ;;
+		*) echo "not plain HTTP"; return 0 ;;
+	esac
+	rest="${rest%%/*}"
+	case "$rest" in
+		\[*\]:*) host="${rest%%]:*}"; host="${host#\[}"; port="${rest##*]:}" ;;
+		*:*) host="${rest%:*}"; port="${rest##*:}" ;;
+		*) echo "no port"; return 0 ;;
+	esac
+	if ! _ha_is_uint "$port" || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ] || _ha_kea_port_refused "$port"; then
+		echo "port $port is not one for Kea's HA"
+		return 0
+	fi
+	_ha_peer_addresses_all=""
+	config_foreach _ha_peer_address_collect peer
+	case " $_ha_peer_addresses_all " in
+		*" $host "*) return 1 ;;
+	esac
+	echo "$host is no peer of the cluster"
+}
+
+# Usage: _ha_kea_leave_partner <daemon>
+# ha-reset to each partner of the daemon that ha-cluster may reach; fails
+# when none took it
+_ha_kea_leave_partner() {
+	local daemon="$1" url why answer sent=1
+
+	_ha_kea_partner_urls "$daemon" > "$HA_CLUSTER_RUN_DIR/kea-partners.$$"
+	while IFS= read -r url; do
+		[ -n "$url" ] || continue
+		if why="$(_ha_kea_partner_refused "$url")"; then
+			ha_log_warning "Kea $daemon: its partner at $url is not sent ha-reset ($why): run ha-maintenance-cancel on it"
+			continue
+		fi
+		answer="$(_ha_kea_partner_post "$url" "{\"command\":\"ha-reset\",\"service\":[\"$daemon\"]}")"
+		if _ha_kea_answer_ok "$answer"; then
+			sent=0
+		else
+			ha_log_warning "Kea $daemon: its partner at $url did not take ha-reset: $(_ha_kea_short "$answer")"
+		fi
+	done < "$HA_CLUSTER_RUN_DIR/kea-partners.$$"
+	rm -f "$HA_CLUSTER_RUN_DIR/kea-partners.$$"
+	return "$sent"
+}
+
 # Usage: ha_kea_maintenance enter|leave|takeover
 # Kea's side of a maintenance, for each daemon that runs with high
 # availability. Kea takes ha-maintenance-start and ha-maintenance-cancel
@@ -4515,13 +4708,17 @@ _ha_kea_partner_urls() {
 #             (ten seconds at most).
 #   leave     this server back to its state before (ha-maintenance-notify,
 #             cancel), then ha-reset to the partner, which leaves
-#             partner-in-maintenance for waiting and syncs with this server
+#             partner-in-maintenance for waiting and syncs with this
+#             server. A partner that stays partner-in-maintenance puts this
+#             server back in-maintenance at the next heartbeat: checked
+#             after eight seconds, and done once more if so.
 #   takeover  the peer is gone while this node is in maintenance: this
 #             server back, so that it finds the partner unavailable and
 #             serves (partner-down)
 ha_kea_maintenance() {
-	local action="$1" daemon answer url i
+	local action="$1" daemon answer i attempt
 
+	ha_ensure_run_dir || return 0
 	for daemon in dhcp4 dhcp6; do
 		_ha_kea_ha_state "$daemon"
 		[ "$_hk_ha" -eq 1 ] || continue
@@ -4530,7 +4727,7 @@ ha_kea_maintenance() {
 				[ "$_hk_state" = "in-maintenance" ] && continue
 				answer="$(ha_kea_command "$daemon" '{"command":"ha-maintenance-notify","arguments":{"cancel":false}}')"
 				if ! _ha_kea_answer_ok "$answer"; then
-					ha_log_warning "Kea $daemon refused to go in-maintenance (state $_hk_state): ${answer:-no answer}"
+					ha_log_warning "Kea $daemon refused to go in-maintenance (state $_hk_state): $(_ha_kea_short "$answer")"
 					continue
 				fi
 				i=0
@@ -4546,44 +4743,47 @@ ha_kea_maintenance() {
 					ha_log_warning "Kea $daemon in-maintenance, but its partner is ${_hk_partner_state:-unknown}, not partner-in-maintenance"
 				fi
 				;;
-			leave|takeover)
+			takeover)
 				[ "$_hk_state" = "in-maintenance" ] || continue
-				if [ "$action" = "leave" ]; then
-					answer="$(ha_kea_command "$daemon" '{"command":"ha-maintenance-notify","arguments":{"cancel":true,"state":"waiting"}}')"
-				else
-					answer="$(ha_kea_command "$daemon" '{"command":"ha-maintenance-notify","arguments":{"cancel":true}}')"
-				fi
-				if ! _ha_kea_answer_ok "$answer"; then
-					ha_log_warning "Kea $daemon did not leave in-maintenance: ${answer:-no answer}"
-					continue
-				fi
-				if [ "$action" = "takeover" ]; then
+				answer="$(ha_kea_command "$daemon" '{"command":"ha-maintenance-notify","arguments":{"cancel":true}}')"
+				if _ha_kea_answer_ok "$answer"; then
 					ha_log_warning "Kea $daemon out of maintenance: the peer is gone and this node took over"
-					continue
+				else
+					ha_log_warning "Kea $daemon did not leave in-maintenance: $(_ha_kea_short "$answer")"
 				fi
-				for url in $(_ha_kea_partner_urls "$daemon"); do
-					case "$url" in
-						http://*) ;;
-						*)
-							ha_log_warning "Kea $daemon: the partner at $url is not reached over plain HTTP: run ha-maintenance-cancel on it"
-							continue
-							;;
-					esac
-					answer="$(_ha_kea_partner_post "$url" "{\"command\":\"ha-reset\",\"service\":[\"$daemon\"]}")"
-					if _ha_kea_answer_ok "$answer"; then
-						ha_log_info "Kea $daemon out of maintenance; its partner at $url syncs with it again"
-					else
-						ha_log_warning "Kea $daemon out of maintenance, but its partner at $url did not take ha-reset: ${answer:-no answer}. Run ha-maintenance-cancel on it"
+				;;
+			leave)
+				[ "$_hk_state" = "in-maintenance" ] || continue
+				attempt=0
+				while [ "$attempt" -lt 2 ]; do
+					attempt=$((attempt + 1))
+					answer="$(ha_kea_command "$daemon" '{"command":"ha-maintenance-notify","arguments":{"cancel":true,"state":"waiting"}}')"
+					if ! _ha_kea_answer_ok "$answer"; then
+						ha_log_warning "Kea $daemon did not leave in-maintenance: $(_ha_kea_short "$answer")"
+						break
 					fi
+					_ha_kea_leave_partner "$daemon" ||
+						ha_log_warning "Kea $daemon: no partner took ha-reset"
+					sleep 8
+					_ha_kea_ha_state "$daemon"
+					if [ "$_hk_state" != "in-maintenance" ] && [ "$_hk_partner_state" != "partner-in-maintenance" ]; then
+						ha_log_info "Kea $daemon out of maintenance ($_hk_state); its partner is ${_hk_partner_state:-unknown}"
+						break
+					fi
+					ha_log_warning "Kea $daemon is $_hk_state, its partner ${_hk_partner_state:-unknown}: leaving maintenance once more"
 				done
+				[ "$_hk_state" = "in-maintenance" ] &&
+					ha_log_error "Kea $daemon is in-maintenance again: its partner stays partner-in-maintenance. Run ha-maintenance-cancel on the partner"
 				;;
 		esac
 	done
 }
 
 # Usage: ha_maintenance_peer_problem (ha-cluster config loaded)
-# Why the peer cannot take over now, or nothing: a peer that does not
-# answer, Kea's partner out of touch or in a maintenance itself
+# Why the peer cannot take over now, or nothing: this node holds a role
+# in maintenance (the peer is gone), a peer that does not answer, a Kea of
+# this node that does not answer, Kea's partner out of touch or in a state
+# that does not serve every client
 _ha_maint_peers=0
 _ha_maint_problem=""
 _ha_maint_peer_check() {
@@ -4604,6 +4804,11 @@ _ha_maint_peer_check() {
 ha_maintenance_peer_problem() {
 	local daemon
 
+	if [ "$(ha_maintenance_mode)" != "none" ] &&
+		_ha_keepalived_states | grep -q ' MASTER$'; then
+		echo "this node holds a role although in maintenance: the peer is gone"
+		return 0
+	fi
 	# Peer sections are often anonymous (config peer)
 	_ha_maint_peers=0
 	_ha_maint_problem=""
@@ -4618,15 +4823,31 @@ ha_maintenance_peer_problem() {
 	}
 	if ha_dhcp_backend_is_kea; then
 		for daemon in dhcp4 dhcp6; do
+			ha_kea_daemon_enabled "$daemon" || continue
 			_ha_kea_ha_state "$daemon"
+			if [ "$_hk_answered" -ne 1 ]; then
+				echo "Kea $daemon does not answer on this node: whether its partner can serve is unknown"
+				return 0
+			fi
 			[ "$_hk_ha" -eq 1 ] || continue
 			[ "$_hk_in_touch" = "1" ] || [ "$_hk_in_touch" = "true" ] || {
 				echo "Kea $daemon is not in touch with its partner"
 				return 0
 			}
-			case "$_hk_partner_state" in
-				in-maintenance|partner-in-maintenance)
+			case "$_hk_state:$_hk_partner_state" in
+				*:hot-standby|*:load-balancing) ;;
+				# This node in maintenance already: the partner serves
+				in-maintenance:partner-in-maintenance) ;;
+				in-maintenance:*)
+					echo "Kea $daemon of this node is in-maintenance while its partner is ${_hk_partner_state:-unknown}: 'maintenance off' brings it back"
+					return 0
+					;;
+				*:in-maintenance|*:partner-in-maintenance)
 					echo "Kea's partner is $_hk_partner_state: the peer is in maintenance"
+					return 0
+					;;
+				*)
+					echo "Kea's partner is ${_hk_partner_state:-unknown}: it does not serve every client"
 					return 0
 					;;
 			esac
@@ -4636,7 +4857,8 @@ ha_maintenance_peer_problem() {
 }
 
 # Usage: ha_maintenance_enter temp|persistent [force]
-# (the caller reloads the service afterwards; see the init script)
+# (under the maintenance lock; the caller reloads the service afterwards,
+# see the init script)
 # Prints what it did or why it refused; fails when it refused.
 ha_maintenance_enter() {
 	local mode="$1" force="$2" current problem
@@ -4652,11 +4874,30 @@ ha_maintenance_enter() {
 		echo "Already in maintenance ($mode)"
 		return 0
 	fi
-	if [ "$current" = "none" ] && [ "$force" != "force" ] &&
+	# Checked also from persistent to temp: the node stays a candidate in
+	# persistent maintenance, and takes no role at all in temp
+	if [ "$force" != "force" ] && { [ "$current" = "none" ] || [ "$mode" = "temp" ]; } &&
 		problem="$(ha_maintenance_peer_problem)"; then
 		echo "Refused: $problem. The peer must be able to take over; 'force' enters maintenance anyway"
 		ha_log_warning "Maintenance ($mode) refused: $problem"
 		return 1
+	fi
+
+	ha_ensure_run_dir || return 1
+	# The mark first: a hand-over cut short (an error, a timeout) leaves a
+	# node that says it is in maintenance, which "maintenance off" ends
+	if [ "$mode" = "temp" ]; then
+		echo "temp $(date +%s)" > "$HA_MAINTENANCE_TEMP" || {
+			echo "Could not write $HA_MAINTENANCE_TEMP"
+			return 1
+		}
+		[ "$current" = "persistent" ] && _ha_maintenance_mark none
+	else
+		_ha_maintenance_mark persistent || {
+			echo "Could not write /etc/config/ha-cluster"
+			return 1
+		}
+		rm -f "$HA_MAINTENANCE_TEMP"
 	fi
 
 	ha_log_warning "Entering maintenance ($mode): this node hands its roles over"
@@ -4666,20 +4907,12 @@ ha_maintenance_enter() {
 
 	# The 'master' uplinks down while the node still holds the role: the
 	# session is closed before the peer, MASTER, dials
-	ha_ensure_run_dir || return 1
 	mkdir -p "$HA_ROLE_DIR" && : > "$HA_ROLE_DIR/hold"
 	ha_role_locked ha_uplinks_reconcile
 
 	# Every instance in FAULT: the peer takes the VIPs at once, even with
 	# nopreempt. The persistent mode comes back as the last candidate below.
 	_ha_maintenance_files 1 0
-	if [ "$mode" = "temp" ]; then
-		echo "temp $(date +%s)" > "$HA_MAINTENANCE_TEMP"
-		[ "$current" = "persistent" ] && _ha_maintenance_mark none
-	else
-		_ha_maintenance_mark persistent || return 1
-		rm -f "$HA_MAINTENANCE_TEMP"
-	fi
 	echo "Maintenance ($mode) on"
 }
 
@@ -4714,12 +4947,16 @@ ha_maintenance_settle() {
 }
 
 # Usage: ha_maintenance_leave
-# Prints what it did; the caller reloads the service and settles
+# (under the maintenance lock) Prints what it did; the caller reloads the
+# service and settles. Also brings back a Kea of this node left
+# in-maintenance without a maintenance of the node.
 ha_maintenance_leave() {
 	local current
 
 	current="$(ha_maintenance_mode)"
 	if [ "$current" = "none" ]; then
+		rm -f "$HA_ROLE_DIR/hold"
+		ha_dhcp_backend_is_kea && ha_kea_maintenance leave
 		echo "Not in maintenance"
 		return 0
 	fi
@@ -4727,13 +4964,42 @@ ha_maintenance_leave() {
 	# The marks first: a MASTER that the normal priorities bring is then no
 	# takeover (ha_maintenance_on_role)
 	if [ "$current" = "persistent" ]; then
-		_ha_maintenance_mark none || return 1
+		_ha_maintenance_mark none || {
+			echo "Could not write /etc/config/ha-cluster"
+			return 1
+		}
 	fi
 	rm -f "$HA_MAINTENANCE_TEMP" "$HA_ROLE_DIR/hold"
 	# keepalived follows the files at once: normal priorities again
 	[ -f "$HA_MAINTENANCE_FAULT" ] && _ha_maintenance_files 0 0
 	ha_dhcp_backend_is_kea && ha_kea_maintenance leave
 	echo "Maintenance ($current) off"
+}
+
+# Usage: ha_stop_maintenance
+# When the service stops. A node that stays in the cluster keeps its
+# maintenance; one that leaves it (HA disabled, the service disabled) ends
+# it: the marks go, and its Kea leaves in-maintenance.
+ha_stop_maintenance() {
+	local enabled mode
+
+	config_load ha-cluster
+	config_get_bool enabled config enabled 0
+	[ "$enabled" -eq 1 ] && ha_service_enabled && return 0
+	mode="$(ha_maintenance_mode)"
+	[ "$mode" = "none" ] && return 0
+	ha_log_warning "The node leaves the cluster in maintenance ($mode): the maintenance ends"
+	[ "$mode" = "persistent" ] && _ha_maintenance_mark none
+	rm -f "$HA_MAINTENANCE_TEMP" "$HA_MAINTENANCE_FAULT" "$HA_MAINTENANCE_DEMOTE" "$HA_ROLE_DIR/hold"
+	ha_dhcp_backend_is_kea && ha_kea_maintenance leave
+	return 0
+}
+
+# Usage: ha_maintenance_running
+# A maintenance command holds the maintenance lock
+ha_maintenance_running() {
+	[ -e "$HA_MAINTENANCE_LOCK" ] || return 1
+	! ( flock -n -x 7 ) 7<"$HA_MAINTENANCE_LOCK" 2>/dev/null
 }
 
 # Usage: ha_maintenance_on_role <keepalived instance> <state>
@@ -4764,22 +5030,24 @@ ha_maintenance_kea_resume_bg() {
 	ha_dhcp_backend_is_kea || return 0
 	ha_ensure_run_dir || return 0
 	(
-		flock -n 8 || exit 0
+		flock -n 6 || exit 0
 		ha_maintenance_kea_resume
-	) 8>"$HA_CLUSTER_RUN_DIR/kea-resume.lock" </dev/null >/dev/null 2>&1 &
+	) 6>"$HA_CLUSTER_RUN_DIR/kea-resume.lock" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
 }
 
 # Usage: ha_maintenance_kea_resume
-# After a start in persistent maintenance: Kea comes back from a reboot as a
-# normal member of the pair. Puts it in-maintenance again once it is in
-# touch with its partner and the node holds no role (two minutes at most).
+# After a start in maintenance, or the peer back after a takeover: Kea
+# comes back as a normal member of the pair (from a reboot, a restart from
+# luci-app-kea, partner-down). Puts it in-maintenance again once it is in
+# touch with its partner and the node holds no role (two minutes at most),
+# under the maintenance lock, so that it never follows a "maintenance off".
 ha_maintenance_kea_resume() {
-	local i=0 daemon ready seen
+	local i=0 daemon ready seen rc
 
-	[ "$(ha_maintenance_mode)" = "persistent" ] || return 0
+	[ "$(ha_maintenance_mode)" != "none" ] || return 0
 	ha_dhcp_backend_is_kea || return 0
 	while [ "$i" -lt 24 ]; do
-		[ "$(ha_maintenance_mode)" = "persistent" ] || return 0
+		[ "$(ha_maintenance_mode)" != "none" ] || return 0
 		# Not while the node holds a role: the peer is gone, or not back
 		if _ha_keepalived_states | grep -q ' MASTER$'; then
 			sleep 5
@@ -4799,18 +5067,25 @@ ha_maintenance_kea_resume() {
 			esac
 		done
 		if [ "$seen" -gt 0 ] && [ "$ready" -eq 1 ]; then
-			for daemon in dhcp4 dhcp6; do
-				_ha_kea_ha_state "$daemon"
-				[ "$_hk_ha" -eq 1 ] && [ "$_hk_state" != "in-maintenance" ] &&
-					ha_log_info "Maintenance (persistent): Kea $daemon has joined its partner, in-maintenance again"
-			done
-			ha_kea_maintenance enter
-			return 0
+			(
+				flock -n -x 7 || exit 2
+				[ "$(ha_maintenance_mode)" != "none" ] || exit 0
+				for daemon in dhcp4 dhcp6; do
+					_ha_kea_ha_state "$daemon"
+					[ "$_hk_ha" -eq 1 ] && [ "$_hk_state" != "in-maintenance" ] &&
+						ha_log_info "Maintenance: Kea $daemon has joined its partner, in-maintenance again"
+				done
+				ha_kea_maintenance enter
+				exit 0
+			) 7>>"$HA_MAINTENANCE_LOCK"
+			rc=$?
+			# A maintenance command runs: once more in a moment
+			[ "$rc" -eq 2 ] || return 0
 		fi
 		sleep 5
 		i=$((i + 1))
 	done
-	ha_log_warning "Maintenance (persistent): Kea did not join its partner within two minutes; not put in-maintenance"
+	ha_log_warning "Maintenance: Kea did not join its partner within two minutes; not put in-maintenance"
 }
 
 ha_apply_config() {

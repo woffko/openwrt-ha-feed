@@ -259,7 +259,8 @@ lease-sync=1
 Refused: the peer at 172.30.0.11 does not answer. The peer must be able to take over; 'force' enters maintenance anyway
 rc=1
 == mode: none
-(no maintenance file)
+maintenance.last
+maintenance.lock
 == rc.d
 K91ha-cluster
 S25ha-cluster

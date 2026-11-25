@@ -263,7 +263,8 @@ Maintenance (persistent) on
 == off: rc=0
 Maintenance (persistent) off
 == mode: none, option: none
-(no maintenance file)
+maintenance.last
+maintenance.lock
 == track_file lines: 0
 == rc.d
 K91ha-cluster
