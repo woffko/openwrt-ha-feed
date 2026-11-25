@@ -796,8 +796,9 @@ the old session, and some providers lock a login after many failed
 attempts.
 
 **Not on the cluster's own interfaces.** A `master` uplink may not name
-loopback, the interface of a VRRP instance or of a VIP (by name or by
-device), or the sync link (the interface carrying `bind_address` or a
+loopback, the interface of a VRRP instance or of a VIP (named, or holding
+the addresses of the device they name: a PPPoE session on that device is
+allowed, it has a device of its own), or the sync link (the interface carrying `bind_address` or a
 peer's `source_address`): it would go down on the BACKUP and stay down at
 boot. The validation refuses it, LuCI too, and the rounds that read the
 config on their own leave it alone. Mode `always` only brings an interface
