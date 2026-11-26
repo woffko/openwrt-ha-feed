@@ -4689,28 +4689,37 @@ _ha_kea_partner_urls() {
 	done
 }
 
+# The addresses of the peers that run ha-cluster: not this node's own
+# source_address (its own HA listener), not a peer with VRRP only
 _ha_peer_addresses_all=""
 _ha_peer_address_collect() {
-	local address
+	local address vrrp_only
 
+	config_get_bool vrrp_only "$1" vrrp_only 0
+	[ "$vrrp_only" -eq 1 ] && return 0
 	config_get address "$1" address ""
-	[ -n "$address" ] && _ha_peer_addresses_all="$_ha_peer_addresses_all $address"
-	config_get address "$1" source_address ""
 	[ -n "$address" ] && _ha_peer_addresses_all="$_ha_peer_addresses_all $address"
 	return 0
 }
 
 # Usage: _ha_kea_partner_refused <url> (ha-cluster config loaded)
 # Prints why ha-cluster does not send the URL anything, or nothing: it sends
-# only to plain HTTP, on a port the firewall rule of Kea's HA would open,
-# at an address of a peer of the cluster. Kea's config may be written by a
-# user of luci-app-kea who may not make root send requests elsewhere.
+# only to plain HTTP, with no path but /, on a port the firewall rule of
+# Kea's HA would open, at the address of a peer of the cluster. Kea's config
+# may be written by a user of luci-app-kea who may not make root send
+# requests elsewhere.
 _ha_kea_partner_refused() {
-	local url="$1" rest host port
+	local url="$1" rest path host port
 
 	case "$url" in
 		http://*) rest="${url#http://}" ;;
 		*) echo "not plain HTTP"; return 0 ;;
+	esac
+	path="${rest#*/}"
+	[ "$path" = "$rest" ] && path="" || path="/$path"
+	case "$path" in
+		""|/) ;;
+		*) echo "the path $path is not the one of Kea's HA listener"; return 0 ;;
 	esac
 	rest="${rest%%/*}"
 	case "$rest" in
