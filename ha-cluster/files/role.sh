@@ -108,6 +108,17 @@ case "$1" in
 		ha_role_locked ha_uplinks_reconcile
 		ubus call service delete '{"name":"ha-cluster","instance":"monitor"}' >/dev/null 2>&1
 		ubus call service delete '{"name":"ha-cluster","instance":"keepalived"}' >/dev/null 2>&1
+		# keepalived reports nothing when it stops. The states recorded say
+		# STOP, so that "maintenance off" after an upgrade that did not go
+		# on brings no 'master' uplink up for a MASTER that is gone, and the
+		# mark tells that command to start the service again (keepalived
+		# and the monitor are out of procd). The IPv6 guard closed, as at a
+		# stop of the service.
+		for f in "$HA_ROLE_DIR"/instance.*; do
+			[ -f "$f" ] && ha_role_record "${f##*/instance.}" STOP
+		done
+		: > "$HA_ROLE_DIR/sysupgrade"
+		ha_close_ipv6_guard
 		ha_log_info "sysupgrade: roles handed over"
 		;;
 	*)
