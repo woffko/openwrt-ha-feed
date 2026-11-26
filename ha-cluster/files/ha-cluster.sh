@@ -49,9 +49,10 @@ HA_KEA_STOPPED_MARK="${HA_CLUSTER_RUN_DIR}/kea-stopped"
 # What a switch to Kea that followed the other node turned on in Kea's
 # settings ("flag", "init"), for the way back; kept across reboots
 HA_KEA_FOLLOWED="${HA_KEA_FOLLOWED:-${HA_CLUSTER_ROOT}/etc/ha-cluster/kea-followed}"
-HA_DHCP_BACKEND_LOCK="${HA_DHCP_BACKEND_LOCK:-/var/lock/ha-cluster-dhcp-backend.lock}"
+# The locks below are in the run directory (0700, root's) as well
+HA_DHCP_BACKEND_LOCK="${HA_DHCP_BACKEND_LOCK:-${HA_CLUSTER_RUN_DIR}/dhcp-backend.lock}"
 FW4_BIN="${FW4_BIN:-/sbin/fw4}"
-HA_FIREWALL_LOCK="${HA_FIREWALL_LOCK:-/var/lock/ha-cluster-firewall.lock}"
+HA_FIREWALL_LOCK="${HA_FIREWALL_LOCK:-${HA_CLUSTER_RUN_DIR}/firewall.lock}"
 HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
@@ -2636,7 +2637,7 @@ ha_apply_dhcp_backend() {
 	local mode current wanted state="" i follow="" what
 
 	rm -f "$HA_DHCP_BACKEND_PROBLEM"
-	mkdir -p "${HA_DHCP_BACKEND_LOCK%/*}" 2>/dev/null
+	ha_ensure_run_dir
 	exec 7>"$HA_DHCP_BACKEND_LOCK"
 	# BusyBox's flock has no timeout (-w): asked again every second, for at
 	# most 30 seconds, longer than a switch takes
@@ -3079,12 +3080,22 @@ _ha_fw_reload() {
 # outside the lock it takes for start and stop, may meet, and they stage
 # their changes in the same directory: two at once would write each list
 # twice. The lock is held on a descriptor, so a writer that dies leaves
-# none behind. Without a place for the lock file the function runs anyway.
+# none behind. Without a place for the lock file the function runs anyway,
+# and after 30 seconds of another writer at work as well (BusyBox's flock
+# has no timeout: asked again every second).
 _ha_fw_locked() {
-	mkdir -p "${HA_FIREWALL_LOCK%/*}" 2>/dev/null
-	if ( : > "$HA_FIREWALL_LOCK" ) 2>/dev/null; then
+	local i=0
+
+	if ha_ensure_run_dir && ( : > "$HA_FIREWALL_LOCK" ) 2>/dev/null; then
 		{
-			flock -x 9 2>/dev/null
+			until flock -n -x 9 2>/dev/null; do
+				i=$((i + 1))
+				if [ "$i" -gt 30 ]; then
+					ha_log_warning "The firewall rules of the cluster: another change has held their lock for 30 seconds, going on"
+					break
+				fi
+				sleep 1
+			done
 			"$@"
 		} 9>"$HA_FIREWALL_LOCK"
 	else

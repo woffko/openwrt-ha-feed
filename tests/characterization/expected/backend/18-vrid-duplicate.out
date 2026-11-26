@@ -122,6 +122,7 @@ ha-cluster|daemon.err|Duplicate VRID 51 in vrrp_instance section guest
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
 == ls /var/run/ha-cluster
+dhcp-backend.lock
 uci-dhcp
 == /var/run/ha-cluster/keepalived.conf
 (absent)

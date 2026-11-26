@@ -156,6 +156,8 @@ ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 ha-cluster|daemon.info|Starting lease-sync daemon
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 keepalived.conf
 lease-sync.conf
 owsync.conf
@@ -270,6 +272,8 @@ ha-cluster|daemon.info|Restored standalone service: owsync
 lease-sync|daemon.info|lease-sync disabled in UCI configuration
 ha-cluster|daemon.info|Restored standalone service: lease-sync
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 ipv6-backup-guard
 keepalived.conf
 lease-sync.conf

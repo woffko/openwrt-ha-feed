@@ -150,6 +150,8 @@ ha-cluster|daemon.warning|Firewall rules of the cluster not written: this node's
 ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 kea-import.json
 keepalived.conf
 owsync.conf

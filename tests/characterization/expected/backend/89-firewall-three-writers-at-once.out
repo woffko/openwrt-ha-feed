@@ -160,6 +160,8 @@ ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 ha-cluster|daemon.info|Starting lease-sync daemon
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 keepalived.conf
 lease-sync.conf
 owsync.conf
@@ -280,6 +282,8 @@ rc=0
 ha-cluster|daemon.info|Firewall rules of the cluster are in /etc/config/firewall and not loaded: reloading the firewall
 fw4|-q reload
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 keepalived.conf
 lease-sync.conf
 owsync.conf

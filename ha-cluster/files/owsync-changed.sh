@@ -9,12 +9,15 @@
 # Sessions come in bursts: one run at a time, after a short pause, and one
 # more when another session changed files meanwhile.
 
-LOCK="${HA_OWSYNC_CHANGED_LOCK:-/var/lock/ha-cluster-owsync-changed.lock}"
-PENDING="${HA_OWSYNC_CHANGED_PENDING:-/var/lock/ha-cluster-owsync-changed.pending}"
+# In ha-cluster's run directory (0700, root's), not in /var/lock, where any
+# local process could hold the lock or remove the mark
+RUN_DIR="${HA_CLUSTER_RUN_DIR:-/var/run/ha-cluster}"
+LOCK="${HA_OWSYNC_CHANGED_LOCK:-$RUN_DIR/owsync-changed.lock}"
+PENDING="${HA_OWSYNC_CHANGED_PENDING:-$RUN_DIR/owsync-changed.pending}"
 RELOAD_CONFIG="${HA_RELOAD_CONFIG_BIN:-/sbin/reload_config}"
 SETTLE="${HA_OWSYNC_SETTLE:-2}"
 
-mkdir -p "${LOCK%/*}" 2>/dev/null
+(umask 077; mkdir -p "${LOCK%/*}") 2>/dev/null
 : > "$PENDING" || exit 0
 exec 9>"$LOCK" || exit 0
 while :; do
