@@ -160,6 +160,8 @@ ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 ha-cluster|daemon.info|Starting lease-sync daemon
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 keepalived.conf
 lease-sync.conf
 owsync.conf
@@ -354,6 +356,8 @@ fw4|-q reload
 ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 kea-import.json
 keepalived.conf
 owsync.conf

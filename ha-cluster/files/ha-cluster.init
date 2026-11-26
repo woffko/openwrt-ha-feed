@@ -37,6 +37,9 @@ start_service() {
 	}
 
 	ha_log_info "Starting HA cluster"
+	# keepalived and the monitor come back with this start: the mark of a
+	# sysupgrade hand-over has done its work
+	rm -f "$HA_ROLE_DIR/sysupgrade"
 
 	# Ensure runtime directories exist (must be before ha_apply_config).
 	# The run directory holds generated configs with keys and passwords:
@@ -315,8 +318,16 @@ maintenance() {
 	fi
 	rc=$?
 	if [ "$rc" -eq 0 ]; then
-		# keepalived's config with the files of the maintenance, or without
-		procd_running ha-cluster && reload >/dev/null 2>&1
+		# keepalived's config with the files of the maintenance, or without.
+		# After a sysupgrade that did not go on, keepalived and the monitor
+		# are out of procd and perhaps nothing of the service runs: a start
+		# brings them back.
+		if procd_running ha-cluster; then
+			reload >/dev/null 2>&1
+		elif [ -e "$HA_ROLE_DIR/sysupgrade" ]; then
+			start >/dev/null 2>&1
+		fi
+		rm -f "$HA_ROLE_DIR/sysupgrade"
 		ha_maintenance_settle
 	fi
 	[ -n "$out" ] && echo "$out"

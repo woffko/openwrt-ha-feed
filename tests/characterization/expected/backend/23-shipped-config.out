@@ -142,6 +142,8 @@ fw4|-q check
 fw4|-q reload
 ha-cluster|daemon.info|Starting keepalived daemon
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 keepalived.conf
 uci-dhcp
 uci-firewall

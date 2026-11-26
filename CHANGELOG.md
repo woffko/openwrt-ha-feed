@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r25, `luci-app-ha-cluster` 2.0.0-r16,
+packages are `ha-cluster` 2.0.0-r26, `luci-app-ha-cluster` 2.0.0-r17,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r4. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -39,6 +39,26 @@ upgrading a node.
   uplinks go down before the peer dials, and entering is refused while
   the peer could not take over, unless forced. The status is
   `MAINTENANCE`. See [Maintenance](ha-cluster/README.md#maintenance).
+- Fixes from the full code audit of the w0w6 build (r26, LuCI r17):
+  - a sysupgrade that stops after the hand-over (a failed backup, rpcd's
+    30 s limit) leaves no stale MASTER: the states recorded say STOP, so
+    `maintenance off` brings no `master` uplink up while the peer holds
+    the session, and it starts the service again when nothing of it runs
+    in procd; the IPv6 guard closes at the hand-over; LuCI's web server
+    starts again after 150 seconds if the upgrade does not go on;
+  - the hooks of keepalived-sync, kept by sysupgrade from an image that
+    had the package, are removed once it is gone (each loads its missing
+    library); the role handler `10-ha-cluster-role` is put back when it is
+    missing, as the guard handler is, and LuCI's hook editor hides both;
+  - `ha-reset` goes only to a peer's address (no longer this node's own
+    `source_address`, nor a VRRP-only peer), with no path but `/`;
+  - the locks of the DHCP server switch, of the firewall rules and of
+    owsync-changed are in the run directory (0700), not in `/var/lock`;
+    the firewall lock is bounded to 30 seconds;
+  - priority 255 is offered no more (1-254); a config that has it gets
+    254 in keepalived, which takes 255 for the owner of the addresses and
+    then ignores `nopreempt` and the weights of the checks;
+  - the views put status and config data in as text, not as HTML.
 - r25: the hand-over at a sysupgrade is quick (a few seconds: the mark,
   Kea with four seconds for its partner, the uplinks down, keepalived
   removed from procd) instead of a full maintenance with a reload of the

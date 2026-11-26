@@ -18,7 +18,7 @@ var ChipListValue = form.Value.extend({
 			'style': 'display: inline-flex; align-items: center; margin: 2px 4px 2px 0; padding: 3px 8px; border: 1px solid currentColor; border-radius: 12px; font-family: monospace; font-size: 12px;',
 			'data-value': value
 		}, [
-			E('span', {}, value),
+			E('span', {}, [ value ]),
 			E('button', {
 				'type': 'button',
 				'style': 'border: none; background: transparent; cursor: pointer; margin-left: 6px; padding: 0; font-size: 14px; color: inherit; line-height: 1;',

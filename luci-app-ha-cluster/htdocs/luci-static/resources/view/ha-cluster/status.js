@@ -152,7 +152,7 @@ return view.extend({
 			var text = _('Kea HA: %s (%s)').format(ha.state || '?', ha.role || '?');
 			if (ha.partner_in_touch === false)
 				text += ', ' + _('partner not in touch');
-			status.push(' ', E('span', {}, text));
+			status.push(' ', E('span', {}, [ text ]));
 		} else if (isRunning && serviceInfo.sockets) {
 			status.push(' ', E('span', {}, _('No Kea HA')));
 		}
@@ -228,9 +228,9 @@ return view.extend({
 		// that failed
 		var earlierModel = Array.isArray(status.earlier_model) ? status.earlier_model : [];
 		var earlierWarning = earlierModel.length > 0 ? [
-			E('div', { 'class': 'alert-message warning' },
+			E('div', { 'class': 'alert-message warning' }, [
 				_('/etc/config/ha-cluster is in the form of the releases before 2.0 (%s), which this release does not read: configuration and leases are not synchronized. Restarting the HA cluster service migrates it, as the upgrade does; the system log says why if it does not.')
-					.format(earlierModel.join(', ')))
+					.format(earlierModel.join(', ')) ])
 		] : [];
 
 		// The DHCP server of the cluster interfaces: why the one asked for is
@@ -240,15 +240,15 @@ return view.extend({
 		if (dhcpMode === 'auto')
 			dhcpServer = _('%s (automatic)').format(dhcpServer);
 		if (status.dhcp_backend_problem)
-			earlierWarning.push(E('div', { 'class': 'alert-message warning' },
-				_('DHCP server of the cluster interfaces: %s').format(status.dhcp_backend_problem)));
+			earlierWarning.push(E('div', { 'class': 'alert-message warning' }, [
+				_('DHCP server of the cluster interfaces: %s').format(status.dhcp_backend_problem) ]));
 		var keaImport = status.kea_import || {};
 		if (keaImport.left > 0)
 			earlierWarning.push(E('div', { 'class': 'alert-message warning' }, [
 				E('p', {}, _('%d static leases of dnsmasq are not in Kea: open the import from dnsmasq in the Kea pages to take them over.').format(keaImport.left)),
 				E('ul', {}, (keaImport.entries || []).map(function(entry) {
 					return E('li', {}, [ entry.name || '-', ' ', entry.identifier || '', ' ', entry.address || '',
-						' (', entry.status || '', ')' ].join(''));
+						' (', entry.status || '', ')' ]);
 				}))
 			]));
 
@@ -267,7 +267,7 @@ return view.extend({
 		if (status.maintenance_result)
 			earlierWarning.push(E('div', { 'class': 'alert-message' }, [
 				E('strong', {}, _('Last maintenance command:')), ' ',
-				E('span', { 'style': 'white-space: pre-line' }, status.maintenance_result)
+				E('span', { 'style': 'white-space: pre-line' }, [ status.maintenance_result ])
 			]));
 
 		return earlierWarning.concat([
@@ -366,14 +366,14 @@ return view.extend({
 						return E('tr', { 'class': 'tr' }, [
 							E('td', { 'class': 'td left', 'data-title': _('Peer Name') }, peer.vrrp_only
 								? [ peer.name || '-', ' ', E('span', { 'class': 'label' }, _('VRRP only')) ]
-								: peer.name || '-'),
-							E('td', { 'class': 'td left', 'data-title': _('Address') }, peer.address || '-'),
+								: [ peer.name || '-' ]),
+							E('td', { 'class': 'td left', 'data-title': _('Address') }, [ peer.address || '-' ]),
 							E('td', { 'class': 'td left', 'data-title': _('State') },
 								E('span', {
 									'class': peer.online ? 'label success' : 'label important'
 								}, peer.online ? _('Online') : _('Offline'))
 							),
-							E('td', { 'class': 'td left', 'data-title': _('Last Seen') }, peer.last_seen || '-')
+							E('td', { 'class': 'td left', 'data-title': _('Last Seen') }, [ peer.last_seen || '-' ])
 						]);
 					}))) :
 					E('div', { 'class': 'alert-message warning' }, _('No peers configured'))
@@ -428,14 +428,14 @@ return view.extend({
 					var desired = { 'up': _('up'), 'down': _('down'), 'wait': _('up after the delay') }[u.desired] || u.desired || '-';
 					return E('tr', { 'class': 'tr' }, [
 						E('td', { 'class': 'td left', 'data-title': _('Uplink') },
-							u.name === u.interface ? u.name : u.name + ' (' + u.interface + ')'),
+							[ u.name === u.interface ? u.name : u.name + ' (' + u.interface + ')' ]),
 						E('td', { 'class': 'td left', 'data-title': _('Mode') },
 							u.mode === 'always' ? _('Always') : _('Master only')),
 						E('td', { 'class': 'td left', 'data-title': _('Role') },
-							(u.role || '-') + (u.vrrp_instance ? ' (' + u.vrrp_instance + ')' : '')),
-						E('td', { 'class': 'td left', 'data-title': _('Should be') }, desired),
+							[ (u.role || '-') + (u.vrrp_instance ? ' (' + u.vrrp_instance + ')' : '') ]),
+						E('td', { 'class': 'td left', 'data-title': _('Should be') }, [ desired ]),
 						E('td', { 'class': 'td left', 'data-title': _('State') }, stateCell),
-						E('td', { 'class': 'td left', 'data-title': _('Details') }, details.join(', ') || '-')
+						E('td', { 'class': 'td left', 'data-title': _('Details') }, [ details.join(', ') || '-' ])
 					]);
 				})))
 			])
@@ -449,7 +449,7 @@ return view.extend({
 				return;
 			}
 			var error = (res && res.error) || _('No answer');
-			var body = [ E('p', {}, error) ];
+			var body = [ E('p', {}, [ error ]) ];
 			if (action !== 'off' && /^Refused/.test(error))
 				body.push(E('div', { 'class': 'right' }, E('button', {
 					'class': 'btn cbi-button cbi-button-negative',

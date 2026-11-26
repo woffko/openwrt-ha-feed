@@ -69,6 +69,7 @@ run_case() {
 	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/ha-lib/ipv6-backup-guard"
 	cp "$FEED_DIR/ha-cluster/files/ha-cluster.uci-defaults" "$WORK/ha-lib/migrate-config"
 	cp "$FEED_DIR/ha-cluster/files/role.sh" "$WORK/ha-lib/role"
+	cp "$FEED_DIR/ha-cluster/files/role.hotplug" "$WORK/ha-lib/role.hotplug"
 	mkdir -p "$WORK/etc/hotplug.d/keepalived"
 	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
 	cp "$FEED_DIR/ha-cluster/files/role.hotplug" "$WORK/etc/hotplug.d/keepalived/10-ha-cluster-role"

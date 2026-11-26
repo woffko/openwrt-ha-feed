@@ -161,6 +161,8 @@ ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 ha-cluster|daemon.info|Starting lease-sync daemon
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 keepalived.conf
 lease-sync.conf
 owsync.conf
@@ -295,6 +297,8 @@ S25ha-cluster
 rc=0
 == log
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 keepalived.conf
 lease-sync.conf
 owsync.conf

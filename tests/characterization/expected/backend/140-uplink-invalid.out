@@ -182,6 +182,7 @@ ha-cluster|daemon.err|uplink u6: retry must be 5-3600 (got: 1)
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
 == ls /var/run/ha-cluster
+dhcp-backend.lock
 uci-dhcp
 == /var/run/ha-cluster/keepalived.conf
 (absent)

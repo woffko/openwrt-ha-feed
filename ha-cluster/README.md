@@ -161,7 +161,9 @@ They add to the list above when a node runs this fork's packages.
   who may be root on the router.
 - **sysupgrade with kept settings.** `/etc/hotplug.d/keepalived/` is kept
   as a whole for custom hooks; the upgrade script replaces the guard
-  handler it finds there with the one of the new image at first boot.
+  handler and the role handler it finds there with those of the new image
+  at first boot, and removes the hooks of keepalived-sync when that
+  package is no longer installed (each loads its library).
 - **Settings put back after the migration.** The migration runs once, at
   the first boot of the image, and is then deleted. When the files it
   changed come back afterwards, ha-cluster finds the old model at its
@@ -894,8 +896,9 @@ in-maintenance without a maintenance of the node. A node that leaves the
 cluster (HA disabled, the service disabled) ends its maintenance.
 
 With `priority 255` (the address owner) keepalived ignores weighted
-tracking and resets `nopreempt`: during a maintenance the generated config
-has 254, so that persistent maintenance demotes the node. Whether the node takes the
+tracking and resets `nopreempt`: the views offer 1-254, and a config that
+still has 255 gets 254 in the generated config, so that persistent
+maintenance demotes the node. Whether the node takes the
 role back is VRRP's decision: at once with preemption, not with
 `nopreempt`.
 
@@ -918,7 +921,10 @@ An upgrade that writes no backup gets no hand-over: without the settings
 (`sysupgrade -n`) or with the settings of an archive (`sysupgrade -f`). Run
 `maintenance temp` first. If an upgrade fails after the
 hand-over, the node stays in maintenance until `maintenance off` or a
-reboot, as its status says.
+reboot, as its status says. The hand-over records the instances as
+stopped, so that `maintenance off` brings no `master` uplink up before
+keepalived reports again, and starts the service again when nothing of
+it is left in procd. LuCI's web server starts again after 150 seconds.
 
 An upgrade of the pair, then:
 
@@ -1034,7 +1040,7 @@ All configuration lives in `/etc/config/ha-cluster`.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool | `0` | Enable/disable ha-cluster |
-| `node_priority` | int | `100` | VRRP priority (1-255, higher wins MASTER) |
+| `node_priority` | int | `100` | VRRP priority (1-254, higher wins MASTER; 255 is written as 254) |
 | `vrrp_transport` | string | `multicast` | VRRP transport: `multicast` or `unicast`. When `unicast`, instances without `unicast_peer` derive their addresses from the peers |
 | `sync_method` | string | `owsync` | File sync backend; `owsync` is the only one, ha-cluster refuses to start with any other value |
 | `sync_encryption` | bool | `1` | Encrypt owsync and lease-sync traffic (AES-256-GCM). With `1`, a sync daemon is not started without a valid `encryption_key`; `0` is the explicit choice of plain mode |

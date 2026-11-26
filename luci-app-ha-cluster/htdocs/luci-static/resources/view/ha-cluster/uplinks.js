@@ -160,8 +160,8 @@ return view.extend({
 			s = m.section(form.NamedSection, 'config', 'global');
 			s.render = function() {
 				return E('div', { 'class': 'alert-message warning' }, [
-					E('p', {}, _('These handlers in %s also bring interfaces up or down at VRRP changes: %s. Remove a handler once an uplink below manages its interface, or both act on it.')
-						.format(HOOK_DIR, foreignHooks.join(', ')))
+					E('p', {}, [ _('These handlers in %s also bring interfaces up or down at VRRP changes: %s. Remove a handler once an uplink below manages its interface, or both act on it.')
+						.format(HOOK_DIR, foreignHooks.join(', ')) ])
 				]);
 			};
 		}

@@ -156,6 +156,8 @@ ha-cluster|daemon.info|Starting keepalived daemon
 ha-cluster|daemon.info|Starting owsync daemon
 ha-cluster|daemon.info|Starting lease-sync daemon
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 keepalived.conf
 lease-sync.conf
 owsync.conf
@@ -269,6 +271,8 @@ ha-cluster|daemon.err|dhcp_backend 'isc' is not supported (only 'auto', 'dnsmasq
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
 == ls /var/run/ha-cluster
+dhcp-backend.lock
+firewall.lock
 keepalived.conf
 lease-sync.conf
 owsync.conf

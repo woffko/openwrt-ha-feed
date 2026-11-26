@@ -14,7 +14,8 @@
 # kills it after 30 seconds (option timeout of /etc/config/rpcd) and would
 # leave a node that handed its roles over and never upgraded. LuCI's web
 # server stops first: the flash page takes the device as rebooted as soon
-# as a page of it answers again, and would go to the overview.
+# as a page of it answers again, and would go to the overview. It starts
+# again after 150 seconds if the upgrade does not go on.
 # Not for a backup alone (-b), a list (-l) or a test (-T). An upgrade that
 # writes no backup gets no hand-over: without the settings (-n), or with
 # the settings of an archive (-f): hand the roles over first with
@@ -33,7 +34,16 @@ ha_cluster_sysupgrade_hand_over() {
 	[ -x /etc/init.d/ha-cluster ] && pgrep keepalived >/dev/null 2>&1 || return 0
 	[ "$(uci -q get ha-cluster.config.enabled)" = "1" ] || return 0
 	command -v v >/dev/null 2>&1 && v "ha-cluster: handing this node's roles over (maintenance until reboot)"
-	[ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd stop >/dev/null 2>&1
+	if [ -x /etc/init.d/uhttpd ]; then
+		/etc/init.d/uhttpd stop >/dev/null 2>&1
+		# Back after a while if the upgrade does not go on: the second
+		# stage ends every process before it writes the image
+		if command -v setsid >/dev/null 2>&1; then
+			setsid sh -c 'sleep 150; /etc/init.d/uhttpd start' </dev/null >/dev/null 2>&1 &
+		else
+			sh -c 'sleep 150; /etc/init.d/uhttpd start' </dev/null >/dev/null 2>&1 &
+		fi
+	fi
 	/usr/lib/ha-cluster/role sysupgrade </dev/null >/dev/null 2>&1 &
 	ha_cluster_sysupgrade_pid=$!
 	ha_cluster_sysupgrade_waited=0

@@ -18,7 +18,9 @@ var callGetInterfaces = rpc.declare({
 });
 
 var hooksPath = '/etc/hotplug.d/keepalived';
-var systemHook = '20-ipv6-backup-guard';
+// The handlers of ha-cluster itself: not listed, so they cannot be deleted
+// here (the migration script would only put them back at the next start)
+var systemHooks = [ '10-ha-cluster-role', '20-ipv6-backup-guard' ];
 
 var hookTemplate = '#!/bin/sh\n' +
 	'# Keepalived state change hook\n' +
@@ -143,7 +145,7 @@ return view.extend({
 		var filename = file.name;
 
 		return E('tr', { 'class': 'tr', 'data-hook': filename }, [
-			E('td', { 'class': 'td' }, filename),
+			E('td', { 'class': 'td' }, [ filename ]),
 			E('td', { 'class': 'td cbi-section-actions' }, [
 				E('button', {
 					'type': 'button',
@@ -158,7 +160,7 @@ return view.extend({
 	render: function(data) {
 		var netDevs = data[1] || [];
 		var hookFiles = (data[2] || []).filter(function(f) {
-			return f.name !== systemHook && f.type === 'file';
+			return systemHooks.indexOf(f.name) < 0 && f.type === 'file';
 		});
 		var interfaces = data[3] || [];
 		var scriptSections = uci.sections('ha-cluster', 'script') || [];
@@ -346,8 +348,8 @@ return view.extend({
 		o.modalonly = true;
 
 		o = s.taboption('timing', form.Value, 'priority', _('Priority'),
-			_('Override global priority for this instance. Leave empty for global priority.'));
-		o.datatype = 'range(1,255)';
+			_('Override global priority for this instance (1-254). Leave empty for global priority.'));
+		o.datatype = 'range(1,254)';
 		o.placeholder = _('Use global priority');
 		o.optional = true;
 		o.modalonly = true;

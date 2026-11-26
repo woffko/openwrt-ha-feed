@@ -49,9 +49,10 @@ HA_KEA_STOPPED_MARK="${HA_CLUSTER_RUN_DIR}/kea-stopped"
 # What a switch to Kea that followed the other node turned on in Kea's
 # settings ("flag", "init"), for the way back; kept across reboots
 HA_KEA_FOLLOWED="${HA_KEA_FOLLOWED:-${HA_CLUSTER_ROOT}/etc/ha-cluster/kea-followed}"
-HA_DHCP_BACKEND_LOCK="${HA_DHCP_BACKEND_LOCK:-/var/lock/ha-cluster-dhcp-backend.lock}"
+# The locks below are in the run directory (0700, root's) as well
+HA_DHCP_BACKEND_LOCK="${HA_DHCP_BACKEND_LOCK:-${HA_CLUSTER_RUN_DIR}/dhcp-backend.lock}"
 FW4_BIN="${FW4_BIN:-/sbin/fw4}"
-HA_FIREWALL_LOCK="${HA_FIREWALL_LOCK:-/var/lock/ha-cluster-firewall.lock}"
+HA_FIREWALL_LOCK="${HA_FIREWALL_LOCK:-${HA_CLUSTER_RUN_DIR}/firewall.lock}"
 HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
@@ -676,13 +677,14 @@ _ha_write_vrrp_instance() {
 	local vips="$3"
 	local evips="$4"
 
-	# keepalived ignores weighted tracking for priority 255 (the address
-	# owner) and resets nopreempt: during a maintenance 254, so that the
-	# demotion takes
+	# Priority 255 makes keepalived take this node for the owner of the
+	# addresses: it ignores the weights of the checks and resets nopreempt,
+	# and a maintenance could not demote it. A config that still has 255
+	# (the views offer 1-254) gets 254.
 	local inst_priority="$priority"
-	if [ "${_ha_maintenance_tracked:-0}" -eq 1 ] && [ "$priority" = "255" ]; then
+	if [ "$priority" = "255" ]; then
 		inst_priority=254
-		ha_log_info "vrrp_instance $name: priority 254 instead of 255 during the maintenance"
+		ha_log_warning "vrrp_instance $name: priority 254 instead of 255, which keepalived reserves for the owner of the addresses (it would ignore nopreempt and the weights of the checks)"
 	fi
 
 	cat >> "$KEEPALIVED_CONF" <<EOF
@@ -2636,7 +2638,7 @@ ha_apply_dhcp_backend() {
 	local mode current wanted state="" i follow="" what
 
 	rm -f "$HA_DHCP_BACKEND_PROBLEM"
-	mkdir -p "${HA_DHCP_BACKEND_LOCK%/*}" 2>/dev/null
+	ha_ensure_run_dir
 	exec 7>"$HA_DHCP_BACKEND_LOCK"
 	# BusyBox's flock has no timeout (-w): asked again every second, for at
 	# most 30 seconds, longer than a switch takes
@@ -3079,12 +3081,22 @@ _ha_fw_reload() {
 # outside the lock it takes for start and stop, may meet, and they stage
 # their changes in the same directory: two at once would write each list
 # twice. The lock is held on a descriptor, so a writer that dies leaves
-# none behind. Without a place for the lock file the function runs anyway.
+# none behind. Without a place for the lock file the function runs anyway,
+# and after 30 seconds of another writer at work as well (BusyBox's flock
+# has no timeout: asked again every second).
 _ha_fw_locked() {
-	mkdir -p "${HA_FIREWALL_LOCK%/*}" 2>/dev/null
-	if ( : > "$HA_FIREWALL_LOCK" ) 2>/dev/null; then
+	local i=0
+
+	if ha_ensure_run_dir && ( : > "$HA_FIREWALL_LOCK" ) 2>/dev/null; then
 		{
-			flock -x 9 2>/dev/null
+			until flock -n -x 9 2>/dev/null; do
+				i=$((i + 1))
+				if [ "$i" -gt 30 ]; then
+					ha_log_warning "The firewall rules of the cluster: another change has held their lock for 30 seconds, going on"
+					break
+				fi
+				sleep 1
+			done
 			"$@"
 		} 9>"$HA_FIREWALL_LOCK"
 	else
@@ -3631,6 +3643,39 @@ ha_guard_handler_stale() {
 	[ -e "$hooks/20-dhcpv6-backup-guard" ] || [ -e "$hooks/21-RA-backup-guard" ]
 }
 
+# Usage: ha_orphan_sync_hooks
+# Prints the hooks of keepalived-sync that /etc/hotplug.d/keepalived still
+# holds without that package: sysupgrade keeps the directory, and each of
+# them loads the package's library, so they fail at every state change.
+# Only files that load that library are named.
+ha_orphan_sync_hooks() {
+	local hooks="${HA_CLUSTER_ROOT}/etc/hotplug.d/keepalived"
+	local lib="${HA_SYNC_HOOK_LIB:-/lib/functions/keepalived/hotplug.sh}"
+	local hook
+
+	[ -f "${HA_CLUSTER_ROOT}$lib" ] && return 0
+	for hook in 501-rpcd 505-system 511-firewall 551-dnsmasq 555-dropbear 600-uhttpd 700-luci 810-files; do
+		[ -f "$hooks/$hook" ] &&
+			grep -q '^\. /lib/functions/keepalived/hotplug\.sh' "$hooks/$hook" &&
+			echo "$hook"
+	done
+	return 0
+}
+
+# Usage: ha_hooks_stale
+# True when /etc/hotplug.d/keepalived lacks the role handler of this
+# release (deleted in LuCI's hook editor, or another copy), or holds hooks
+# of keepalived-sync without that package
+ha_hooks_stale() {
+	local packaged="${HA_CLUSTER_ROOT}/usr/lib/ha-cluster/role.hotplug"
+	local hooks="${HA_CLUSTER_ROOT}/etc/hotplug.d/keepalived"
+
+	if [ -f "$packaged" ] && ! cmp -s "$packaged" "$hooks/10-ha-cluster-role"; then
+		return 0
+	fi
+	[ -n "$(ha_orphan_sync_hooks)" ]
+}
+
 # Usage: ha_migrate_earlier_model
 # Does at a start what the migration script does at the first boot of an
 # image, when its work is not there: when the files it changed were put
@@ -3641,14 +3686,16 @@ ha_guard_handler_stale() {
 # after the migration script has run and been deleted.
 # Returns 1 when something of the earlier model is still there afterwards.
 ha_migrate_earlier_model() {
-	local found stale=0 rc=0
+	local found stale=0 hooks=0 rc=0
 
 	found="$(_ha_earlier_model_list)"
 	ha_guard_handler_stale && stale=1
-	[ -n "$found" ] || [ "$stale" -eq 1 ] || return 0
+	ha_hooks_stale && hooks=1
+	[ -n "$found" ] || [ "$stale" -eq 1 ] || [ "$hooks" -eq 1 ] || return 0
 
 	[ -n "$found" ] && ha_log_warning "/etc/config/ha-cluster holds what the releases before 2.0 wrote and this release does not read: $found. It comes back when a backup of an earlier release is restored, or when the first boot of an upgrade reboots before its end. Migrating it now, as the upgrade does"
 	[ "$stale" -eq 1 ] && ha_log_warning "/etc/hotplug.d/keepalived holds another IPv6 BACKUP guard handler than the one of this release, which keepalived runs at each state change: putting this release's in place and removing those of earlier releases, as the upgrade does"
+	[ "$hooks" -eq 1 ] && ha_log_warning "/etc/hotplug.d/keepalived lacks the role handler of this release or holds hooks of keepalived-sync, which is not installed: putting the handler in place and removing those hooks, as the upgrade does"
 
 	if [ ! -r "$HA_MIGRATE_CONFIG" ]; then
 		ha_log_error "The migration script $HA_MIGRATE_CONFIG is missing"
@@ -3667,6 +3714,10 @@ ha_migrate_earlier_model() {
 	fi
 	if [ "$stale" -eq 1 ] && ha_guard_handler_stale; then
 		ha_log_error "The IPv6 BACKUP guard handlers in /etc/hotplug.d/keepalived could not be brought in line with this release"
+		rc=1
+	fi
+	if [ "$hooks" -eq 1 ] && ha_hooks_stale; then
+		ha_log_error "The role handler and the hooks of keepalived-sync in /etc/hotplug.d/keepalived could not be brought in line with this release"
 		rc=1
 	fi
 	return "$rc"
@@ -4650,28 +4701,37 @@ _ha_kea_partner_urls() {
 	done
 }
 
+# The addresses of the peers that run ha-cluster: not this node's own
+# source_address (its own HA listener), not a peer with VRRP only
 _ha_peer_addresses_all=""
 _ha_peer_address_collect() {
-	local address
+	local address vrrp_only
 
+	config_get_bool vrrp_only "$1" vrrp_only 0
+	[ "$vrrp_only" -eq 1 ] && return 0
 	config_get address "$1" address ""
-	[ -n "$address" ] && _ha_peer_addresses_all="$_ha_peer_addresses_all $address"
-	config_get address "$1" source_address ""
 	[ -n "$address" ] && _ha_peer_addresses_all="$_ha_peer_addresses_all $address"
 	return 0
 }
 
 # Usage: _ha_kea_partner_refused <url> (ha-cluster config loaded)
 # Prints why ha-cluster does not send the URL anything, or nothing: it sends
-# only to plain HTTP, on a port the firewall rule of Kea's HA would open,
-# at an address of a peer of the cluster. Kea's config may be written by a
-# user of luci-app-kea who may not make root send requests elsewhere.
+# only to plain HTTP, with no path but /, on a port the firewall rule of
+# Kea's HA would open, at the address of a peer of the cluster. Kea's config
+# may be written by a user of luci-app-kea who may not make root send
+# requests elsewhere.
 _ha_kea_partner_refused() {
-	local url="$1" rest host port
+	local url="$1" rest path host port
 
 	case "$url" in
 		http://*) rest="${url#http://}" ;;
 		*) echo "not plain HTTP"; return 0 ;;
+	esac
+	path="${rest#*/}"
+	[ "$path" = "$rest" ] && path="" || path="/$path"
+	case "$path" in
+		""|/) ;;
+		*) echo "the path $path is not the one of Kea's HA listener"; return 0 ;;
 	esac
 	rest="${rest%%/*}"
 	case "$rest" in

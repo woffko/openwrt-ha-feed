@@ -156,6 +156,7 @@ ha-cluster|daemon.err|uplink u_sync: 'sync' is an interface the cluster runs on 
 ha-cluster|daemon.err|Configuration validation failed
 ha-cluster|daemon.err|Failed to apply configuration
 == ls /var/run/ha-cluster
+dhcp-backend.lock
 uci-dhcp
 == /var/run/ha-cluster/keepalived.conf
 (absent)

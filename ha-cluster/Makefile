@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=25
+PKG_RELEASE:=26
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -64,8 +64,10 @@ define Package/ha-cluster/install
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/keepalived
 	$(INSTALL_BIN) ./files/ipv6-backup-guard.hotplug $(1)/etc/hotplug.d/keepalived/20-ipv6-backup-guard
 	# Uplinks and maintenance at VRRP changes: a stub that runs the program
-	# under /usr/lib, harmless when an older copy is kept
+	# under /usr/lib, harmless when an older copy is kept. Also under /usr/lib,
+	# for the uci-defaults script to put back when it is gone.
 	$(INSTALL_BIN) ./files/role.hotplug $(1)/etc/hotplug.d/keepalived/10-ha-cluster-role
+	$(INSTALL_BIN) ./files/role.hotplug $(1)/usr/lib/ha-cluster/role.hotplug
 
 	# Hands the node's roles over at a sysupgrade, before procd stops the
 	# services
