@@ -3631,6 +3631,39 @@ ha_guard_handler_stale() {
 	[ -e "$hooks/20-dhcpv6-backup-guard" ] || [ -e "$hooks/21-RA-backup-guard" ]
 }
 
+# Usage: ha_orphan_sync_hooks
+# Prints the hooks of keepalived-sync that /etc/hotplug.d/keepalived still
+# holds without that package: sysupgrade keeps the directory, and each of
+# them loads the package's library, so they fail at every state change.
+# Only files that load that library are named.
+ha_orphan_sync_hooks() {
+	local hooks="${HA_CLUSTER_ROOT}/etc/hotplug.d/keepalived"
+	local lib="${HA_SYNC_HOOK_LIB:-/lib/functions/keepalived/hotplug.sh}"
+	local hook
+
+	[ -f "${HA_CLUSTER_ROOT}$lib" ] && return 0
+	for hook in 501-rpcd 505-system 511-firewall 551-dnsmasq 555-dropbear 600-uhttpd 700-luci 810-files; do
+		[ -f "$hooks/$hook" ] &&
+			grep -q '^\. /lib/functions/keepalived/hotplug\.sh' "$hooks/$hook" &&
+			echo "$hook"
+	done
+	return 0
+}
+
+# Usage: ha_hooks_stale
+# True when /etc/hotplug.d/keepalived lacks the role handler of this
+# release (deleted in LuCI's hook editor, or another copy), or holds hooks
+# of keepalived-sync without that package
+ha_hooks_stale() {
+	local packaged="${HA_CLUSTER_ROOT}/usr/lib/ha-cluster/role.hotplug"
+	local hooks="${HA_CLUSTER_ROOT}/etc/hotplug.d/keepalived"
+
+	if [ -f "$packaged" ] && ! cmp -s "$packaged" "$hooks/10-ha-cluster-role"; then
+		return 0
+	fi
+	[ -n "$(ha_orphan_sync_hooks)" ]
+}
+
 # Usage: ha_migrate_earlier_model
 # Does at a start what the migration script does at the first boot of an
 # image, when its work is not there: when the files it changed were put
@@ -3641,14 +3674,16 @@ ha_guard_handler_stale() {
 # after the migration script has run and been deleted.
 # Returns 1 when something of the earlier model is still there afterwards.
 ha_migrate_earlier_model() {
-	local found stale=0 rc=0
+	local found stale=0 hooks=0 rc=0
 
 	found="$(_ha_earlier_model_list)"
 	ha_guard_handler_stale && stale=1
-	[ -n "$found" ] || [ "$stale" -eq 1 ] || return 0
+	ha_hooks_stale && hooks=1
+	[ -n "$found" ] || [ "$stale" -eq 1 ] || [ "$hooks" -eq 1 ] || return 0
 
 	[ -n "$found" ] && ha_log_warning "/etc/config/ha-cluster holds what the releases before 2.0 wrote and this release does not read: $found. It comes back when a backup of an earlier release is restored, or when the first boot of an upgrade reboots before its end. Migrating it now, as the upgrade does"
 	[ "$stale" -eq 1 ] && ha_log_warning "/etc/hotplug.d/keepalived holds another IPv6 BACKUP guard handler than the one of this release, which keepalived runs at each state change: putting this release's in place and removing those of earlier releases, as the upgrade does"
+	[ "$hooks" -eq 1 ] && ha_log_warning "/etc/hotplug.d/keepalived lacks the role handler of this release or holds hooks of keepalived-sync, which is not installed: putting the handler in place and removing those hooks, as the upgrade does"
 
 	if [ ! -r "$HA_MIGRATE_CONFIG" ]; then
 		ha_log_error "The migration script $HA_MIGRATE_CONFIG is missing"
@@ -3667,6 +3702,10 @@ ha_migrate_earlier_model() {
 	fi
 	if [ "$stale" -eq 1 ] && ha_guard_handler_stale; then
 		ha_log_error "The IPv6 BACKUP guard handlers in /etc/hotplug.d/keepalived could not be brought in line with this release"
+		rc=1
+	fi
+	if [ "$hooks" -eq 1 ] && ha_hooks_stale; then
+		ha_log_error "The role handler and the hooks of keepalived-sync in /etc/hotplug.d/keepalived could not be brought in line with this release"
 		rc=1
 	fi
 	return "$rc"

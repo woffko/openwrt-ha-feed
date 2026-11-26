@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025-2026 Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 # Brings a node that keeps its files across an upgrade in line with this
-# release. Puts the IPv6 BACKUP guard handler of this release back, then
-# migrates /etc/config/ha-cluster to sync_group sections, the global
+# release. Puts the IPv6 BACKUP guard handler and the role handler of this
+# release back and removes the hooks of keepalived-sync left without that
+# package, then migrates /etc/config/ha-cluster to sync_group sections, the global
 # lease_sync switch, vrrp_only peers and a named advanced section, and
 # drops the lease-sync persist interval. Idempotent.
 # Also installed as /usr/lib/ha-cluster/migrate-config: the init script
@@ -23,6 +24,25 @@ if [ -f "$GUARD" ] && ! cmp -s "$GUARD" "$HOOKS/20-ipv6-backup-guard"; then
 	chmod 0755 "$HOOKS/20-ipv6-backup-guard"
 fi
 rm -f "$HOOKS/20-dhcpv6-backup-guard" "$HOOKS/21-RA-backup-guard"
+
+# The same for the role handler, which LuCI's hook editor can also delete
+ROLE_HOOK="/usr/lib/ha-cluster/role.hotplug"
+if [ -f "$ROLE_HOOK" ] && ! cmp -s "$ROLE_HOOK" "$HOOKS/10-ha-cluster-role"; then
+	mkdir -p "$HOOKS"
+	cp "$ROLE_HOOK" "$HOOKS/10-ha-cluster-role"
+	chmod 0755 "$HOOKS/10-ha-cluster-role"
+fi
+
+# The hooks of keepalived-sync, kept from an image that had the package:
+# each loads its library, and fails at every state change without it.
+# Only those files go, not custom hooks of the same name.
+if [ ! -f "${HA_SYNC_HOOK_LIB:-/lib/functions/keepalived/hotplug.sh}" ]; then
+	for hook in 501-rpcd 505-system 511-firewall 551-dnsmasq 555-dropbear 600-uhttpd 700-luci 810-files; do
+		[ -f "$HOOKS/$hook" ] &&
+			grep -q '^\. /lib/functions/keepalived/hotplug\.sh' "$HOOKS/$hook" &&
+			rm -f "$HOOKS/$hook"
+	done
+fi
 
 . /lib/functions.sh
 
