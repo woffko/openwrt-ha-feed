@@ -146,7 +146,7 @@ ha-cluster|daemon.info|Disabled standalone service: lease-sync
 ha-cluster|daemon.info|Wrote dnsmasq HA overlay to /tmp/dnsmasq.cfg01411c.d/ha-cluster.conf
 ha-cluster|daemon.info|dnsmasq restarted
 ha-cluster|daemon.info|Generating keepalived configuration for node: ha-char
-ha-cluster|daemon.info|vrrp_instance main: priority 254 instead of 255 during the maintenance
+ha-cluster|daemon.warning|vrrp_instance main: priority 254 instead of 255, which keepalived reserves for the owner of the addresses (it would ignore nopreempt and the weights of the checks)
 ha-cluster|daemon.info|Keepalived configuration generated at /var/run/ha-cluster/keepalived.conf
 ha-cluster|daemon.info|Generating owsync configuration
 ha-cluster|daemon.info|owsync configuration generated at /var/run/ha-cluster/owsync.conf

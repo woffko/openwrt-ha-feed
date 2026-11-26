@@ -677,13 +677,14 @@ _ha_write_vrrp_instance() {
 	local vips="$3"
 	local evips="$4"
 
-	# keepalived ignores weighted tracking for priority 255 (the address
-	# owner) and resets nopreempt: during a maintenance 254, so that the
-	# demotion takes
+	# Priority 255 makes keepalived take this node for the owner of the
+	# addresses: it ignores the weights of the checks and resets nopreempt,
+	# and a maintenance could not demote it. A config that still has 255
+	# (the views offer 1-254) gets 254.
 	local inst_priority="$priority"
-	if [ "${_ha_maintenance_tracked:-0}" -eq 1 ] && [ "$priority" = "255" ]; then
+	if [ "$priority" = "255" ]; then
 		inst_priority=254
-		ha_log_info "vrrp_instance $name: priority 254 instead of 255 during the maintenance"
+		ha_log_warning "vrrp_instance $name: priority 254 instead of 255, which keepalived reserves for the owner of the addresses (it would ignore nopreempt and the weights of the checks)"
 	fi
 
 	cat >> "$KEEPALIVED_CONF" <<EOF

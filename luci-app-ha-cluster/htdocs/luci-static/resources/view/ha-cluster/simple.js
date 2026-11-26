@@ -143,8 +143,8 @@ return view.extend({
 		boolFlag(o, false);
 
 		o = s.option(form.Value, 'node_priority', _('Priority'),
-			_('VRRP priority (1-255). Higher priority becomes MASTER.'));
-		o.datatype = 'range(1,255)';
+			_('VRRP priority (1-254). Higher priority becomes MASTER. 255 is the owner of the addresses in VRRP: keepalived would ignore nopreempt and the weights of the checks.'));
+		o.datatype = 'range(1,254)';
 		o.placeholder = '100';
 
 		o = s.option(form.ListValue, 'vrrp_transport', _('VRRP Transport'),
@@ -263,7 +263,7 @@ return view.extend({
 								}).catch(function(err) {
 									ui.hideModal();
 									ui.addNotification(null,
-										E('p', {}, _('Failed to add peer: ') + err.message),
+										E('p', {}, [ _('Failed to add peer: ') + err.message ]),
 										'danger');
 								});
 							}
@@ -367,7 +367,7 @@ return view.extend({
 
 			return this.map.save(null, true).catch(function(err) {
 				ui.addNotification(null,
-					E('p', {}, _('Failed to save: ') + err.message),
+					E('p', {}, [ _('Failed to save: ') + err.message ]),
 					'danger');
 			});
 		};
@@ -377,7 +377,7 @@ return view.extend({
 			var ifname = uci.get('ha-cluster', section_id, 'interface') || '';
 			return E('span', {}, [
 				E('img', { 'src': ifaceIconUrl(ifname), 'style': 'width:16px;height:16px;vertical-align:middle;margin-right:4px' }),
-				E('span', {}, ifname || '-')
+				E('span', {}, [ ifname || '-' ])
 			]);
 		};
 		o.modalonly = false;
@@ -601,13 +601,13 @@ return view.extend({
 					}
 				} else {
 					ui.addNotification(null,
-						E('p', {}, _('Failed to generate key: ') + (result.error || _('Unknown error'))),
+						E('p', {}, [ _('Failed to generate key: ') + (result.error || _('Unknown error')) ]),
 						'danger');
 				}
 			}).catch(function(err) {
 				ui.hideModal();
 				ui.addNotification(null,
-					E('p', {}, _('Error generating key: ') + err.message),
+					E('p', {}, [ _('Error generating key: ') + err.message ]),
 					'danger');
 			});
 		};
