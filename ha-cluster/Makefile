@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ha-cluster
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=28
+PKG_RELEASE:=29
 
 PKG_MAINTAINER:=Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 PKG_LICENSE:=MIT
@@ -54,6 +54,7 @@ define Package/ha-cluster/install
 	$(INSTALL_BIN) ./files/ha-cluster.sh $(1)/usr/lib/ha-cluster/
 	$(INSTALL_BIN) ./files/check-dataplane.sh $(1)/usr/lib/ha-cluster/check-dataplane
 	$(INSTALL_BIN) ./files/owsync-changed.sh $(1)/usr/lib/ha-cluster/owsync-changed
+	$(INSTALL_BIN) ./files/owsync-join.sh $(1)/usr/lib/ha-cluster/owsync-join
 	$(INSTALL_BIN) ./files/role.sh $(1)/usr/lib/ha-cluster/role
 
 	# The handler is installed twice. /etc/hotplug.d/keepalived/ is kept

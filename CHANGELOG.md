@@ -14,8 +14,8 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r28, `luci-app-ha-cluster` 2.0.0-r19,
-`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r5. See
+packages are `ha-cluster` 2.0.0-r29, `luci-app-ha-cluster` 2.0.0-r20,
+`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r7 and `dnsmasq-ha` 2.93-r5. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
 
@@ -121,6 +121,37 @@ upgrading a node.
   - a switch to Kea that is refused on a node whose pools arrived
     switched off from the other node no longer says "dnsmasq stays the
     DHCP server": the node has none for those pools until Kea runs.
+- r29: a router that joins a working cluster (`option sync_join`). owsync
+  keeps, of two copies of a file, the one that was changed last, and a
+  router that was just flashed and set up has the files changed last: at
+  its first sync it replaced the configuration of the working node with
+  its own (a `dhcp` a month old gone within eight seconds, on two daemons
+  of the image). With `sync_join '1'` on the new node the service starts
+  owsync through `/usr/lib/ha-cluster/owsync-join`, which gives the
+  node's copies of the synced files the date of 2000-01-01 and holds one
+  session with a peer, again every ten seconds until one ended well; only
+  then the owsync daemon runs. Until then nothing of the node reaches its
+  peer, whatever is changed on it.
+  - Refused on a node that has completed a session with a peer before:
+    there the option can only be a mistake. owsync 1.3.0-r7 leaves a
+    stamp for that, `/etc/owsync/owsync.db.synced`; its database does not
+    say it, being written from the first scan (a new router whose owsync
+    merely ran once without its peer is not refused).
+  - The option deletes itself when the join is done or refused, so that it
+    cannot fire later, and it is all the state of a join that waits: a
+    reboot or a sysupgrade goes on with it, taking it back gives it up.
+  - No session is held unless every synced file of the node could be
+    listed and dated; the files are those owsync lists for its generated
+    config. Each attempt waits for a LuCI apply to be confirmed, because
+    a rollback would bring the files of before back with a new date.
+  - The program runs once: procd keeps it as the instance's command until
+    the next reload and starts it again should the daemon end, and it then
+    becomes the daemon at once.
+  - From the review of the first draft by the auditor (turn 6 of the
+    joint review): the stamp in place of "the database holds files", the
+    guard against a second run, the source address of the peer, the
+    failing closed of the dating, the apply looked at before each attempt.
+  Case 173 runs all of it against a second owsync daemon.
 - r25: the hand-over at a sysupgrade is quick (a few seconds: the mark,
   Kea with four seconds for its partner, the uplinks down, keepalived
   removed from procd) instead of a full maintenance with a reload of the
@@ -396,6 +427,10 @@ upgrading a node.
   because a DHCP interface is in FAULT or the sync link is lost
   (`kea_aside` of the status), and the notice about the peer's Kea in
   maintenance names both causes.
+- r20: "Join an Existing Cluster" under Synchronization sets `sync_join`
+  for this node, and the Status page says while the node waits for its
+  peer, when it has taken the peer's files, and when the join was refused
+  (`sync_join` of the status).
 
 ### kea-dnsmasq-hosts (new, 1.0.0-r5)
 - The names of Kea's DHCP clients in dnsmasq's DNS, which takes no DDNS
@@ -441,7 +476,10 @@ upgrading a node.
   that address within ten seconds.
 - owsync: connections accepted from the configured peers only, a cap on
   the frame size before the handshake, peer file states validated, and a
-  fix for the crash when a tombstone expires. `on_change` (r6): a program
+  fix for the crash when a tombstone expires. r7: a session that ended
+  well leaves `<database>.synced` once (045; ha-cluster's `sync_join`
+  goes by it), and the one-shot `connect` takes `addr,source` as the
+  daemon's peers are written (046). `on_change` (r6): a program
   run, without a shell and detached, after a sync session wrote or removed
   local files.
 - dnsmasq-ha: DHCPv6 leases carry the client DUID over ubus; the

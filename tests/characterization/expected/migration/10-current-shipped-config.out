@@ -23,6 +23,13 @@ config global 'config'
 	# skipped, and the IPv6 guard leaves DHCPv6 to Kea
 	#option dhcp_backend 'dnsmasq'
 
+	# Set to '1' on a router that is added to a working cluster or replaces
+	# one of its nodes, before the cluster is enabled on it: at its first
+	# sync this node takes the synced files from its peer instead of sending
+	# its own, which are the newer ones on a router just set up. Refused on
+	# a node that has synced before; the option clears itself
+	#option sync_join '0'
+
 	# This node's own address for owsync and lease-sync, so that the VIP is
 	# never used as source; empty = all addresses
 	#option bind_address ''
@@ -151,6 +158,13 @@ config global 'config'
 	# high availability in Kea, on every node), the dhcp force check is
 	# skipped, and the IPv6 guard leaves DHCPv6 to Kea
 	#option dhcp_backend 'dnsmasq'
+
+	# Set to '1' on a router that is added to a working cluster or replaces
+	# one of its nodes, before the cluster is enabled on it: at its first
+	# sync this node takes the synced files from its peer instead of sending
+	# its own, which are the newer ones on a router just set up. Refused on
+	# a node that has synced before; the option clears itself
+	#option sync_join '0'
 
 	# This node's own address for owsync and lease-sync, so that the VIP is
 	# never used as source; empty = all addresses

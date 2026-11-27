@@ -270,6 +270,15 @@ return view.extend({
 		else if (status.kea_aside === 'link')
 			earlierWarning.push(E('div', { 'class': 'alert-message warning' },
 				_('The peer does not answer on the sync link while it is MASTER on the LAN: Kea of this node is in-maintenance, and the Kea of the MASTER serves.')));
+		if (status.sync_join === 'waiting')
+			earlierWarning.push(E('div', { 'class': 'alert-message warning' },
+				_('This node is joining the cluster and waits for its peer: it will take the synced configuration files from the peer. Until then config sync does not run on this node, and what is changed in those files here is dropped at the join.')));
+		else if (status.sync_join === 'done')
+			earlierWarning.push(E('div', { 'class': 'alert-message notice' },
+				_('This node joined the cluster: it took the synced configuration files from %s. Config sync runs as usual now.').format(status.sync_join_peer || '?')));
+		else if (status.sync_join === 'refused')
+			earlierWarning.push(E('div', { 'class': 'alert-message warning' },
+				_('"Join an existing cluster" was refused: this node has synced before, so its files were left as they are and the option was cleared. The system log says how to join all the same.')));
 		if (status.maintenance_result)
 			earlierWarning.push(E('div', { 'class': 'alert-message' }, [
 				E('strong', {}, _('Last maintenance command:')), ' ',

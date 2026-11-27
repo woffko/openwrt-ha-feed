@@ -252,7 +252,67 @@ these settings must be set identically on every node:
   and its VIPs
 
 Node-specific: `node_priority` and instance `priority`, the peers, their
-`source_address`, and `bind_address`.
+`source_address`, `bind_address`, and `sync_join` (below).
+
+### Adding a router to a working cluster, or replacing a node
+
+Config sync keeps, of two copies of a file, the one that was changed
+last. A router that was just flashed and set up has the newer files: the
+image wrote them at its first boot and you edited them an hour ago, while
+the working node's `dhcp` and `firewall` may be months old. Without more,
+the first sync replaces the configuration of the working node with that
+of the new router. Restoring a backup on the new router is no protection:
+a file that the first boot of the image or a package's setup script
+rewrites is new again.
+
+So tell the new router that it is the one to give way, before you enable
+the cluster on it:
+
+```
+uci set ha-cluster.config.sync_join='1'     # LuCI: Synchronization, "Join an Existing Cluster"
+uci set ha-cluster.config.enabled='1'
+uci commit ha-cluster
+/etc/init.d/ha-cluster restart
+```
+
+With `sync_join` set, owsync is not started as a daemon at first. The
+service runs `/usr/lib/ha-cluster/owsync-join` in its place, which
+
+1. gives this node's copy of every synced file the date of 2000-01-01, so
+   that the peer's copy is the newer one wherever the two differ;
+2. holds one session with a peer, and tries again every ten seconds until
+   one ended well (the peer may be off, the cable not plugged, the clock
+   of the new router not set yet);
+3. then deletes the option and becomes the owsync daemon.
+
+Until step 3 nothing of this node reaches its peer, whatever you change on
+it meanwhile: what you change in a synced file while the node waits is
+dropped at the join. The Status page says that the node waits, and later
+which peer it took the files from. A file that only the new router has
+goes to the peer in that same session, as any new file does.
+
+- Set it on the new router only, never on the working one, and on neither
+  node when you build a new cluster from two routers.
+- **Refused on a node that has synced before.** owsync leaves
+  `/etc/owsync/owsync.db.synced` when a session with a peer ended well for
+  the first time. On a node that has it the option is deleted, the log
+  says so, and the node's files are not touched: that is the protection
+  against setting it on the wrong router. To make such a node take the
+  peer's configuration all the same, stop the service, remove that file
+  and set the option again. A backup of a working node carries the file:
+  on a replacement router set up from such a backup, remove it before you
+  set the option.
+- The option clears itself, done or refused, so that it cannot fire at a
+  later start. It is the whole state of a join that waits: a reboot goes
+  on with it, and taking it back gives the join up.
+- A LuCI apply that is not confirmed yet holds the join back, because a
+  rollback would put the files of before in place with a new date.
+- With Kea as the DHCP server, set `dhcp_backend` as on the working node
+  and set up Kea on the new router first. Each node writes the rules of
+  the cluster in `/etc/config/firewall` for the DHCP server it runs
+  itself; a new router that still runs dnsmasq writes the file without
+  the rules for Kea's high availability, after the join as at any other
+  time, and config sync carries that file to the working node.
 
 ## Quick Start
 
@@ -1089,6 +1149,7 @@ All configuration lives in `/etc/config/ha-cluster`.
 | `sync_port` | int | `4321` | owsync TCP port |
 | `sync_dir` | string | `/etc/config` | Directory to synchronize |
 | `bind_address` | string | | Local IP for sync traffic (use real IP, not VIP) |
+| `sync_join` | bool | `0` | For this node only, on a router added to a working cluster: at its first sync the node takes the synced files from its peer instead of sending its own. Refused on a node that has completed a session with a peer before (`/etc/owsync/owsync.db.synced`); deleted by the service when the join is done or refused. See [Adding a router to a working cluster](#adding-a-router-to-a-working-cluster-or-replacing-a-node) |
 | `firewall` | bool | `1` | Keep the rules the cluster needs from its peers in `/etc/config/firewall` (rules named `HA-Cluster-...`); `0` removes them. See [Firewall](#firewall) |
 | `maintenance` | bool | `0` | Persistent maintenance, written by `/etc/init.d/ha-cluster maintenance on` and removed by `off` (with `maintenance_since`, when it began). See [Maintenance](#maintenance) |
 
@@ -1286,6 +1347,9 @@ Available environment variables:
 /etc/hotplug.d/iface/60-ha-cluster-kea  With Kea as the DHCP server: Kea rereads its config at ifup
 /etc/hotplug.d/keepalived/10-ha-cluster-role  Runs /usr/lib/ha-cluster/role at each VRRP state change
 /usr/lib/ha-cluster/role                The uplinks and Kea at VRRP changes; the uplink monitor
+/usr/lib/ha-cluster/owsync-join         Runs in place of owsync while the node joins a cluster (sync_join)
+/etc/owsync/owsync.db                   owsync's record of the synced files, kept across sysupgrade
+/etc/owsync/owsync.db.synced            Left by owsync after the first session with a peer that ended well
 /lib/upgrade/ha-cluster.sh              Hands the roles over at a sysupgrade (maintenance until reboot)
 /var/run/ha-cluster/                        Generated configs (runtime)
 ```

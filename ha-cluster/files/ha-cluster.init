@@ -99,11 +99,20 @@ start_service() {
 		procd_close_instance
 	fi
 
+	# A node that joins a working cluster (option sync_join) starts owsync
+	# through the join program, which takes the files of the peer first
+	local owsync_join=0
+	ha_owsync_join_prepare && owsync_join=1
 	if [ -f "$OWSYNC_CONF" ]; then
-		ha_log_info "Starting owsync daemon"
 		procd_open_instance owsync
-		procd_set_param command "$OWSYNC_BIN" daemon
-		procd_append_param command -c "$OWSYNC_CONF"
+		if [ "$owsync_join" -eq 1 ]; then
+			ha_log_info "Starting owsync through the join of this node"
+			procd_set_param command "$HA_OWSYNC_JOIN_BIN"
+		else
+			ha_log_info "Starting owsync daemon"
+			procd_set_param command "$OWSYNC_BIN" daemon
+			procd_append_param command -c "$OWSYNC_CONF"
+		fi
 		procd_set_param file "$OWSYNC_CONF"
 		procd_set_param respawn
 		procd_set_param stdout 1

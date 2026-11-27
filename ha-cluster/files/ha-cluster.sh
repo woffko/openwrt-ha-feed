@@ -18,6 +18,25 @@ LEASE_SYNC_CONF="${HA_CLUSTER_RUN_DIR}/lease-sync.conf"
 OWSYNC_BIN="${OWSYNC_BIN:-/usr/bin/owsync}"
 # Run by owsync after it wrote or removed files a peer sent
 HA_OWSYNC_ON_CHANGE="${HA_OWSYNC_ON_CHANGE:-/usr/lib/ha-cluster/owsync-changed}"
+# owsync's record of the files it syncs, kept across reboots and upgrades
+HA_OWSYNC_DB="${HA_OWSYNC_DB:-/etc/owsync/owsync.db}"
+# Left by owsync (1.3.0-r7 and later) when a session with a peer ended
+# well for the first time: a node that has it has synced before. The
+# database does not say that, it is written from the first scan.
+HA_OWSYNC_SYNCED="${HA_OWSYNC_SYNCED:-${HA_OWSYNC_DB}.synced}"
+# How the join of this node went (option sync_join), for the status:
+# "waiting", "done <peer>" or "refused"
+HA_OWSYNC_JOIN_NOTE="${HA_CLUSTER_RUN_DIR}/owsync-join"
+# Runs in place of the owsync daemon while the node joins, and becomes it
+HA_OWSYNC_JOIN_BIN="${HA_OWSYNC_JOIN_BIN:-/usr/lib/ha-cluster/owsync-join}"
+# The date a joining node gives its copies of the synced files, so that
+# every copy of the peer is the newer one: 2000-01-01 00:00:00 UTC
+HA_OWSYNC_JOIN_MTIME=946684800
+# Seconds one session with a peer may take, and between two attempts
+HA_OWSYNC_JOIN_TIMEOUT="${HA_OWSYNC_JOIN_TIMEOUT:-60}"
+HA_OWSYNC_JOIN_RETRY="${HA_OWSYNC_JOIN_RETRY:-10}"
+# Where rpcd keeps the configs of a LuCI apply until it is confirmed
+HA_UCI_SNAPSHOT_DIR="${HA_UCI_SNAPSHOT_DIR:-/var/run/rpcd/snapshot-files}"
 LEASE_SYNC_BIN="${LEASE_SYNC_BIN:-/usr/sbin/lease-sync}"
 KEA_DHCP4_BIN="${KEA_DHCP4_BIN:-/usr/sbin/kea-dhcp4}"
 KEA_DHCP6_BIN="${KEA_DHCP6_BIN:-/usr/sbin/kea-dhcp6}"
@@ -960,7 +979,7 @@ port=${sync_port}
 
 # Paths (OpenWrt-specific)
 sync_dir=${sync_dir}
-database=/etc/owsync/owsync.db
+database=${HA_OWSYNC_DB}
 
 # Daemon settings
 poll_interval=${sync_interval}
@@ -1040,6 +1059,197 @@ ha_add_owsync_excludes_conf() {
 
 ha_add_owsync_exclude_conf() {
 	echo "exclude=$1" >> "$OWSYNC_CONF"
+}
+
+# --- A node that joins a working cluster (option sync_join) ---------------
+# owsync keeps, of two copies of a file, the one changed last. A router that
+# was just flashed and set up has the files changed last: without more, its
+# first sync replaces the configuration of the working node with its own.
+# With sync_join set, the node gives way instead: owsync does not run as a
+# daemon until one session with a peer ended well, and before each attempt
+# the node's copies of the synced files get an old date, so that the copy
+# of the peer wins for every file that differs. Refused on a node that has
+# synced before, where the option can only have been set by mistake; and
+# the option clears itself, so that it cannot fire later.
+# The option is the whole state of a join that waits: it is in
+# /etc/config/ha-cluster, kept as that file is, and gone when the join is.
+
+# Usage: ha_owsync_has_synced
+# True when this node completed a session with a peer at some time.
+ha_owsync_has_synced() {
+	[ -e "$HA_OWSYNC_SYNCED" ]
+}
+
+# Usage: _ha_owsync_join_note <words>
+_ha_owsync_join_note() {
+	ha_ensure_run_dir 2>/dev/null
+	echo "$* $(date +%s)" > "$HA_OWSYNC_JOIN_NOTE" 2>/dev/null
+}
+
+# Usage: ha_owsync_join_clear
+# The join is over, done or refused: the option goes. On a copy of the
+# committed file, so that a LuCI user's pending changes stay pending.
+ha_owsync_join_clear() {
+	local try=0 rc
+
+	while :; do
+		_ha_iso_begin ha-cluster || return 1
+		_ha_iso_uci ha-cluster -q delete ha-cluster.config.sync_join
+		_ha_iso_commit ha-cluster
+		rc=$?
+		[ "$rc" -eq 2 ] && [ "$try" -lt 2 ] || break
+		try=$((try + 1))
+	done
+	[ "$rc" -eq 0 ] || ha_log_error "Config sync: could not remove sync_join from /etc/config/ha-cluster"
+	return "$rc"
+}
+
+# Usage: ha_owsync_join_prepare (ha-cluster config loaded, owsync.conf
+# generated). Called at every start of the service.
+# Returns 0 when owsync must start through the join program.
+ha_owsync_join_prepare() {
+	local join
+
+	config_get_bool join config sync_join 0
+	[ "$join" -eq 1 ] || return 1
+	# Nothing to sync with yet: the option waits
+	[ -f "$OWSYNC_CONF" ] || return 1
+	if ha_owsync_has_synced; then
+		ha_log_warning "Config sync: sync_join refused, this node has synced with a peer before ($HA_OWSYNC_SYNCED is there). Its files are not touched and the option is cleared. To make this node take the configuration of its peer all the same, stop the service, remove that file and set the option again"
+		_ha_owsync_join_note refused
+		ha_owsync_join_clear
+		return 1
+	fi
+	return 0
+}
+
+# Usage: ha_owsync_join_age
+# Gives the node's copy of every file owsync syncs the date of
+# HA_OWSYNC_JOIN_MTIME. The files are those owsync itself lists for its
+# generated config: the same directory, patterns and reading of them as
+# the daemon's. Fails when a single file cannot be listed or dated: a
+# session held with one copy left new would send that copy to the peer.
+ha_owsync_join_age() {
+	local dir list file
+
+	dir="$(sed -n 's/^sync_dir=//p' "$OWSYNC_CONF" 2>/dev/null | head -n 1)"
+	[ -d "$dir" ] || return 1
+	list="$("$OWSYNC_BIN" scan "$dir" -c "$OWSYNC_CONF" 2>/dev/null)" || return 1
+	list="$(printf '%s\n' "$list" | jsonfilter -e '@[*].path' 2>/dev/null)"
+	while IFS= read -r file; do
+		[ -n "$file" ] || continue
+		# owsync lists regular files only
+		[ -f "$dir/$file" ] && [ ! -L "$dir/$file" ] || return 1
+		touch -c -d "@$HA_OWSYNC_JOIN_MTIME" "$dir/$file" 2>/dev/null || return 1
+		[ "$(date -r "$dir/$file" +%s 2>/dev/null)" = "$HA_OWSYNC_JOIN_MTIME" ] || return 1
+	done <<EOF
+$list
+EOF
+	return 0
+}
+
+# Usage: _ha_owsync_join_connect <address[,source]>
+# One session with the peer, started by this node and bounded in time
+# (owsync's own limit is the kernel's two minutes for a peer that does not
+# answer, then five minutes a read). 0 when the session ended well.
+_ha_owsync_join_connect() {
+	local t=0 rc
+
+	"$OWSYNC_BIN" connect "$1" -c "$OWSYNC_CONF" </dev/null &
+	_ha_owsync_join_child=$!
+	while kill -0 "$_ha_owsync_join_child" 2>/dev/null; do
+		if [ "$t" -ge "$HA_OWSYNC_JOIN_TIMEOUT" ]; then
+			kill "$_ha_owsync_join_child" 2>/dev/null
+			break
+		fi
+		sleep 1
+		t=$((t + 1))
+	done
+	rc=0
+	wait "$_ha_owsync_join_child" || rc=$?
+	_ha_owsync_join_child=""
+	return "$rc"
+}
+
+# Usage: _ha_uci_apply_pending
+# True while a LuCI apply waits for its confirmation: rpcd then still holds
+# the configs of before, and puts them back when the browser does not
+# confirm in time.
+_ha_uci_apply_pending() {
+	[ -n "$(ls -A "$HA_UCI_SNAPSHOT_DIR" 2>/dev/null)" ]
+}
+
+# Usage: ha_owsync_join_once
+# One attempt: the node's copies aged, then a session with the first peer
+# that answers. 0 when a session ended well; _ha_owsync_joined is the peer.
+ha_owsync_join_once() {
+	local peer waited=0 pair=1
+
+	_ha_owsync_joined=""
+	# A rollback after the join would bring the node's files of before
+	# back with a new date, and they would go to the peer: the attempt
+	# waits for the apply to be confirmed or rolled back (rpcd gives the
+	# browser a limited time; three minutes here at most)
+	while _ha_uci_apply_pending && [ "$waited" -lt 180 ]; do
+		sleep 2
+		waited=$((waited + 2))
+	done
+	if ! ha_owsync_join_age; then
+		ha_log_error "Config sync: the synced files of this node could not all be given an old date, no session is held (join)"
+		return 1
+	fi
+	# A peer as the generated config has it, "address[,source]": owsync
+	# 1.3.0-r7 binds the source for a one-shot session as its daemon does.
+	# An older one takes the address only, and says so in its usage
+	"$OWSYNC_BIN" 2>&1 | grep -qF 'connect <ADDR[,SOURCE]>' || pair=0
+	while IFS= read -r peer; do
+		[ -n "$peer" ] || continue
+		[ "$pair" -eq 1 ] || peer="${peer%%,*}"
+		if _ha_owsync_join_connect "$peer"; then
+			_ha_owsync_joined="${peer%%,*}"
+			return 0
+		fi
+	done <<EOF
+$(sed -n 's/^peer=//p' "$OWSYNC_CONF" 2>/dev/null)
+EOF
+	return 1
+}
+
+# Usage: ha_owsync_join_run
+# The body of the join program, which procd runs as the owsync instance
+# while the node joins: tries until a session with a peer ended well, then
+# clears the option and becomes the owsync daemon. Until then nothing of
+# this node reaches its peer, whatever is changed on it meanwhile.
+ha_owsync_join_run() {
+	local join=0
+
+	_ha_owsync_join_child=""
+	trap '[ -n "$_ha_owsync_join_child" ] && kill "$_ha_owsync_join_child" 2>/dev/null; exit 0' TERM INT
+	[ -f "$OWSYNC_CONF" ] || {
+		ha_log_error "Config sync: no $OWSYNC_CONF, the join cannot run"
+		sleep "$HA_OWSYNC_JOIN_RETRY"
+		return 1
+	}
+	# procd keeps this program as the instance's command until the next
+	# reload of the service, and starts it again should the daemon end:
+	# the join runs once only, while the option stands and no session
+	# with a peer has been completed
+	config_load ha-cluster
+	config_get_bool join config sync_join 0
+	if [ "$join" -ne 1 ] || ha_owsync_has_synced; then
+		exec "$OWSYNC_BIN" daemon -c "$OWSYNC_CONF"
+	fi
+	ha_log "Config sync: this node joins its peer (sync_join). Its copies of the synced files give way to the peer's, and config sync does not run here until the peer was reached"
+	_ha_owsync_join_note waiting
+	until ha_owsync_join_once; do
+		sleep "$HA_OWSYNC_JOIN_RETRY"
+	done
+	# owsync 1.3.0-r7 has written it; an older one does not
+	: > "$HA_OWSYNC_SYNCED" 2>/dev/null
+	ha_owsync_join_clear
+	_ha_owsync_join_note "done $_ha_owsync_joined"
+	ha_log "Config sync: joined. The synced files of this node are those of $_ha_owsync_joined now; sync_join is cleared and config sync runs as usual"
+	exec "$OWSYNC_BIN" daemon -c "$OWSYNC_CONF"
 }
 
 ha_generate_lease_sync_conf() {

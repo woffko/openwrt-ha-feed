@@ -21,6 +21,8 @@
 #   modes: backend rpcd acl migration hotplug lease-sync (default: all)
 #   CHAR_UPDATE=1 rewrites the expected files instead of comparing.
 #   CHAR_CASES=<pattern> runs only the cases whose name matches (shell glob).
+#   CHAR_OWSYNC=<binary> runs the cases with this owsync instead of the
+#     rootfs's: one built with the patches of the working tree.
 #   CHAR_HIDE_INITD=<names> hides init scripts of the rootfs from the cases,
 #     for services of packages the node image does not have (for example
 #     keepalived-inotify, of keepalived-sync): the cases list /etc/rc.d.
@@ -69,6 +71,7 @@ run_case() {
 	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/ha-lib/ipv6-backup-guard"
 	cp "$FEED_DIR/ha-cluster/files/ha-cluster.uci-defaults" "$WORK/ha-lib/migrate-config"
 	cp "$FEED_DIR/ha-cluster/files/role.sh" "$WORK/ha-lib/role"
+	cp "$FEED_DIR/ha-cluster/files/owsync-join.sh" "$WORK/ha-lib/owsync-join"
 	cp "$FEED_DIR/ha-cluster/files/role.hotplug" "$WORK/ha-lib/role.hotplug"
 	# The init script with the mode the package installs it with: the hook
 	# of a sysupgrade asks whether it can be run
@@ -78,6 +81,7 @@ run_case() {
 	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
 	cp "$FEED_DIR/ha-cluster/files/role.hotplug" "$WORK/etc/hotplug.d/keepalived/10-ha-cluster-role"
 	chmod 0755 "$WORK/ha-lib/check-dataplane" "$WORK/ha-lib/ipv6-backup-guard" "$WORK/ha-lib/role" \
+		"$WORK/ha-lib/owsync-join" \
 		"$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard" \
 		"$WORK/etc/hotplug.d/keepalived/10-ha-cluster-role"
 	mkdir -p "$WORK/tmp/run" "$WORK/tmp/lock"
@@ -97,6 +101,13 @@ run_case() {
 		cp -al "$ROOTFS/usr/$entry" "$WORK/usr-$entry" 2>/dev/null ||
 			cp -a "$ROOTFS/usr/$entry" "$WORK/usr-$entry"
 	done
+	# An owsync built from the working tree's patches, before the rootfs is
+	# rebuilt with them
+	if [ -n "${CHAR_OWSYNC:-}" ]; then
+		rm -f "$WORK/usr-bin/owsync"
+		cp "$CHAR_OWSYNC" "$WORK/usr-bin/owsync"
+		chmod 0755 "$WORK/usr-bin/owsync"
+	fi
 	# Kea, luci-app-kea and kea-dnsmasq-hosts are not installed for the
 	# cases, whatever the rootfs holds (the node image has them since
 	# w0w6): a case about Kea puts its own stand-ins in place

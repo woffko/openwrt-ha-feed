@@ -534,6 +534,22 @@ return view.extend({
 			_('AES-256-GCM for configuration and lease sync. While this is on and there is a peer to sync with, the cluster does not start without a valid key. Switch it off only on a link protected otherwise, such as a VPN.'));
 		boolFlag(o, true);
 
+		// Not a setting of the cluster but a one-time order to this node: the
+		// backend takes the files of the peer once, then deletes the option
+		o = s.option(form.Flag, 'sync_join', _('Join an Existing Cluster'),
+			_('For this node only. Tick it on a router that is added to a working cluster or replaces one of its nodes, before you enable the cluster on it. At its first sync this node then takes the synced configuration files from its peer and drops its own copies. Without it the copy changed last wins, and a router that was just set up has the newer files: it would replace the configuration of the working node. Config sync does not run on this node until the peer was reached. Refused on a node that has synced before; the option clears itself.'));
+		boolFlag(o, false);
+		o.rmempty = true;
+		o.write = function(section_id, value) {
+			if (value === '1')
+				uci.set('ha-cluster', section_id, 'sync_join', '1');
+			else
+				uci.unset('ha-cluster', section_id, 'sync_join');
+		};
+		o.remove = function(section_id) {
+			uci.unset('ha-cluster', section_id, 'sync_join');
+		};
+
 		var encryption_key_option = s.option(form.Value, 'encryption_key', _('Encryption Key'),
 			_('256-bit AES key (64 hexadecimal characters), used for both configuration and lease sync. Must be identical on all nodes.'));
 		encryption_key_option.depends('sync_encryption', '1');

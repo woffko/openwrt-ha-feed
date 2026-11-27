@@ -465,6 +465,21 @@ case "$1" in
 						fault|link) json_add_string kea_aside "$kea_aside" ;;
 					esac
 				fi
+				# This node joins a working cluster (option sync_join): waiting
+				# for its peer, or how the join of this boot ended
+				config_get_bool sync_join config sync_join 0
+				if [ "$sync_join" -eq 1 ] && [ -f "$OWSYNC_CONF" ] && ! ha_owsync_has_synced; then
+					json_add_string sync_join waiting
+				elif [ -r "$HA_OWSYNC_JOIN_NOTE" ]; then
+					read -r sync_join sync_join_peer _ < "$HA_OWSYNC_JOIN_NOTE"
+					case "$sync_join" in
+						done)
+							json_add_string sync_join done
+							json_add_string sync_join_peer "$sync_join_peer"
+							;;
+						refused) json_add_string sync_join refused ;;
+					esac
+				fi
 
 				# Kea is not run by ha-cluster and so is never what makes the
 				# cluster faulty; but a cluster whose DHCP server is down, deaf
