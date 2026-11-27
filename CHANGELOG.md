@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r27, `luci-app-ha-cluster` 2.0.0-r18,
+packages are `ha-cluster` 2.0.0-r28, `luci-app-ha-cluster` 2.0.0-r18,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r5. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -75,6 +75,31 @@ upgrading a node.
   - the hand-over of a sysupgrade runs under the lock of the maintenance
     commands. It waits five seconds for a command that runs, then goes on
     without the lock, because the upgrade goes on in any case.
+- r28, from a joint review with the auditor of that build:
+  - `maintenance` on a node whose Kea was not running did not return for
+    two minutes, and a Kea started afterwards served while the node was
+    in maintenance. The wait that puts Kea back in-maintenance ran as a
+    copy of the shell that called it and kept that shell's output and the
+    lock rc.common holds during a start or a reload, so the command, and
+    every other call of `/etc/init.d/ha-cluster`, waited for it. It is a
+    process of its own now (`role kea-resume`); the background reconcile
+    and the IPv6 guard handler no longer inherit that lock either. The
+    monitor also looks once a minute for a Kea that serves during a
+    maintenance and puts it back, and runs whenever Kea is the DHCP
+    server, not only with uplinks;
+  - the sysupgrade hook stops LuCI's web server only when it runs: one
+    the user had stopped or disabled was started by the hook's timer or
+    by `maintenance`. A second attempt takes over the mark of the first;
+  - `maintenance` ignores Ctrl-C and a lost SSH session while it hands
+    the roles over (a hand-over cut short left the `master` uplinks held
+    and, in persistent mode, the node in FAULT);
+  - the hand-over of a sysupgrade gives the maintenance lock back by
+    name, and the work under the role lock no longer carries it along;
+  - the states recorded for instances that the keepalived config no
+    longer has are removed at a start, a reload and the monitor's check;
+  - a switch to Kea that is refused on a node whose pools arrived
+    switched off from the other node no longer says "dnsmasq stays the
+    DHCP server": the node has none for those pools until Kea runs.
 - r25: the hand-over at a sysupgrade is quick (a few seconds: the mark,
   Kea with four seconds for its partner, the uplinks down, keepalived
   removed from procd) instead of a full maintenance with a reload of the
@@ -347,7 +372,7 @@ upgrading a node.
   messages and status cells built from data (hook names, error texts,
   states, the generated key) go in as text.
 
-### kea-dnsmasq-hosts (new, 1.0.0-r4)
+### kea-dnsmasq-hosts (new, 1.0.0-r5)
 - The names of Kea's DHCP clients in dnsmasq's DNS, which takes no DDNS
   updates: a service rebuilds `/tmp/hosts/kea-leases` from the lease files
   of the Kea DHCP daemons that run on the node, when Kea's run script hook
@@ -370,6 +395,9 @@ upgrading a node.
   whose static lease was imported into Kea had no name in DNS. Other
   clients still cannot take it, and a `domain` name stays taken (found on
   the bench, r4).
+- r5: the service removes its hosts file only when two looks ten seconds
+  apart find no Kea DHCP server. A look that fell into the second or two
+  of a restart of Kea took every client name out of DNS for a minute.
 
 ### lease-sync, owsync, dnsmasq-ha
 - dnsmasq-ha r5: the two patches OpenWrt carries for dnsmasq 2.93 since
