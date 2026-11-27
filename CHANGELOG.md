@@ -102,6 +102,12 @@ upgrading a node.
     `master` uplinks before keepalived is ended, in the order of a
     maintenance. Before, the peer was MASTER and dialled while this node
     still held the PPPoE session, and its first dial was refused;
+  - keepalived's states are asked again when its answer has no instance
+    in it. keepalived writes its dump when signalled and its rpcd plugin
+    reads the file without waiting, so `ubus call keepalived dump` now and
+    then answers `{ }`: the status showed the role UNKNOWN for a moment,
+    and the wait that puts Kea back in-maintenance took "no answer" for
+    "no instance is MASTER";
   - the sysupgrade hook stops LuCI's web server only when it runs: one
     the user had stopped or disabled was started by the hook's timer or
     by `maintenance`. A second attempt takes over the mark of the first;

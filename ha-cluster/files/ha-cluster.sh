@@ -4611,12 +4611,21 @@ EOF
 
 # Usage: _ha_keepalived_states
 # "<instance> <STATE>" per line, from keepalived's dump; nothing when
-# keepalived does not answer
+# keepalived does not answer. keepalived writes the dump to a file when it
+# is signalled, and its rpcd plugin reads that file at once without
+# waiting for it: now and then the answer is "{ }", with no instance in
+# it. Asked up to three times; a caller that acts on "no instance is
+# MASTER" must still take an empty answer for "not known".
 _ha_keepalived_states() {
-	local dump i name state
+	local dump="" i=0 name state
 
-	dump="$(ubus call keepalived dump 2>/dev/null)"
-	[ -n "$dump" ] || dump="$(sleep 1; ubus call keepalived dump 2>/dev/null)"
+	while [ "$i" -lt 3 ]; do
+		[ "$i" -eq 0 ] || sleep 1
+		dump="$(ubus call keepalived dump 2>/dev/null)"
+		[ -n "$(printf '%s' "$dump" | jsonfilter -e '@.status[0].data.iname' 2>/dev/null)" ] && break
+		dump=""
+		i=$((i + 1))
+	done
 	[ -n "$dump" ] || return 0
 	i=0
 	while :; do
@@ -5190,11 +5199,14 @@ ha_maintenance_on_role() {
 # Not while the node holds a role: the peer is gone then, and Kea serves
 # on purpose (takeover).
 ha_maintenance_kea_check() {
-	local daemon
+	local daemon states
 
 	[ "$(ha_maintenance_mode)" != "none" ] || return 0
 	ha_dhcp_backend_is_kea || return 0
-	if _ha_keepalived_states | grep -q ' MASTER$'; then
+	# No answer of keepalived is not "no instance is MASTER"
+	states="$(_ha_keepalived_states)"
+	[ -n "$states" ] || return 0
+	if printf '%s\n' "$states" | grep -q ' MASTER$'; then
 		return 0
 	fi
 	for daemon in dhcp4 dhcp6; do
@@ -5543,14 +5555,17 @@ ha_maintenance_kea_resume_once() {
 # touch with its partner and the node holds no role (two minutes at most),
 # under the maintenance lock, so that it never follows a "maintenance off".
 ha_maintenance_kea_resume() {
-	local i=0 daemon ready seen rc
+	local i=0 daemon ready seen rc states
 
 	[ "$(ha_maintenance_mode)" != "none" ] || return 0
 	ha_dhcp_backend_is_kea || return 0
 	while [ "$i" -lt 24 ]; do
 		[ "$(ha_maintenance_mode)" != "none" ] || return 0
-		# Not while the node holds a role: the peer is gone, or not back
-		if _ha_keepalived_states | grep -q ' MASTER$'; then
+		# Not while the node holds a role: the peer is gone, or not back.
+		# Nor when keepalived does not say: an empty answer is not "no
+		# instance is MASTER".
+		states="$(_ha_keepalived_states)"
+		if [ -z "$states" ] || printf '%s\n' "$states" | grep -q ' MASTER$'; then
 			sleep 5
 			i=$((i + 1))
 			continue
