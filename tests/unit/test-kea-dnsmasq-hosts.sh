@@ -191,6 +191,18 @@ expect_hosts "a static lease name for that host's lease only (address or MAC), a
 fd00:1234:abcd:1::1200 printer"
 rm -f "$UCI_DHCP" "$V6"
 
+# The service's own round ("rebuild keep") with no Kea running: the moment
+# of a restart of Kea must not take the names out of DNS
+before="$(hups)"
+rc=0
+KDH_RUNNING="" sh "$KDH" rebuild keep || rc=$?
+if [ "$rc" -eq 3 ] && [ -e "$KDH_HOSTS_FILE" ] && [ "$(hups)" = "$before" ] &&
+	! ls "$KDH_HOSTS_FILE".?* >/dev/null 2>&1; then
+	pass "no Kea running, the service's round: the file stays, exit code 3, no temporary file left"
+else
+	fail "no Kea running, the service's round: the file stays, exit code 3, no temporary file left (rc=$rc)"
+fi
+
 before="$(hups)"
 rebuild ""
 if [ ! -e "$KDH_HOSTS_FILE" ] && [ "$(hups)" = "$((before + 1))" ]; then

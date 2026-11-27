@@ -12,7 +12,8 @@
 #   kea-dnsmasq-hosts run       the service: rebuilds when Kea's run script
 #                               hook said leases changed (at most every
 #                               five seconds) and every <interval> seconds
-#   kea-dnsmasq-hosts rebuild   once
+#   kea-dnsmasq-hosts rebuild   once ("rebuild keep": with no Kea DHCP
+#                               server running the file stays, exit code 3)
 #   kea-dnsmasq-hosts clear     removes the hosts file
 #
 # A lease counts when it is active (state 0), has not run out and is an
@@ -28,7 +29,10 @@
 # has a lease of dnsmasq's.
 # Two clients with one name: the first lease in Kea's files keeps it.
 # With no Kea DHCP server running, the file is removed: dnsmasq, back as
-# the DHCP server, answers for its own leases.
+# the DHCP server, answers for its own leases. The service removes it only
+# when two looks ten seconds apart find none: a look that fell into the
+# second or two of a restart of Kea took every name out of DNS until the
+# next round, a minute later.
 
 KDH_RUN_DIR="${KDH_RUN_DIR:-/var/run/kea-dnsmasq-hosts}"
 KDH_HOSTS_FILE="${KDH_HOSTS_FILE:-/tmp/hosts/kea-leases}"
@@ -219,6 +223,7 @@ rebuild() {
 	} > "$tmp"
 	if [ "$any" -eq 0 ]; then
 		rm -f "$tmp"
+		[ "$1" = "keep" ] && return 3
 		clear_hosts
 		return 0
 	fi
@@ -231,7 +236,7 @@ rebuild() {
 }
 
 run() {
-	local interval last=0 now
+	local interval last=0 now none=0
 
 	interval="$(uci -q get kea-dnsmasq-hosts.main.interval)"
 	case "$interval" in
@@ -249,8 +254,22 @@ run() {
 		if { [ -e "$KDH_RUN_DIR/changed" ] && [ $((now - last)) -ge 5 ]; } ||
 			[ $((now - last)) -ge "$interval" ]; then
 			rm -f "$KDH_RUN_DIR/changed"
-			rebuild
-			last="$now"
+			rebuild keep
+			if [ $? -eq 3 ]; then
+				# No Kea DHCP server: for the moment of a restart, or
+				# for good. The names stay until a second look, ten
+				# seconds on, finds none either.
+				none=$((none + 1))
+				if [ "$none" -ge 2 ]; then
+					clear_hosts
+					last="$now"
+				else
+					last=$((now - interval + 10))
+				fi
+			else
+				none=0
+				last="$now"
+			fi
 		fi
 		sleep 2
 	done
@@ -258,7 +277,7 @@ run() {
 
 case "$1" in
 	run) run ;;
-	rebuild) rebuild ;;
+	rebuild) rebuild "$2" ;;
 	clear) clear_hosts ;;
 	*)
 		echo "Usage: $0 run|rebuild|clear" >&2
