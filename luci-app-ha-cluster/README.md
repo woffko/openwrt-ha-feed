@@ -15,24 +15,37 @@ Web interface for managing High Availability clusters on OpenWrt.
 - One-click enable/disable
 
 ### Status Tab
-- Real-time cluster state (MASTER/BACKUP/FAULT)
+- Real-time cluster state (MASTER/BACKUP/FAULT) and the role of each VRRP instance
 - Peer connectivity status
-- Service health monitoring (keepalived, owsync, lease-sync)
+- Service health monitoring (keepalived, owsync, lease-sync, Kea)
+- The DHCP server of the cluster interfaces (dnsmasq or Kea), the state of Kea's high availability, and the static leases of dnsmasq not yet in Kea
+- The uplinks that follow the role: what each should be, what it is, and why not
+- Maintenance: enter it until reboot or persistently, leave it, see the result of the last command and whether the peer is in maintenance
 - DHCP lease sync statistics
 - Config sync statistics
 - Auto-refresh every 5 seconds
 
 ### Advanced Pages
-- **Keepalived (Advanced)**: VRRP tuning and GUI-managed command or dataplane health checks, with automatic multi-instance IPv4/IPv6 attachment
-- **owsync (Advanced)**: Custom sync groups, exclusions, poll interval
-- **DHCP Sync (Advanced)**: lease-sync tuning and logging
+- **Advanced VRRP**: VRRP tuning, GUI-managed command or dataplane health checks with automatic multi-instance IPv4/IPv6 attachment, and the custom hooks of `/etc/hotplug.d/keepalived/`
+- **Advanced Multi-WAN Management**: every WAN interface (those of mwan3 and of the masquerading firewall zones), listed as unmanaged until it is given a mode: `Master only` for a line that allows one session, such as PPPoE, or `Always`
+- **Advanced Config Sync**: Custom sync groups, exclusions, poll interval
+- **Advanced Lease Sync**: lease-sync tuning and logging
+
+What these pages configure is described in
+[ha-cluster's README](../ha-cluster/README.md).
 
 ## Installation
+
+From your own package repository (see
+[Building and Hosting Your Own Package Repository](../README.md#building-and-hosting-your-own-package-repository)):
 
 ```bash
 apk update
 apk add luci-app-ha-cluster
 ```
+
+Install or upgrade it together with `ha-cluster`: each release of the
+interface goes with one release of the backend.
 
 ## Dependencies
 
@@ -48,6 +61,7 @@ apk add luci-app-ha-cluster
     ├── simple.js              # General interface
     ├── status.js              # Status dashboard
     ├── keepalived-advanced.js # Advanced VRRP settings
+    ├── uplinks.js             # Advanced Multi-WAN Management
     ├── owsync-advanced.js     # Advanced config sync settings
     └── lease-sync-advanced.js # Advanced DHCP sync settings
 
@@ -60,6 +74,16 @@ apk add luci-app-ha-cluster
 /usr/libexec/rpcd/
 └── ha-cluster                 # RPC backend (shell script)
 ```
+
+## Access Control
+
+The ACL has two roles. `read` calls `status`, `nodes` and `generate_key`
+and reads the `ha-cluster`, `dhcp`, `network`, `firewall` and `mwan3`
+configs. `write` changes the `ha-cluster` config, the hooks of
+`/etc/hotplug.d/keepalived/` and calls `maintenance`. Health checks of
+type `command` and those hooks run as root, and the `ha-cluster` config
+holds the encryption key: give either role only to users who may be root
+on the router.
 
 ## Usage
 
@@ -87,6 +111,7 @@ Real-time monitoring with:
 - Cluster state indicator (color-coded)
 - Peer health status
 - Service status table
+- Uplinks and maintenance
 - Sync statistics
 
 ## Development
@@ -131,4 +156,6 @@ luci-app-ha-cluster has been developed using Claude Code from Anthropic.
 
 ## Maintainer
 
-Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
+Upstream: Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
+
+This fork: [woffko](https://github.com/woffko)

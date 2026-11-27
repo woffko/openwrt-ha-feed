@@ -1259,4 +1259,6 @@ ha-cluster has been developed using Claude Code from Anthropic.
 
 ## Maintainer
 
-Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
+Upstream: Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
+
+This fork: [woffko](https://github.com/woffko)

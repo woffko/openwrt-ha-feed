@@ -19,6 +19,12 @@ packages are `ha-cluster` 2.0.0-r26, `luci-app-ha-cluster` 2.0.0-r17,
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
 
+### Repository
+- The fork is on its `master` branch since 2026-11-27. The branches it was
+  developed on (`feature/dhcp-backend-kea`, `port/upstream-2.0.0-model`
+  and the earlier ones) were merged into it and removed: a `feeds.conf`
+  that names one of them should name `master`, or a commit.
+
 ### ha-cluster
 - Uplinks (`config uplink`): interfaces that follow the node's VRRP role.
   In mode `master` an interface, such as a PPPoE line with one session per

@@ -10,6 +10,10 @@ A high-availability solution for OpenWrt routers, providing automatic failover, 
 - **Web Interface** - LuCI integration for easy setup and monitoring
 - **IPv4 and IPv6** - Full dual-stack support for VIPs and sync traffic
 - **Dataplane Health Failover** - GUI-managed carrier, LACP membership, and interface-bound reachability checks
+- **Kea or dnsmasq as the DHCP Server** - with ISC Kea, its own high availability replicates the leases; ha-cluster switches the cluster interfaces between the two servers and reports Kea's state
+- **Uplinks That Follow the Role** - an interface such as a PPPoE line with one session per login is up only on the MASTER
+- **Maintenance** - a node hands its roles to the peer until it reboots or until you say so, and by itself before a sysupgrade
+- **Firewall Rules** - what the nodes need from each other is kept as ordinary rules in the firewall config
 
 ## Packages
 
@@ -26,49 +30,65 @@ A high-availability solution for OpenWrt routers, providing automatic failover, 
 
 - **OpenWrt 25.12**
 - **Two or more routers** on a shared network segment
-- **dnsmasq-ha** (for DHCP lease sync)
+- **dnsmasq-ha** for DHCP lease sync with dnsmasq, or **Kea** (`kea-dhcp4`
+  with `kea-hook-ha`) as the DHCP server of the cluster interfaces, see
+  [Kea as the DHCP Server](ha-cluster/README.md#kea-as-the-dhcp-server)
 
 ## This fork
 
-[woffko/openwrt-ha-feed](https://github.com/woffko/openwrt-ha-feed) follows
-upstream [pgaufillet/openwrt-ha-feed](https://github.com/pgaufillet/openwrt-ha-feed)
-and merges its 2.0.0 release. On top of it, it refuses to sync without an
-encryption key unless told otherwise, keeps its generated files in a
-root-only directory, adds dataplane health checks and an IPv6 guard that
-keeps clients from routing through a BACKUP node, and hardens the sync
-daemons. The list is in the [changelog](CHANGELOG.md), the points to
-check before an upgrade in
+[woffko/openwrt-ha-feed](https://github.com/woffko/openwrt-ha-feed) is a
+fork of [pgaufillet/openwrt-ha-feed](https://github.com/pgaufillet/openwrt-ha-feed)
+that merges its 2.0.0 release. All of it is on the `master` branch, which
+is built and tested against OpenWrt 25.12. On top of upstream 2.0.0 it
+has:
+
+- [Kea as the DHCP server](ha-cluster/README.md#kea-as-the-dhcp-server)
+  of the cluster interfaces, with the switch between dnsmasq and Kea, the
+  import of dnsmasq's static leases, and Kea's state in the status;
+- [uplinks](ha-cluster/README.md#uplinks-interfaces-that-follow-the-role-advanced-multi-wan-management)
+  that follow the VRRP role, for a PPPoE line that allows one session;
+- [maintenance](ha-cluster/README.md#maintenance) in two modes, and the
+  hand-over of a node's roles before a sysupgrade;
+- the [firewall rules](ha-cluster/README.md#firewall) of the cluster,
+  kept in `/etc/config/firewall`;
+- dataplane health checks, and an IPv6 guard that keeps clients from
+  routing through a BACKUP node;
+- [`kea-dnsmasq-hosts`](kea-dnsmasq-hosts/README.md), the names of Kea's
+  clients in dnsmasq's DNS;
+- hardening: no sync without an encryption key unless told otherwise,
+  generated files in a root-only directory, peer and message checks in
+  owsync and lease-sync, the fixes of several code audits.
+
+The list is in the [changelog](CHANGELOG.md), the points to check before
+an upgrade in
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork).
-
-To build it, use this repository as the feed source instead of the
-upstream URL shown below, at the branch or commit you want:
-
-```bash
-echo "src-git ha_feed https://github.com/woffko/openwrt-ha-feed.git;<branch>" >> feeds.conf
-```
 
 ## Installation
 
 ### Add the Feed
 
-In an OpenWrt buildroot or SDK, add the feed branch matching your OpenWrt
-release to `feeds.conf`:
+In an OpenWrt 25.12 buildroot or SDK, add this fork to `feeds.conf`:
 
 ```bash
 # feeds.conf replaces feeds.conf.default: start from a copy
 [ -f feeds.conf ] || cp feeds.conf.default feeds.conf
-# OpenWrt 25.12
-echo "src-git ha_feed https://github.com/pgaufillet/openwrt-ha-feed.git;openwrt-25.12" >> feeds.conf
+echo "src-git ha_feed https://github.com/woffko/openwrt-ha-feed.git" >> feeds.conf
 
 ./scripts/feeds update ha_feed
 ./scripts/feeds install -a -p ha_feed
 ```
 
-Feed branches follow OpenWrt's: `master` follows OpenWrt `main`, and each
-supported OpenWrt release branch has a feed branch of the same name
-(`openwrt-25.12`). Changes land on `master`, then are cherry-picked to the
-release branches. On each branch, dnsmasq-ha follows the dnsmasq package
-of the matching OpenWrt branch.
+The fork has one branch, `master`, for OpenWrt 25.12; its dnsmasq-ha
+follows the dnsmasq package of that OpenWrt branch. For a build that does
+not move, name a commit instead of the branch:
+
+```bash
+echo "src-git ha_feed https://github.com/woffko/openwrt-ha-feed.git^<commit>" >> feeds.conf
+```
+
+Upstream keeps a feed branch for each OpenWrt release
+(`https://github.com/pgaufillet/openwrt-ha-feed.git;openwrt-25.12`); its
+packages are upstream's, without what this fork adds.
 
 ### Disable a Legacy keepalived
 
@@ -254,7 +274,7 @@ VIPs:
    sh install-ha-cluster.sh
    ```
 
-2. Open LuCI: **Services → High Availability → Quick Setup**
+2. Open LuCI: **Services → High Availability → General**
 
 3. Configure:
    - Enable HA Cluster
@@ -320,19 +340,32 @@ Start the cluster:
 - **keepalived**: Manages VRRP for virtual IP failover
 - **owsync**: Syncs UCI configuration files with AES-256-GCM encryption
 - **lease-sync**: Replicates DHCP leases in real-time via ubus and UDP with AES-256-GCM encryption
+- **Kea** (optional, this fork): serves DHCPv4 on the cluster interfaces instead of dnsmasq and replicates its leases through its own high availability; lease-sync is then not started
 
 ## Documentation
 
-- [ha-cluster Design](ha-cluster/README.md) - Architecture and configuration details
+- [ha-cluster Design](ha-cluster/README.md) - Architecture and configuration details, among them:
+  - [Kea as the DHCP Server](ha-cluster/README.md#kea-as-the-dhcp-server)
+  - [Uplinks](ha-cluster/README.md#uplinks-interfaces-that-follow-the-role-advanced-multi-wan-management)
+  - [Maintenance](ha-cluster/README.md#maintenance) and the hand-over at a sysupgrade
+  - [Firewall](ha-cluster/README.md#firewall)
+  - [UCI Configuration](ha-cluster/README.md#uci-configuration)
 - [LuCI Application](luci-app-ha-cluster/README.md) - Web interface guide
+- [dnsmasq-ha](dnsmasq-ha/README.md) - The dnsmasq patches
+- [kea-dnsmasq-hosts](kea-dnsmasq-hosts/README.md) - Names of Kea's clients in dnsmasq's DNS
 - [owsync](https://github.com/pgaufillet/owsync) - Config sync daemon (standalone project)
+- [Docker Build](docker/README.md) - Packages without a build host
 - [Test Infrastructure](tests/README.md) - Container-based testing
+- [Changelog](CHANGELOG.md)
 
 ## Security
 
 - **Encryption**: All sync traffic encrypted with AES-256-GCM (PSK)
 - **Key Management**: Keys stored in config files, never exposed on command line
 - **Network**: Designed for trusted LAN segments; use VPN for untrusted networks
+- **Peers**: A node that syncs its configuration with another trusts it as it trusts its own administrator: the synced files configure services that run as root. Keep the sync link, and the key, to the nodes
+- **Kea**: Kea's high availability talks plain HTTP without authentication between the nodes; the [firewall rules](ha-cluster/README.md#firewall) of the cluster let only the nodes reach its ports
+- **LuCI Roles**: The roles of luci-app-ha-cluster are for users who may be root on the router, see [Notes for this fork](ha-cluster/README.md#notes-for-this-fork)
 
 ## Known Limitations
 
@@ -415,7 +448,9 @@ logread | grep -E "(ha-cluster|keepalived|owsync|lease-sync)"
 |-------|----------|
 | VIP not appearing | Check interface name matches UCI config |
 | Sync not working | Verify encryption keys match on both nodes |
-| Peer unreachable | Check the firewall allows owsync (TCP 4321), lease-sync (UDP 5378) and VRRP (IP protocol 112, or 51 with `auth_type 'ah'`) between the nodes |
+| Peer unreachable | ha-cluster keeps the rules the nodes need in `/etc/config/firewall` (see [Firewall](ha-cluster/README.md#firewall)). With `firewall '0'`, allow owsync (TCP 4321), lease-sync (UDP 5378), VRRP (IP protocol 112, or 51 with `auth_type 'ah'`) and the ports of Kea's high availability between the nodes yourself |
+| A PPPoE uplink is refused on the second node | Let it follow the role: an [uplink](ha-cluster/README.md#uplinks-interfaces-that-follow-the-role-advanced-multi-wan-management) in mode `master` |
+| A node must be taken out for work | [Maintenance](ha-cluster/README.md#maintenance): `/etc/init.d/ha-cluster maintenance temp` or `on`, and `off` to come back |
 | Split brain | Ensure reliable network between nodes |
 
 ## Development
@@ -462,6 +497,7 @@ make package/owsync/compile V=s
 make package/lease-sync/compile V=s
 make package/dnsmasq-ha/compile V=s
 make package/luci-app-ha-cluster/compile V=s
+make package/kea-dnsmasq-hosts/compile V=s   # only with Kea
 ```
 
 Built packages are output to `bin/packages/*/ha_feed/`.
@@ -538,4 +574,6 @@ apk upgrade
 
 ## Maintainer
 
-Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
+Upstream: Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
+
+This fork: [woffko](https://github.com/woffko)
