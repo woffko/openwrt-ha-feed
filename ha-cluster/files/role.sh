@@ -23,10 +23,15 @@
 #                    in-maintenance (four seconds for the partner), the
 #                    'master' uplinks down (PADT), and keepalived and the
 #                    monitor removed from procd, so that the peer is MASTER
-#                    at once. A reboot or "maintenance off" ends it.
+#                    at once. Under the lock of the maintenance commands,
+#                    for which it waits five seconds at most. A reboot or
+#                    "maintenance off" ends it.
 
 HA_CLUSTER_LIB="${HA_CLUSTER_LIB:-/usr/lib/ha-cluster/ha-cluster.sh}"
 . "$HA_CLUSTER_LIB"
+
+# Seconds "role sysupgrade" waits for a maintenance command that runs
+HA_SYSUPGRADE_LOCK_WAIT="${HA_SYSUPGRADE_LOCK_WAIT:-5}"
 
 ha_log_init 2>/dev/null
 
@@ -99,6 +104,23 @@ case "$1" in
 		role_enabled || exit 0
 		pgrep keepalived >/dev/null 2>&1 || exit 0
 		ha_ensure_run_dir || exit 0
+		# One at a time with a maintenance command (LuCI, the command
+		# line), under its lock, held on a descriptor until this ends. A
+		# command that runs gets a few seconds; then the hand-over goes on
+		# without the lock, because the upgrade goes on in any case
+		# (BusyBox's flock has no timeout: asked again every second).
+		if ( : >> "$HA_MAINTENANCE_LOCK" ) 2>/dev/null; then
+			exec 8>>"$HA_MAINTENANCE_LOCK"
+			n=0
+			until flock -n -x 8 2>/dev/null; do
+				n=$((n + 1))
+				if [ "$n" -gt "$HA_SYSUPGRADE_LOCK_WAIT" ]; then
+					ha_log_warning "sysupgrade: a maintenance command still runs, handing over without waiting for it"
+					break
+				fi
+				sleep 1
+			done
+		fi
 		# The node says it is in maintenance if the upgrade stops after this
 		echo "temp $(date +%s)" > "$HA_MAINTENANCE_TEMP"
 		echo "$(date '+%Y-%m-%d %H:%M:%S') sysupgrade: roles handed over (maintenance until reboot)" > "$HA_MAINTENANCE_LAST"

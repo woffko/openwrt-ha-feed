@@ -76,6 +76,9 @@ HA_ROLE_MONITOR_INTERVAL="${HA_ROLE_MONITOR_INTERVAL:-5}"
 # value other than 0 in the first puts every instance of the node in FAULT,
 # 1 in the second takes 253 off the priority of every instance.
 HA_MAINTENANCE_TEMP="${HA_CLUSTER_RUN_DIR}/maintenance"
+# The mark of /lib/upgrade/ha-cluster.sh: it stopped LuCI's web server for a
+# sysupgrade, and its timer starts the server again while the mark stands
+HA_UHTTPD_RESTORE="${HA_CLUSTER_RUN_DIR}/uhttpd-restore"
 HA_MAINTENANCE_FAULT="${HA_CLUSTER_RUN_DIR}/maintenance.fault"
 HA_MAINTENANCE_DEMOTE="${HA_CLUSTER_RUN_DIR}/maintenance.demote"
 # The run of the program a test puts in place of an HTTP request to Kea's

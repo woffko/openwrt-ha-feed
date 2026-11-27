@@ -924,7 +924,9 @@ hand-over, the node stays in maintenance until `maintenance off` or a
 reboot, as its status says. The hand-over records the instances as
 stopped, so that `maintenance off` brings no `master` uplink up before
 keepalived reports again, and starts the service again when nothing of
-it is left in procd. LuCI's web server starts again after 150 seconds.
+it is left in procd. LuCI's web server starts again after 150 seconds, or
+at once with `maintenance off`; the timer of an attempt that failed does
+nothing under a later attempt.
 
 An upgrade of the pair, then:
 

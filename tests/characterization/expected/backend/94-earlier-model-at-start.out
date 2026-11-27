@@ -268,14 +268,6 @@ config exclude
 01-user
 10-ha-cluster-role
 20-ipv6-backup-guard
-501-rpcd
-505-system
-511-firewall
-551-dnsmasq
-555-dropbear
-600-uhttpd
-700-luci
-810-files
 20-ipv6-backup-guard is the packaged one
 == rc.d
 K91ha-cluster

@@ -328,6 +328,12 @@ maintenance() {
 			start >/dev/null 2>&1
 		fi
 		rm -f "$HA_ROLE_DIR/sysupgrade"
+		# LuCI's web server, which the hook of a sysupgrade stopped: back
+		# at once, and the hook's timer does nothing without its mark
+		if [ -e "$HA_UHTTPD_RESTORE" ]; then
+			rm -f "$HA_UHTTPD_RESTORE"
+			[ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd start >/dev/null 2>&1
+		fi
 		ha_maintenance_settle
 	fi
 	[ -n "$out" ] && echo "$out"

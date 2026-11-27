@@ -15,7 +15,11 @@
 # leave a node that handed its roles over and never upgraded. LuCI's web
 # server stops first: the flash page takes the device as rebooted as soon
 # as a page of it answers again, and would go to the overview. It starts
-# again after 150 seconds if the upgrade does not go on.
+# again after 150 seconds if the upgrade does not go on: a timer does it
+# while the mark this hand-over left (uhttpd-restore in the run directory)
+# is still its own. A later sysupgrade writes another mark, so the timer of
+# an attempt that failed cannot start the server under the next one, and
+# "maintenance" takes the mark away and starts the server at once.
 # Not for a backup alone (-b), a list (-l) or a test (-T). An upgrade that
 # writes no backup gets no hand-over: without the settings (-n), or with
 # the settings of an archive (-f): hand the roles over first with
@@ -23,6 +27,10 @@
 # fails after this leaves it on, as the status says, until "maintenance
 # off" or a reboot. Bounded by its own timer (15 s, then TERM, then KILL):
 # BusyBox has no timeout, and the package does not depend on coreutils.
+
+# Seconds until LuCI's web server is started again, and the mark of the timer
+ha_cluster_sysupgrade_uhttpd_back=150
+ha_cluster_sysupgrade_uhttpd_mark=/var/run/ha-cluster/uhttpd-restore
 
 ha_cluster_sysupgrade_hand_over() {
 	case "$0" in
@@ -37,11 +45,24 @@ ha_cluster_sysupgrade_hand_over() {
 	if [ -x /etc/init.d/uhttpd ]; then
 		/etc/init.d/uhttpd stop >/dev/null 2>&1
 		# Back after a while if the upgrade does not go on: the second
-		# stage ends every process before it writes the image
+		# stage ends every process before it writes the image. Without a
+		# mark (no run directory) the timer starts the server in any case.
+		ha_cluster_sysupgrade_token="$$.$(date +%s)"
+		[ -d "${ha_cluster_sysupgrade_uhttpd_mark%/*}" ] &&
+			echo "$ha_cluster_sysupgrade_token" 2>/dev/null > "$ha_cluster_sysupgrade_uhttpd_mark" ||
+			ha_cluster_sysupgrade_token=""
+		ha_cluster_sysupgrade_timer='sleep "$1"
+if [ -n "$3" ]; then
+	[ "$(cat "$2" 2>/dev/null)" = "$3" ] || exit 0
+	rm -f "$2"
+fi
+/etc/init.d/uhttpd start'
 		if command -v setsid >/dev/null 2>&1; then
-			setsid sh -c 'sleep 150; /etc/init.d/uhttpd start' </dev/null >/dev/null 2>&1 &
+			setsid sh -c "$ha_cluster_sysupgrade_timer" sh "$ha_cluster_sysupgrade_uhttpd_back" \
+				"$ha_cluster_sysupgrade_uhttpd_mark" "$ha_cluster_sysupgrade_token" </dev/null >/dev/null 2>&1 &
 		else
-			sh -c 'sleep 150; /etc/init.d/uhttpd start' </dev/null >/dev/null 2>&1 &
+			sh -c "$ha_cluster_sysupgrade_timer" sh "$ha_cluster_sysupgrade_uhttpd_back" \
+				"$ha_cluster_sysupgrade_uhttpd_mark" "$ha_cluster_sysupgrade_token" </dev/null >/dev/null 2>&1 &
 		fi
 	fi
 	/usr/lib/ha-cluster/role sysupgrade </dev/null >/dev/null 2>&1 &

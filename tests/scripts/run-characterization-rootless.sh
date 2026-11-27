@@ -70,6 +70,10 @@ run_case() {
 	cp "$FEED_DIR/ha-cluster/files/ha-cluster.uci-defaults" "$WORK/ha-lib/migrate-config"
 	cp "$FEED_DIR/ha-cluster/files/role.sh" "$WORK/ha-lib/role"
 	cp "$FEED_DIR/ha-cluster/files/role.hotplug" "$WORK/ha-lib/role.hotplug"
+	# The init script with the mode the package installs it with: the hook
+	# of a sysupgrade asks whether it can be run
+	cp "$FEED_DIR/ha-cluster/files/ha-cluster.init" "$WORK/ha-cluster.init"
+	chmod 0755 "$WORK/ha-cluster.init"
 	mkdir -p "$WORK/etc/hotplug.d/keepalived"
 	cp "$FEED_DIR/ha-cluster/files/ipv6-backup-guard.hotplug" "$WORK/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
 	cp "$FEED_DIR/ha-cluster/files/role.hotplug" "$WORK/etc/hotplug.d/keepalived/10-ha-cluster-role"
@@ -79,6 +83,13 @@ run_case() {
 	mkdir -p "$WORK/tmp/run" "$WORK/tmp/lock"
 	for entry in $CHAR_HIDE_INITD; do
 		rm -f "$WORK/etc/init.d/$entry" "$WORK/etc/rc.d/"[SK][0-9][0-9]"$entry"
+	done
+	# keepalived-sync is not installed for the cases, whatever the rootfs
+	# holds (the node image had it until w0w6): a case about its hooks
+	# writes them itself
+	for entry in 501-rpcd 505-system 511-firewall 551-dnsmasq 555-dropbear \
+		600-uhttpd 700-luci 810-files; do
+		rm -f "$WORK/etc/hotplug.d/keepalived/$entry"
 	done
 	# Cases remove daemons from these two: a tree of hard links, where a
 	# removal leaves the rootfs alone, or a copy across file systems
@@ -124,9 +135,10 @@ run_case() {
 		--bind "$WORK/ha-lib" /usr/lib/ha-cluster \
 		--symlink tmp /var \
 		--ro-bind "$FEED_DIR/ha-cluster/files/ha-cluster.sh" /usr/lib/ha-cluster/ha-cluster.sh \
-		--ro-bind "$FEED_DIR/ha-cluster/files/ha-cluster.init" /etc/init.d/ha-cluster \
+		--ro-bind "$WORK/ha-cluster.init" /etc/init.d/ha-cluster \
 		--ro-bind "$FEED_DIR/ha-cluster/files/ha-cluster.config" /shipped/ha-cluster \
 		--ro-bind "$FEED_DIR/ha-cluster/files/ha-cluster.uci-defaults" /char-migrate \
+		--ro-bind "$FEED_DIR/ha-cluster/files/sysupgrade.sh" /char-sysupgrade-hook \
 		--ro-bind "$FEED_DIR/luci-app-ha-cluster/root/usr/libexec/rpcd/ha-cluster" /usr/libexec/rpcd/ha-cluster \
 		--ro-bind "$FEED_DIR/luci-app-ha-cluster/root/usr/share/rpcd/acl.d/luci-app-ha-cluster.json" /usr/share/rpcd/acl.d/luci-app-ha-cluster.json \
 		--ro-bind "$FEED_DIR/dnsmasq-ha/files/dhcp-script.sh" /char-dhcp-script \
