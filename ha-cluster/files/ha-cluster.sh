@@ -76,6 +76,13 @@ HA_ROLE_MONITOR_INTERVAL="${HA_ROLE_MONITOR_INTERVAL:-5}"
 # value other than 0 in the first puts every instance of the node in FAULT,
 # 1 in the second takes 253 off the priority of every instance.
 HA_MAINTENANCE_TEMP="${HA_CLUSTER_RUN_DIR}/maintenance"
+# Kea kept in-maintenance by ha-cluster outside a maintenance of the node
+# (ha_kea_follow_role): the mark, "<fault|link> <since>", its lock, the
+# looks at which no peer answered, and what was last said about a refusal
+HA_KEA_ASIDE="${HA_CLUSTER_RUN_DIR}/kea-aside"
+HA_KEA_ASIDE_LOCK="${HA_CLUSTER_RUN_DIR}/kea-aside.lock"
+HA_KEA_ASIDE_MISSES="${HA_CLUSTER_RUN_DIR}/kea-aside.misses"
+HA_KEA_ASIDE_NOTE="${HA_CLUSTER_RUN_DIR}/kea-aside.note"
 # The mark of /lib/upgrade/ha-cluster.sh: it stopped LuCI's web server for a
 # sysupgrade, and its timer starts the server again while the mark stands
 HA_UHTTPD_RESTORE="${HA_CLUSTER_RUN_DIR}/uhttpd-restore"
@@ -4691,16 +4698,19 @@ _ha_keepalived_wait_none() {
 
 # Usage: _ha_kea_ha_state dhcp4|dhcp6
 # Sets _hk_answered (1 when the daemon answered status-get), _hk_ha (1 when
-# it runs with high availability), _hk_state, _hk_partner_state and
-# _hk_in_touch
+# it runs with high availability), _hk_state, _hk_partner_state,
+# _hk_interrupted (Kea's "communication-interrupted": no answer from the
+# partner for longer than max-response-delay) and _hk_in_touch (Kea's
+# "in-touch", which only says that the partner was heard at least once)
 _ha_kea_ha_state() {
-	local answer mode="" state="" partner="" touch=""
+	local answer mode="" state="" partner="" touch="" interrupted=""
 
 	_hk_answered=0
 	_hk_ha=0
 	_hk_state=""
 	_hk_partner_state=""
 	_hk_in_touch=""
+	_hk_interrupted=""
 	answer="$(ha_kea_status_get "$1")"
 	[ -n "$answer" ] || return 0
 	_hk_answered=1
@@ -4709,12 +4719,14 @@ _ha_kea_ha_state() {
 		-e 'state=@.arguments["high-availability"][0]["ha-servers"].local.state' \
 		-e 'partner=@.arguments["high-availability"][0]["ha-servers"].remote["last-state"]' \
 		-e 'touch=@.arguments["high-availability"][0]["ha-servers"].remote["in-touch"]' \
+		-e 'interrupted=@.arguments["high-availability"][0]["ha-servers"].remote["communication-interrupted"]' \
 		2>/dev/null)"
 	[ -n "$mode" ] || return 0
 	_hk_ha=1
 	_hk_state="$state"
 	_hk_partner_state="$partner"
 	_hk_in_touch="$touch"
+	_hk_interrupted="$interrupted"
 }
 
 # Usage: _ha_kea_answer_ok <answer>
@@ -4872,6 +4884,9 @@ ha_kea_maintenance() {
 				done
 				if [ "$_hk_partner_state" = "partner-in-maintenance" ]; then
 					ha_log_info "Kea $daemon in-maintenance: the partner serves every client"
+				elif [ -n "${HA_KEA_ENTER_ALONE:-}" ]; then
+					# Without its partner on purpose (ha_kea_follow_role)
+					ha_log_info "Kea $daemon in-maintenance on this node alone: $HA_KEA_ENTER_ALONE"
 				else
 					ha_log_warning "Kea $daemon in-maintenance, but its partner is ${_hk_partner_state:-unknown}, not partner-in-maintenance"
 				fi
@@ -4967,6 +4982,12 @@ ha_maintenance_peer_problem() {
 				echo "Kea $daemon is not in touch with its partner"
 				return 0
 			}
+			# "in-touch" says the partner was heard once; this, that it
+			# is not heard now
+			if [ "$_hk_interrupted" = "1" ] || [ "$_hk_interrupted" = "true" ]; then
+				echo "Kea $daemon has lost touch with its partner"
+				return 0
+			fi
 			case "$_hk_state:$_hk_partner_state" in
 				*:hot-standby|*:load-balancing) ;;
 				# This node in maintenance already: the partner serves
@@ -5188,6 +5209,299 @@ ha_maintenance_kea_check() {
 		esac
 	done
 	return 0
+}
+
+# Kea and the role of the node, outside a maintenance. Kea's two servers
+# watch each other over the address the cluster gives them for the peer,
+# the sync link, and know nothing of VRRP. Two cases went wrong (both
+# seen on the bench with Kea 3.0.4, hot-standby):
+#   fault  A VRRP instance on an interface with DHCP pools is in FAULT on
+#          this node (its LAN port lost the carrier, a check fails): the
+#          peer took the VIPs, but Kea's heartbeats still pass over the
+#          sync link, so the partner never serves, and this node's Kea no
+#          longer hears the clients: no DHCP server answered.
+#   link   The peers do not reach each other over the sync link while both
+#          are on the LAN: each Kea takes its partner for gone
+#          (partner-down) and both answer every client, from one pool.
+# What ha-cluster does, with VRRP on the LAN as the witness:
+#   fault  This node's Kea goes in-maintenance, as at a maintenance of the
+#          node, when the peer can take over (ha_maintenance_peer_problem),
+#          and comes back when no such instance is in FAULT any more.
+#   link   A node that is BACKUP on those instances hears the MASTER on
+#          the LAN, so the peer is alive: when no peer answers on its
+#          address at two looks of the monitor in a row, this node's Kea
+#          goes in-maintenance by itself (the state Kea never leaves
+#          unasked), and the MASTER's Kea, partner-down, is the one that
+#          serves. It comes back when its partner is in touch again, and
+#          at once when this node becomes MASTER: the peer is gone then.
+# Kea's own failure detection is left as it is (max-unacked-clients 0): a
+# higher value would need that many clients left without an answer before
+# a partner that is really gone counts as gone.
+# Never during a maintenance of the node, which rules Kea itself; never
+# both nodes: a node whose partner is already in-maintenance is refused
+# by the same check a maintenance command makes.
+
+# Usage: _ha_kea_dhcp_roles [refresh] (ha-cluster config loaded)
+# Sets _hkr_fault, _hkr_master and _hkr_backup: how many of the VRRP
+# instances with an enabled VIP on an interface that has DHCP pools are in
+# each state, by the states recorded. The list of those instances is kept
+# in _hkr_instances for the process (the monitor asks again every minute).
+_hkr_instances=""
+_hkr_listed=0
+_hkr_fault=0
+_hkr_master=0
+_hkr_backup=0
+_ha_kea_dhcp_instance_of_vip() {
+	local enabled interface instance logical
+
+	config_get_bool enabled "$1" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+	config_get interface "$1" interface ""
+	config_get instance "$1" vrrp_instance ""
+	[ -n "$interface" ] && [ -n "$instance" ] || return 0
+	_ha_is_safe_identifier "$instance" || return 0
+	case " $_hkr_instances " in
+		*" $instance "*) return 0 ;;
+	esac
+	for logical in $(_ha_logical_ifaces_of "$interface"); do
+		[ -n "$(_ha_dhcp_pools_of "$logical")" ] || continue
+		_hkr_instances="$_hkr_instances $instance"
+		return 0
+	done
+}
+
+_ha_kea_dhcp_roles() {
+	local instance
+
+	if [ "$_hkr_listed" -eq 0 ] || [ "$1" = "refresh" ]; then
+		_hkr_instances=""
+		config_foreach _ha_kea_dhcp_instance_of_vip vip
+		_hkr_listed=1
+	fi
+	_hkr_fault=0
+	_hkr_master=0
+	_hkr_backup=0
+	for instance in $_hkr_instances; do
+		ha_role_of "$instance"
+		case "$_hr_role" in
+			FAULT) _hkr_fault=$((_hkr_fault + 1)) ;;
+			MASTER) _hkr_master=$((_hkr_master + 1)) ;;
+			BACKUP) _hkr_backup=$((_hkr_backup + 1)) ;;
+		esac
+	done
+}
+
+# Usage: _ha_kea_peers_silent (ha-cluster config loaded)
+# No peer of the cluster answers on its address, at this look and at the
+# one before. One look alone may be a ping that was lost.
+_hks_peers=0
+_hks_answers=0
+_ha_kea_peer_ping() {
+	local vrrp_only address
+
+	config_get_bool vrrp_only "$1" vrrp_only 0
+	[ "$vrrp_only" -eq 1 ] && return 0
+	config_get address "$1" address ""
+	[ -n "$address" ] || return 0
+	_hks_peers=$((_hks_peers + 1))
+	case "$address" in
+		*:*) ping6 -c 1 -W 1 -- "$address" >/dev/null 2>&1 ;;
+		*) ping -c 1 -W 1 -- "$address" >/dev/null 2>&1 ;;
+	esac && _hks_answers=$((_hks_answers + 1))
+	return 0
+}
+
+_ha_kea_peers_silent() {
+	local misses=0
+
+	_hks_peers=0
+	_hks_answers=0
+	config_foreach _ha_kea_peer_ping peer
+	if [ "$_hks_peers" -eq 0 ] || [ "$_hks_answers" -gt 0 ]; then
+		rm -f "$HA_KEA_ASIDE_MISSES"
+		return 1
+	fi
+	[ -r "$HA_KEA_ASIDE_MISSES" ] && read -r misses < "$HA_KEA_ASIDE_MISSES"
+	_ha_is_uint "$misses" || misses=0
+	misses=$((misses + 1))
+	echo "$misses" > "$HA_KEA_ASIDE_MISSES"
+	[ "$misses" -ge 2 ]
+}
+
+# Usage: _ha_kea_aside_note <text>
+# Logs a refusal once, not at every look of the monitor
+_ha_kea_aside_note() {
+	local last=""
+
+	[ -r "$HA_KEA_ASIDE_NOTE" ] && IFS= read -r last < "$HA_KEA_ASIDE_NOTE"
+	[ "$last" = "$1" ] && return 0
+	printf '%s\n' "$1" > "$HA_KEA_ASIDE_NOTE"
+	ha_log_warning "$1"
+}
+
+# Usage: _ha_kea_serving
+# A Kea daemon of this node with HA is in a state that answers clients
+_ha_kea_serving() {
+	local daemon
+
+	for daemon in dhcp4 dhcp6; do
+		_ha_kea_ha_state "$daemon"
+		[ "$_hk_ha" -eq 1 ] || continue
+		case "$_hk_state" in
+			hot-standby|load-balancing|partner-down) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+# Usage: _ha_kea_in_touch
+# Every Kea daemon of this node with HA hears its partner now (and there
+# is one): the communication is not interrupted and the partner's last
+# state is a real one
+_ha_kea_in_touch() {
+	local daemon seen=0
+
+	for daemon in dhcp4 dhcp6; do
+		_ha_kea_ha_state "$daemon"
+		[ "$_hk_ha" -eq 1 ] || continue
+		seen=1
+		[ "$_hk_interrupted" = "1" ] || [ "$_hk_interrupted" = "true" ] && return 1
+		case "$_hk_partner_state" in
+			""|unavailable) return 1 ;;
+		esac
+	done
+	[ "$seen" -eq 1 ]
+}
+
+# Usage: ha_kea_follow_role [monitor|verify|event] (ha-cluster config loaded)
+# One look, as described above. "monitor" is the monitor's look every few
+# seconds, "verify" its look once a minute, which also asks Kea whether it
+# still is where the mark says and lists the instances anew; "event" comes
+# after a VRRP report and does not count unanswered peers. One at a time,
+# and never beside a maintenance command.
+ha_kea_follow_role() {
+	local how="${1:-monitor}"
+
+	ha_ensure_run_dir || return 0
+	if ! ha_dhcp_backend_is_kea || [ "$(ha_maintenance_mode)" != "none" ]; then
+		# Not Kea's, or a maintenance of the node: that one rules Kea, and
+		# its end takes Kea out of it
+		rm -f "$HA_KEA_ASIDE" "$HA_KEA_ASIDE_MISSES" "$HA_KEA_ASIDE_NOTE"
+		return 0
+	fi
+	# Here and not under the locks below, which are taken in subshells:
+	# the monitor keeps the list of instances from one look to the next
+	if [ "$how" = "verify" ]; then
+		_ha_kea_dhcp_roles refresh
+	else
+		_ha_kea_dhcp_roles
+	fi
+	[ -n "$_hkr_instances" ] || return 0
+	(
+		flock -n 5 || exit 0
+		(
+			flock -n -x 7 || exit 0
+			# Entered meanwhile: the command has the lock no more, and
+			# the maintenance is its own
+			[ "$(ha_maintenance_mode)" = "none" ] || exit 0
+			_ha_kea_follow_role "$how"
+		) 7>>"$HA_MAINTENANCE_LOCK"
+	) 5>>"$HA_KEA_ASIDE_LOCK"
+	return 0
+}
+
+_ha_kea_follow_role() {
+	local how="$1" kind="" want="" problem
+
+	[ -r "$HA_KEA_ASIDE" ] && read -r kind _ < "$HA_KEA_ASIDE"
+
+	if [ "$_hkr_fault" -gt 0 ]; then
+		want="fault"
+	elif [ "$_hkr_master" -gt 0 ]; then
+		want=""
+		rm -f "$HA_KEA_ASIDE_MISSES"
+	elif [ "$_hkr_backup" -gt 0 ]; then
+		if [ "$how" = "event" ]; then
+			# Unanswered peers are counted by the monitor alone
+			want="$kind"
+			[ "$kind" = "fault" ] && want=""
+		elif _ha_kea_peers_silent; then
+			want="link"
+		fi
+	else
+		# No state recorded yet (a start): nothing to follow
+		return 0
+	fi
+
+	case "$kind:$want" in
+		:fault)
+			if problem="$(ha_maintenance_peer_problem)"; then
+				_ha_kea_aside_note "A DHCP interface of this node is in FAULT, but Kea stays as it is: $problem"
+				return 0
+			fi
+			ha_log_warning "A DHCP interface of this node is in FAULT: Kea goes in-maintenance, its partner serves every client"
+			ha_kea_maintenance enter
+			echo "fault $(date +%s)" > "$HA_KEA_ASIDE"
+			rm -f "$HA_KEA_ASIDE_NOTE"
+			;;
+		:link)
+			# Only a Kea that takes its partner for gone, or will in a
+			# moment: one that is in touch has its partner
+			_ha_kea_in_touch && return 0
+			ha_log_warning "No peer answers on the sync link while the MASTER is on the LAN: Kea of this BACKUP goes in-maintenance, the MASTER's Kea serves"
+			HA_KEA_ENTER_WAIT=0 HA_KEA_ENTER_ALONE="the sync link is down, the MASTER's Kea serves" \
+				ha_kea_maintenance enter
+			echo "link $(date +%s)" > "$HA_KEA_ASIDE"
+			;;
+		fault:fault|link:link)
+			# Kea restarted meanwhile. With the sync link down nothing
+			# puts it back, and it would take its partner for gone and
+			# serve after max-response-delay: looked at every time. With
+			# a FAULT its partner puts it back at the first heartbeat:
+			# the minute's look is enough.
+			if { [ "$kind" = "link" ] || [ "$how" = "verify" ]; } && _ha_kea_serving; then
+				ha_log_warning "Kea serves although it is kept in-maintenance ($kind): put back"
+				HA_KEA_ENTER_WAIT=0 HA_KEA_ENTER_ALONE="put back ($kind)" ha_kea_maintenance enter
+			fi
+			;;
+		link:fault)
+			# The sync link is down and now the LAN as well: stays
+			# in-maintenance, as a fault from here on
+			echo "fault $(date +%s)" > "$HA_KEA_ASIDE"
+			;;
+		fault:link)
+			echo "link $(date +%s)" > "$HA_KEA_ASIDE"
+			;;
+		fault:)
+			ha_log_info "No DHCP interface of this node is in FAULT any more: Kea leaves in-maintenance"
+			ha_kea_maintenance leave
+			rm -f "$HA_KEA_ASIDE" "$HA_KEA_ASIDE_NOTE"
+			;;
+		link:)
+			if [ "$_hkr_master" -gt 0 ]; then
+				# The peer is gone from the LAN too: this node serves
+				ha_log_warning "This node became MASTER while its Kea was kept in-maintenance: Kea serves again"
+				ha_kea_maintenance takeover
+				rm -f "$HA_KEA_ASIDE"
+			elif _ha_kea_in_touch; then
+				ha_log_info "Kea is in touch with its partner again: it leaves in-maintenance"
+				ha_kea_maintenance leave
+				rm -f "$HA_KEA_ASIDE"
+			fi
+			;;
+	esac
+	return 0
+}
+
+# Usage: ha_stop_kea_aside
+# When the service stops: a Kea that ha-cluster kept in-maintenance comes
+# back, since nothing would watch it any more
+ha_stop_kea_aside() {
+	[ -e "$HA_KEA_ASIDE" ] || return 0
+	rm -f "$HA_KEA_ASIDE" "$HA_KEA_ASIDE_MISSES" "$HA_KEA_ASIDE_NOTE"
+	ha_dhcp_backend_is_kea || return 0
+	ha_log_info "HA cluster stopped: Kea leaves the in-maintenance it was kept in"
+	ha_kea_maintenance takeover
 }
 
 # Usage: ha_maintenance_kea_resume_bg

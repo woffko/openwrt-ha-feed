@@ -195,6 +195,9 @@ service_stopped() {
 	# Kept for a node that only stops, ended for one that leaves
 	ha_stop_maintenance
 
+	# A Kea kept in-maintenance for a FAULT or a lost sync link comes back
+	ha_stop_kea_aside
+
 	# Kept for a node that only stops, removed for one that leaves
 	ha_stop_firewall
 

@@ -624,6 +624,43 @@ Back to dnsmasq: set the option to `dnsmasq` (or, with `auto`, stop Kea
 in luci-app-kea), and apply. lease-sync starts again if `lease_sync` is
 `1`, and the guard drops DHCPv6 on a BACKUP again.
 
+### Kea follows the role of the node
+
+Kea's two servers watch each other over the address the cluster gives them
+for the peer, which is usually a sync link of its own, and know nothing of
+VRRP. Two failures would leave the LAN without a proper DHCP server, so
+ha-cluster watches for them (the monitor, every few seconds, and at every
+VRRP report). VRRP on the LAN is the witness:
+
+- **A DHCP interface of this node fails** (the LAN port loses its carrier,
+  a check of the instance fails: the VRRP instance on an interface with
+  DHCP pools is in FAULT) while the sync link works. The peer takes the
+  VIPs, but Kea's heartbeats still pass over the sync link, so Kea's
+  partner would never serve, and this node's Kea no longer hears the
+  clients. ha-cluster puts this node's Kea in-maintenance, as a maintenance
+  of the node does, when the peer can take over; the partner then serves
+  every client. Kea comes back when no such instance is in FAULT.
+- **The sync link is lost** while both nodes are on the LAN. Each Kea
+  takes its partner for gone, and both would answer every client from one
+  pool. The node that is BACKUP on the DHCP interfaces hears the MASTER on
+  the LAN, so it knows the peer is alive: when no peer answers on its
+  address at two looks in a row and Kea has lost its partner, it puts its
+  own Kea in-maintenance, and the MASTER's Kea is the only one that
+  serves. Its Kea comes back when the partner is heard again, and serves
+  at once if the node becomes MASTER (the peer is then gone from the LAN
+  as well).
+
+Kea's own failure detection stays as luci-app-kea sets it
+(`max-unacked-clients` 0): a partner that is really gone is replaced after
+`max-response-delay`, as before. Nothing of this happens during a
+maintenance of the node, which rules Kea itself.
+
+The status has `kea_aside` (`fault` or `link`) while Kea is kept
+in-maintenance this way, LuCI's Status page says so, and the log has a
+line for each step. A bridge that keeps its carrier when one of its ports
+fails does not reach FAULT by itself: a dataplane check on the instance
+is what tells such a failure.
+
 ### What the status says about Kea
 
 `ubus call ha-cluster status` gives `dhcp_backend`, the server the node

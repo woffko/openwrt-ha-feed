@@ -16,6 +16,10 @@
 #                    every minute the states recorded checked against
 #                    keepalived's own, and Kea put back in-maintenance when
 #                    the node is in maintenance and Kea is not
+#   role kea-follow  started in the background after a VRRP report: Kea
+#                    in-maintenance while a DHCP interface of the node is
+#                    in FAULT, and serving again when the node becomes
+#                    MASTER (ha_kea_follow_role; the monitor looks as well)
 #   role kea-resume  started in the background during a maintenance (at a
 #                    start of the service, at a BACKUP report, by the
 #                    monitor): puts Kea back in-maintenance once it has
@@ -86,8 +90,15 @@ case "$1" in
 		ha_role_record "${NAME:-}" "$ACTION" || exit 0
 		# The node in maintenance becomes MASTER: the peer is gone
 		ha_maintenance_on_role "$NAME" "$ACTION"
-		[ -n "$(ha_uplinks)" ] || exit 0
-		"$0" reconcile </dev/null >/dev/null 2>&1 &
+		[ -n "$(ha_uplinks)" ] && "$0" reconcile </dev/null >/dev/null 2>&1 &
+		# Kea follows the role of the node (a FAULT on a DHCP interface,
+		# MASTER while it was kept in-maintenance): in the background,
+		# it may wait for Kea's partner
+		ha_dhcp_backend_is_kea && "$0" kea-follow </dev/null >/dev/null 2>&1 &
+		;;
+	kea-follow)
+		role_enabled || exit 0
+		ha_kea_follow_role event
 		;;
 	reconcile)
 		role_enabled || exit 0
@@ -105,6 +116,12 @@ case "$1" in
 				# A Kea that serves while the node is in maintenance
 				# (it came up after the wait for it had ended)
 				[ "$n" -eq 0 ] && ha_maintenance_kea_check
+				# Kea follows the role of the node outside a maintenance
+				if [ "$n" -eq 0 ]; then
+					ha_kea_follow_role verify
+				else
+					ha_kea_follow_role monitor
+				fi
 			fi
 			n=$(((n + 1) % 12))
 			sleep "$HA_ROLE_MONITOR_INTERVAL"
@@ -161,7 +178,7 @@ case "$1" in
 		exec 8>&-
 		;;
 	*)
-		echo "Usage: $0 event|reconcile|monitor|kea-resume|sysupgrade" >&2
+		echo "Usage: $0 event|reconcile|monitor|kea-resume|kea-follow|sysupgrade" >&2
 		exit 1
 		;;
 esac
