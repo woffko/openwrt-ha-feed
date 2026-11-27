@@ -89,8 +89,10 @@ start_service() {
 	procd_close_instance
 
 	# The uplinks in line between keepalived's reports: netifd that stopped
-	# retrying, an interface brought up by hand on a node that is not MASTER
-	if [ -n "$(ha_uplinks)" ]; then
+	# retrying, an interface brought up by hand on a node that is not MASTER.
+	# With Kea also without uplinks: the monitor puts a Kea that was
+	# restarted during a maintenance back in-maintenance.
+	if [ -n "$(ha_uplinks)" ] || ha_dhcp_backend_is_kea; then
 		procd_open_instance monitor
 		procd_set_param command "$HA_ROLE_BIN" monitor
 		procd_set_param respawn
@@ -131,10 +133,15 @@ start_service() {
 service_started() {
 	ha_reconcile_ipv6_guard
 	if [ -z "${HA_START_FAILED:-}" ]; then
+		# No state of an instance the new config no longer has
+		ha_role_prune
 		# The uplinks in line with the states recorded: keepalived reports
 		# no state that a reload keeps
 		config_load ha-cluster
-		[ -n "$(ha_uplinks)" ] && "$HA_ROLE_BIN" reconcile </dev/null >/dev/null 2>&1 &
+		# In the background without rc.common's lock (descriptor 1000):
+		# the reconcile waits for an up_delay that runs, and would hold
+		# every other call of this script up for as long
+		[ -n "$(ha_uplinks)" ] && "$HA_ROLE_BIN" reconcile </dev/null >/dev/null 2>&1 1000>&- &
 		# Kea back in-maintenance once it has joined its partner
 		[ "$(ha_maintenance_mode)" != "none" ] && ha_maintenance_kea_resume_bg
 	fi
@@ -310,6 +317,10 @@ maintenance() {
 		exec 8>&-
 		return 1
 	fi
+	# Not cut short by Ctrl-C or a lost SSH session: a hand-over stopped in
+	# the middle left the 'master' uplinks held and, in persistent mode,
+	# the node in FAULT instead of the last candidate
+	trap '' INT HUP
 	echo "$(date '+%Y-%m-%d %H:%M:%S') maintenance $action${force:+ $force}: running" > "$HA_MAINTENANCE_LAST"
 	if [ -n "$mode" ]; then
 		out="$(ha_maintenance_enter "$mode" "$force")"
@@ -340,6 +351,7 @@ maintenance() {
 	echo "$(date '+%Y-%m-%d %H:%M:%S') maintenance $action${force:+ $force}: $(printf '%s\n' "$out" | tail -n 1)" > "$HA_MAINTENANCE_LAST"
 	flock -u 8
 	exec 8>&-
+	trap - INT HUP
 	return "$rc"
 }
 

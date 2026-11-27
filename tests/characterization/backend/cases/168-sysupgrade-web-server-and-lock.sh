@@ -4,7 +4,9 @@
 # timer of an attempt that failed starts nothing under a later attempt, and
 # "maintenance off" takes the mark away and starts the server at once.
 # "role sysupgrade" takes the lock of the maintenance commands and goes on
-# without it when one of them holds it too long.
+# without it when one of them holds it too long. A web server that does not
+# run (stopped or disabled by the user) is left alone: not stopped, no
+# mark, not started by "maintenance off".
 . "$CHAR/backend/uplinks.inc"
 uci set network.wan.auto=0
 uplink_section wan wan master main
@@ -24,8 +26,18 @@ web_calls() { grep -c "^uhttpd $1\$" "$CHAR_LOG"; }
 mark() { [ -e "$HA_UHTTPD_RESTORE" ] && echo yes || echo no; }
 
 case_after() {
-	printf '#!/bin/sh\necho "uhttpd $*" >> "$CHAR_LOG"\n' > /etc/init.d/uhttpd
+	# A stand-in that runs or not, as pgrep's stand-in reads it
+	cat > /etc/init.d/uhttpd <<-'EOS'
+		#!/bin/sh
+		echo "uhttpd $*" >> "$CHAR_LOG"
+		case "$1" in
+			start) grep -qx uhttpd /tmp/fake-running 2>/dev/null || echo uhttpd >> /tmp/fake-running ;;
+			stop) [ -f /tmp/fake-running ] && sed -i '/^uhttpd$/d' /tmp/fake-running ;;
+		esac
+		exit 0
+	EOS
 	chmod +x /etc/init.d/uhttpd
+	echo uhttpd >> /tmp/fake-running
 	ha_role_record main MASTER
 	ifstatus_fixture wan true false true
 	: > "$CHAR_LOG"
@@ -47,6 +59,14 @@ case_after() {
 	hook_run 60
 	echo "== third attempt: stopped $(web_calls stop), mark: $(mark)"
 	_char_killed=1
+	maintenance off > /tmp/maint.out 2>&1
+	echo "== off: rc=$?, started $(web_calls start), mark: $(mark)"
+
+	# The web server stopped by the user before an attempt that fails
+	/etc/init.d/uhttpd stop
+	: > "$CHAR_LOG"
+	hook_run 60
+	echo "== web server not running before: stopped $(web_calls stop), mark: $(mark)"
 	maintenance off > /tmp/maint.out 2>&1
 	echo "== off: rc=$?, started $(web_calls start), mark: $(mark)"
 

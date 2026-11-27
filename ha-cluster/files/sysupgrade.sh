@@ -14,7 +14,8 @@
 # kills it after 30 seconds (option timeout of /etc/config/rpcd) and would
 # leave a node that handed its roles over and never upgraded. LuCI's web
 # server stops first: the flash page takes the device as rebooted as soon
-# as a page of it answers again, and would go to the overview. It starts
+# as a page of it answers again, and would go to the overview. Only a web
+# server that runs is stopped, and it starts
 # again after 150 seconds if the upgrade does not go on: a timer does it
 # while the mark this hand-over left (uhttpd-restore in the run directory)
 # is still its own. A later sysupgrade writes another mark, so the timer of
@@ -42,12 +43,21 @@ ha_cluster_sysupgrade_hand_over() {
 	[ -x /etc/init.d/ha-cluster ] && pgrep keepalived >/dev/null 2>&1 || return 0
 	[ "$(uci -q get ha-cluster.config.enabled)" = "1" ] || return 0
 	command -v v >/dev/null 2>&1 && v "ha-cluster: handing this node's roles over (maintenance until reboot)"
-	if [ -x /etc/init.d/uhttpd ]; then
+	# Only a web server that runs: one the user has stopped or disabled is
+	# not started by the timer or by "maintenance" afterwards. One that an
+	# earlier attempt stopped (its mark still stands) counts as running:
+	# this attempt takes the mark over, or that attempt's timer would
+	# start the server under this one.
+	if [ -x /etc/init.d/uhttpd ] && { pgrep uhttpd >/dev/null 2>&1 ||
+	   [ -e "$ha_cluster_sysupgrade_uhttpd_mark" ]; }; then
 		/etc/init.d/uhttpd stop >/dev/null 2>&1
 		# Back after a while if the upgrade does not go on: the second
 		# stage ends every process before it writes the image. Without a
-		# mark (no run directory) the timer starts the server in any case.
+		# mark (the run directory cannot be made) the timer starts the
+		# server in any case.
 		ha_cluster_sysupgrade_token="$$.$(date +%s)"
+		[ -L "${ha_cluster_sysupgrade_uhttpd_mark%/*}" ] && rm -f "${ha_cluster_sysupgrade_uhttpd_mark%/*}"
+		mkdir -m 0700 -p "${ha_cluster_sysupgrade_uhttpd_mark%/*}" 2>/dev/null
 		[ -d "${ha_cluster_sysupgrade_uhttpd_mark%/*}" ] &&
 			echo "$ha_cluster_sysupgrade_token" 2>/dev/null > "$ha_cluster_sysupgrade_uhttpd_mark" ||
 			ha_cluster_sysupgrade_token=""

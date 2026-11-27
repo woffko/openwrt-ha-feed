@@ -14,7 +14,12 @@
 #                    in line (netifd that stopped retrying, an interface
 #                    brought up by hand on a node that is not MASTER), and
 #                    every minute the states recorded checked against
-#                    keepalived's own
+#                    keepalived's own, and Kea put back in-maintenance when
+#                    the node is in maintenance and Kea is not
+#   role kea-resume  started in the background during a maintenance (at a
+#                    start of the service, at a BACKUP report, by the
+#                    monitor): puts Kea back in-maintenance once it has
+#                    joined its partner, waiting two minutes at most
 #   role sysupgrade  from /lib/upgrade/ha-cluster.sh while /sbin/sysupgrade
 #                    writes the backup of the settings, before it hands the
 #                    image to procd: the hand-over of maintenance until
@@ -91,14 +96,23 @@ case "$1" in
 	monitor)
 		n=0
 		while :; do
-			if role_enabled && [ -n "$(ha_uplinks)" ]; then
-				# The states recorded against keepalived's own
-				[ "$n" -eq 0 ] && ha_role_sync
-				ha_role_locked ha_uplinks_reconcile
+			if role_enabled; then
+				if [ -n "$(ha_uplinks)" ]; then
+					# The states recorded against keepalived's own
+					[ "$n" -eq 0 ] && ha_role_sync
+					ha_role_locked ha_uplinks_reconcile
+				fi
+				# A Kea that serves while the node is in maintenance
+				# (it came up after the wait for it had ended)
+				[ "$n" -eq 0 ] && ha_maintenance_kea_check
 			fi
 			n=$(((n + 1) % 12))
 			sleep "$HA_ROLE_MONITOR_INTERVAL"
 		done
+		;;
+	kea-resume)
+		role_enabled || exit 0
+		ha_maintenance_kea_resume_once
 		;;
 	sysupgrade)
 		role_enabled || exit 0
@@ -142,9 +156,12 @@ case "$1" in
 		: > "$HA_ROLE_DIR/sysupgrade"
 		ha_close_ipv6_guard
 		ha_log_info "sysupgrade: roles handed over"
+		# Given back by name: a child that outlives this must not keep it
+		flock -u 8 2>/dev/null
+		exec 8>&-
 		;;
 	*)
-		echo "Usage: $0 event|reconcile|monitor|sysupgrade" >&2
+		echo "Usage: $0 event|reconcile|monitor|kea-resume|sysupgrade" >&2
 		exit 1
 		;;
 esac

@@ -278,6 +278,8 @@ lease-sync=1
 == after the timer of the first: started 1
 == third attempt: stopped 1, mark: yes
 == off: rc=0, started 1, mark: no
+== web server not running before: stopped 0, mark: no
+== off: rc=0, started 0, mark: no
 == under a held lock: rc=0, hold: yes
 sysupgrade: a maintenance command still runs, handing over without waiting for it
 == rc.d

@@ -2029,6 +2029,32 @@ _ha_dhcp_pool_serves_v4() {
 	return 0
 }
 
+# Usage: _ha_dnsmasq_serves_cluster (ha-cluster config loaded)
+# dnsmasq gives out DHCPv4 in a pool of a cluster interface
+_ha_dnsmasq_serves_cluster() {
+	local interface pool
+
+	for interface in $(_ha_cluster_dhcp_interfaces); do
+		for pool in $(_ha_dhcp_pools_of "$interface"); do
+			_ha_dhcp_pool_serves_v4 "$pool" && return 0
+		done
+	done
+	return 1
+}
+
+# Usage: _ha_dnsmasq_stays (ha-cluster config loaded)
+# What a switch to Kea that was refused leaves, for the message. A node
+# that follows the other node's switch (dhcp_backend 'auto') has the pools
+# as that node left them, switched off for Kea: "dnsmasq stays the DHCP
+# server" was not true there, the node had none.
+_ha_dnsmasq_stays() {
+	if _ha_dnsmasq_serves_cluster; then
+		echo "dnsmasq stays the DHCP server"
+	else
+		echo "the pools are switched off for Kea, as the other node left them: this node has no DHCP server for them until Kea runs here"
+	fi
+}
+
 # Usage: _ha_dhcp_pool_serves_v6 <pool>
 # dnsmasq answers DHCPv6 in a pool when it is the server of its Router
 # Advertisements and DHCPv6 is not disabled
@@ -2513,16 +2539,16 @@ _ha_switch_to_kea() {
 		_ha_kea_setup_note=""
 		_ha_kea_setup_written=0
 		if [ "$_ha_kea_unusable_conf" -eq 1 ] && ! _ha_kea_setup; then
-			_ha_dhcp_backend_problem "Kea could not be set up from dnsmasq's pools (see the system log): dnsmasq stays the DHCP server"
+			_ha_dhcp_backend_problem "Kea could not be set up from dnsmasq's pools (see the system log): $(_ha_dnsmasq_stays)"
 			return 1
 		fi
 		if [ "$_ha_kea_setup_written" -eq 0 ] || ! _ha_kea_usable; then
-			_ha_dhcp_backend_problem "Kea cannot take over: $_ha_kea_unusable_reason${_ha_kea_setup_note:+ ($_ha_kea_setup_note)}"
+			_ha_dhcp_backend_problem "Kea cannot take over: $_ha_kea_unusable_reason${_ha_kea_setup_note:+ ($_ha_kea_setup_note)}$(_ha_dnsmasq_serves_cluster || echo "; $(_ha_dnsmasq_stays)")"
 			return 1
 		fi
 	fi
 	if ! _ha_kea_import; then
-		_ha_dhcp_backend_problem "the import of dnsmasq's static leases into Kea failed (see the system log): dnsmasq stays the DHCP server"
+		_ha_dhcp_backend_problem "the import of dnsmasq's static leases into Kea failed (see the system log): $(_ha_dnsmasq_stays)"
 		return 1
 	fi
 
@@ -2534,7 +2560,7 @@ _ha_switch_to_kea() {
 	# A few seconds without a DHCP server rather than two of them
 	if ! pools="$(_ha_dhcp_pools_off)"; then
 		rm -f "$HA_DNSMASQ_LEASES_COPY"
-		_ha_dhcp_backend_problem "/etc/config/dhcp could not be written: dnsmasq stays the DHCP server"
+		_ha_dhcp_backend_problem "/etc/config/dhcp could not be written: $(_ha_dnsmasq_stays)"
 		return 1
 	fi
 	ha_restart_dnsmasq
@@ -3581,7 +3607,7 @@ ha_reconcile_ipv6_guard() {
 	[ -r "$handler" ] || handler="${HA_CLUSTER_ROOT}/etc/hotplug.d/keepalived/20-ipv6-backup-guard"
 	[ -r "$handler" ] || return 0
 
-	ACTION=RECONCILE TYPE=INSTANCE NAME= /bin/sh "$handler" >/dev/null 2>&1 &
+	ACTION=RECONCILE TYPE=INSTANCE NAME= /bin/sh "$handler" >/dev/null 2>&1 1000>&- &
 }
 
 # The migration script of this release, also run at the first boot of an
@@ -4262,7 +4288,9 @@ ha_uplinks_json() {
 # Usage: ha_role_locked <command...>
 # Runs the command under the lock of the role work (uplinks, maintenance),
 # waiting 30 seconds at most for it: a round that hangs does not hold up
-# the others for ever
+# the others for ever. Without the caller's descriptor 8, the lock of the
+# maintenance commands: this may outlive a caller that was ended (the
+# hand-over of a sysupgrade after its 15 seconds), and would keep that lock.
 ha_role_locked() {
 	ha_ensure_run_dir || return 1
 	(
@@ -4276,7 +4304,7 @@ ha_role_locked() {
 			sleep 1
 		done
 		"$@"
-	) 9>>"$HA_ROLE_LOCK"
+	) 9>>"$HA_ROLE_LOCK" 8>&-
 }
 
 # Usage: _ha_net_false <value>
@@ -4600,12 +4628,36 @@ _ha_keepalived_states() {
 	done
 }
 
+# Usage: ha_role_prune
+# Removes the states recorded for instances the generated keepalived config
+# no longer has: a section removed or renamed, or <section> and
+# <section>_v6 after its IPv4 VIPs came or went. keepalived reports nothing
+# for an instance that is gone, and a later config with that name again
+# would start from a state of long ago, MASTER perhaps, until the first
+# report or the monitor's check.
+ha_role_prune() {
+	local file name
+
+	[ -r "$KEEPALIVED_CONF" ] || return 0
+	for file in "$HA_ROLE_DIR"/instance.*; do
+		[ -f "$file" ] || continue
+		name="${file##*/instance.}"
+		# instance.<name>.<pid>: a record being written
+		case "$name" in
+			*.*) continue ;;
+		esac
+		grep -qxF "vrrp_instance $name {" "$KEEPALIVED_CONF" || rm -f "$file"
+	done
+	return 0
+}
+
 # Usage: ha_role_sync
 # The states recorded set to keepalived's own: a report that came out of
 # order or late, or that no handler got. Prints nothing; logs what it set.
 ha_role_sync() {
 	local name state role since
 
+	ha_role_prune
 	_ha_keepalived_states | while read -r name state; do
 		case "$state" in
 			MASTER|BACKUP|FAULT) ;;
@@ -5105,15 +5157,69 @@ ha_maintenance_on_role() {
 	return 0
 }
 
+# Usage: ha_maintenance_kea_check (ha-cluster config loaded)
+# The monitor's look at Kea while the node is in maintenance: a Kea daemon
+# with HA that says hot-standby or load-balancing is put back
+# in-maintenance. A Kea that is restarted or told to read its config again
+# during a maintenance does not need this: its partner, still
+# partner-in-maintenance, puts it back at the first heartbeat (seen on the
+# bench with Kea 3.0.4). It is for a Kea that was not running when the
+# maintenance was entered and came up after the two minutes that
+# ha_maintenance_kea_resume waits, and for both servers restarted at once.
+# Not while the node holds a role: the peer is gone then, and Kea serves
+# on purpose (takeover).
+ha_maintenance_kea_check() {
+	local daemon
+
+	[ "$(ha_maintenance_mode)" != "none" ] || return 0
+	ha_dhcp_backend_is_kea || return 0
+	if _ha_keepalived_states | grep -q ' MASTER$'; then
+		return 0
+	fi
+	for daemon in dhcp4 dhcp6; do
+		_ha_kea_ha_state "$daemon"
+		[ "$_hk_ha" -eq 1 ] || continue
+		case "$_hk_state" in
+			hot-standby|load-balancing)
+				ha_log_warning "Maintenance: Kea $daemon is not in-maintenance ($_hk_state): putting it back"
+				ha_maintenance_kea_resume_bg
+				return 0
+				;;
+		esac
+	done
+	return 0
+}
+
 # Usage: ha_maintenance_kea_resume_bg
-# ha_maintenance_kea_resume in the background, one at a time
+# ha_maintenance_kea_resume in the background, one at a time, as a process
+# of its own ("role kea-resume") and not as a subshell. A subshell is a
+# copy of the shell that calls this, with everything that shell has open:
+# the copies ash keeps of the standard output of an enclosing command
+# (the pipe of "maintenance ... | tail", of a $( ), of rpcd), and
+# descriptor 1000, the lock rc.common holds on
+# /var/lock/procd_ha-cluster.lock during a start or a reload. The resume
+# waits up to two minutes for Kea. As a subshell it kept both for that
+# long: "maintenance" on a node whose Kea was not running did not return
+# for two minutes, every other call of /etc/init.d/ha-cluster waited for
+# the lock, and a Kea started after the command had returned came up when
+# the wait had given up, and served while the node was in maintenance.
+# The copies of the standard output are closed when a program is run;
+# the lock descriptors (6 to 9 are ha-cluster's own) are closed here.
 ha_maintenance_kea_resume_bg() {
 	ha_dhcp_backend_is_kea || return 0
+	ha_ensure_run_dir || return 0
+	"${HA_ROLE_BIN:-/usr/lib/ha-cluster/role}" kea-resume \
+		</dev/null >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- 1000>&- &
+}
+
+# Usage: ha_maintenance_kea_resume_once
+# The work of "role kea-resume": ha_maintenance_kea_resume unless one runs
+ha_maintenance_kea_resume_once() {
 	ha_ensure_run_dir || return 0
 	(
 		flock -n 6 || exit 0
 		ha_maintenance_kea_resume
-	) 6>"$HA_CLUSTER_RUN_DIR/kea-resume.lock" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+	) 6>"$HA_CLUSTER_RUN_DIR/kea-resume.lock"
 }
 
 # Usage: ha_maintenance_kea_resume

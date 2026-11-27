@@ -112,6 +112,10 @@ instance [keepalived]
 	set [stdout] [1]
 	set [stderr] [1]
 end
+instance [monitor]
+	set [command] [/usr/lib/ha-cluster/role] [monitor]
+	set [respawn]
+end
 instance [owsync]
 	set [command] [/usr/bin/owsync] [daemon]
 	append [command] [-c] [/var/run/ha-cluster/owsync.conf]
