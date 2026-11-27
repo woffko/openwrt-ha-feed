@@ -1,0 +1,58 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: a stamp after the first completed session
+
+Nothing on disk says whether a node has ever synced with a peer. The
+database does not: the daemon and the one-shot commands write it from
+their first scan of the directory, before any session. ha-cluster needs
+the answer for a router that joins a working cluster (its option
+sync_join): the join must be refused on a node that has synced before,
+where the option can only be a mistake, and must not be refused on a new
+router whose owsync merely ran once while its peer was out of reach.
+
+A session that ended well, started by this node or by the peer, leaves
+an empty file next to the database, "<database>.synced". It is created
+once (O_EXCL) and never touched again, so a session costs no write after
+the first. Nothing in owsync reads it, and the wire protocol does not
+change: a node with the patch syncs with a node without it.
+
+diff -ru a/src/net.c b/src/net.c
+--- a/src/net.c
++++ b/src/net.c
+@@ -856,6 +856,28 @@
+         log_warning("Files changed: could not run %s", on_change_program);
+ }
+ 
++/*
++ * Leaves "<database>.synced" when a session with a peer ended well. The
++ * database does not say that: it is written from the first scan, before
++ * any session. Created once and not touched again, so that a session
++ * costs no write. An empty file; who needs to know whether this node has
++ * ever synced with a peer looks for it.
++ */
++static void mark_synced(const char *db_path) {
++    char path[MAX_PATH_LEN];
++
++    if (!db_path) return;
++    int n = snprintf(path, sizeof(path), "%s.synced", db_path);
++    if (n < 0 || (size_t)n >= sizeof(path)) return;
++    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
++    if (fd >= 0) {
++        close(fd);
++        log_info("First completed session with a peer: wrote %s", path);
++    } else if (errno != EEXIST) {
++        log_warning("Cannot write %s: %s", path, strerror(errno));
++    }
++}
++
+ static int handle_protocol(channel_t *channel, const char *root, const char *db_path,
+                            file_filter_t *filter, int64_t clock_offset) {
+     uint64_t now = get_time_sec() + clock_offset;
+@@ -1244,6 +1266,8 @@
+     file_state_list_free(local_files);
+     database_free(db);
+ 
++    mark_synced(db_path);
++
+     if (received_new_files || deletion_performed)
+         run_on_change();
+     return OWSYNC_OK;

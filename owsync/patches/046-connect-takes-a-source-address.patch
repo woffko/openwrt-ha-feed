@@ -1,0 +1,54 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: the one-shot connect takes a source address
+
+The daemon reads a peer as "addr[,source_addr]" and binds the source
+before it connects, so that a node never dials its peer from a virtual
+address it happens to hold. The one-shot "connect" took the address only
+and left the source to the kernel. A peer whose listener and firewall
+accept the node's own address alone then refuses the session when the
+kernel picks another one.
+
+"connect" reads its argument as the daemon reads a peer: "addr" as
+before, or "addr,source_addr". ha-cluster's join of a new node passes the
+peer as its generated config writes it.
+
+diff -ru a/src/main.c b/src/main.c
+--- a/src/main.c
++++ b/src/main.c
+@@ -63,7 +63,7 @@
+     fprintf(stderr, "  %s genkey\n", prog_name);
+ #endif
+     fprintf(stderr, "  %s listen [OPTIONS]\n", prog_name);
+-    fprintf(stderr, "  %s connect <ADDR> [OPTIONS]\n", prog_name);
++    fprintf(stderr, "  %s connect <ADDR[,SOURCE]> [OPTIONS]\n", prog_name);
+     fprintf(stderr, "  %s daemon [OPTIONS]\n\n", prog_name);
+ 
+     fprintf(stderr, "Common Options:\n");
+@@ -501,11 +501,17 @@
+ 
+ static int cmd_connect(int argc, char **argv) {
+     if (argc < 3) {
+-        fprintf(stderr, "Usage: %s connect <HOST> [OPTIONS]\n", argv[0]);
++        fprintf(stderr, "Usage: %s connect <HOST[,SOURCE]> [OPTIONS]\n", argv[0]);
+         return 1;
+     }
+ 
++    /* "addr[,source_addr]", as a peer of the daemon is written */
+     char *peer_host = argv[2];
++    char *source_address = strchr(peer_host, ',');
++    if (source_address) {
++        *source_address++ = '\0';
++        if (*source_address == '\0') source_address = NULL;
++    }
+ 
+     cli_options_t opts;
+     if (parse_options(argc, argv, &opts, 3) != OWSYNC_OK) {
+@@ -551,7 +557,7 @@
+         fprintf(stderr, "Add include patterns (e.g., '-i *') to sync files.\n");
+     }
+ 
+-    int result = connect_peer(peer_host, opts.port, opts.key, opts.dir, opts.db, filter, opts.clock_offset, NULL);
++    int result = connect_peer(peer_host, opts.port, opts.key, opts.dir, opts.db, filter, opts.clock_offset, source_address);
+ 
+     file_filter_free(filter);
+     free_options(&opts);
