@@ -87,6 +87,10 @@ upgrading a node.
     monitor also looks once a minute for a Kea that serves during a
     maintenance and puts it back, and runs whenever Kea is the DHCP
     server, not only with uplinks;
+  - a stop, a restart of the service or a reboot of the MASTER closes the
+    `master` uplinks before keepalived is ended, in the order of a
+    maintenance. Before, the peer was MASTER and dialled while this node
+    still held the PPPoE session, and its first dial was refused;
   - the sysupgrade hook stops LuCI's web server only when it runs: one
     the user had stopped or disabled was started by the hook's timer or
     by `maintenance`. A second attempt takes over the mark of the first;

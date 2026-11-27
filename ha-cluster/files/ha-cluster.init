@@ -149,7 +149,23 @@ service_started() {
 }
 
 stop_service() {
+	local enabled
+
 	ha_log_info "Stopping HA cluster"
+
+	# The 'master' uplinks down while keepalived still holds the role, in
+	# the order of a maintenance: keepalived says goodbye when procd ends
+	# it, the peer is MASTER within a second and dials, and found the login
+	# still held for the seconds until service_stopped had closed the
+	# session (one CHAP refusal at every stop, restart and reboot of the
+	# MASTER). service_stopped removes the hold.
+	config_load ha-cluster
+	config_get_bool enabled config enabled 0
+	if [ "$enabled" -eq 1 ] && [ -n "$(ha_uplinks)" ] && procd_running ha-cluster keepalived &&
+		ha_ensure_run_dir && mkdir -p "$HA_ROLE_DIR"; then
+		: > "$HA_ROLE_DIR/hold"
+		ha_role_locked ha_uplinks_reconcile
+	fi
 
 	# procd stops the instances
 	return 0

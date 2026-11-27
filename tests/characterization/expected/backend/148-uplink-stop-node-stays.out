@@ -284,6 +284,7 @@ S25ha-cluster
 rc=0
 == log
 ha-cluster|daemon.info|Stopping HA cluster
+ha-cluster|daemon.warning|uplink wan: netifd has no interface 'wan'
 ha-cluster|daemon.info|HA cluster stopped but still enabled: IPv6 BACKUP guard stays closed
 ha-cluster|daemon.info|uplink wan: 'wan' down: HA cluster stopped
 ubus|call network.interface.wan down
@@ -301,6 +302,7 @@ keepalived.conf
 lease-sync.conf
 owsync.conf
 role
+role.lock
 uci-dhcp
 uci-firewall
 uci-network
