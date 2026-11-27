@@ -263,7 +263,13 @@ return view.extend({
 			]));
 		if (status.peer_maintenance)
 			earlierWarning.push(E('div', { 'class': 'alert-message notice' },
-				_('The peer is in maintenance: this node holds the roles and serves every DHCP client.')));
+				_('Kea of the peer is in-maintenance (the peer is in maintenance, or a DHCP interface of it is in FAULT): this node serves every DHCP client.')));
+		if (status.kea_aside === 'fault')
+			earlierWarning.push(E('div', { 'class': 'alert-message warning' },
+				_('A DHCP interface of this node is in FAULT: Kea of this node is in-maintenance, and its partner serves every DHCP client.')));
+		else if (status.kea_aside === 'link')
+			earlierWarning.push(E('div', { 'class': 'alert-message warning' },
+				_('The peer does not answer on the sync link while it is MASTER on the LAN: Kea of this node is in-maintenance, and the Kea of the MASTER serves.')));
 		if (status.maintenance_result)
 			earlierWarning.push(E('div', { 'class': 'alert-message' }, [
 				E('strong', {}, _('Last maintenance command:')), ' ',

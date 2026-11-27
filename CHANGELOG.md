@@ -14,7 +14,7 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r28, `luci-app-ha-cluster` 2.0.0-r18,
+packages are `ha-cluster` 2.0.0-r28, `luci-app-ha-cluster` 2.0.0-r19,
 `lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r5. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
@@ -76,6 +76,17 @@ upgrading a node.
     commands. It waits five seconds for a command that runs, then goes on
     without the lock, because the upgrade goes on in any case.
 - r28, from a joint review with the auditor of that build:
+  - Kea follows the role of the node outside a maintenance. Kea's
+    servers watch each other over the sync link and know nothing of VRRP:
+    when the MASTER lost its LAN, the peer took the VIPs and the uplink,
+    but no DHCP server answered on the LAN; when the sync link was lost,
+    both servers answered every client. Now a node whose DHCP interface is
+    in FAULT puts its Kea in-maintenance when the peer can take over, and
+    a BACKUP that cannot reach its peer over the sync link while it hears
+    the MASTER on the LAN puts its own Kea in-maintenance. Both come back
+    by themselves; a node that becomes MASTER serves at once. Kea's
+    failure detection is unchanged. See
+    [Kea follows the role of the node](ha-cluster/README.md#kea-follows-the-role-of-the-node);
   - `maintenance` on a node whose Kea was not running did not return for
     two minutes, and a Kea started afterwards served while the node was
     in maintenance. The wait that puts Kea back in-maintenance ran as a
@@ -375,6 +386,10 @@ upgrading a node.
   of a script came back as `&` or `<` at the next save. The remaining
   messages and status cells built from data (hook names, error texts,
   states, the generated key) go in as text.
+- r19: the Status page says when Kea of this node is kept in-maintenance
+  because a DHCP interface is in FAULT or the sync link is lost
+  (`kea_aside` of the status), and the notice about the peer's Kea in
+  maintenance names both causes.
 
 ### kea-dnsmasq-hosts (new, 1.0.0-r5)
 - The names of Kea's DHCP clients in dnsmasq's DNS, which takes no DDNS

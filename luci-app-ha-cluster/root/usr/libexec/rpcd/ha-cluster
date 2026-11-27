@@ -456,6 +456,15 @@ case "$1" in
 					json_add_string maintenance_result "$(grep -v '^$' "$HA_MAINTENANCE_LAST" | tail -n 3)"
 				fi
 				ha_maintenance_running && json_add_boolean maintenance_running 1
+				# Kea kept in-maintenance outside a maintenance of the node:
+				# a DHCP interface in FAULT, or the sync link lost on the
+				# BACKUP (ha_kea_follow_role)
+				if [ -r "$HA_KEA_ASIDE" ]; then
+					read -r kea_aside _ < "$HA_KEA_ASIDE"
+					case "$kea_aside" in
+						fault|link) json_add_string kea_aside "$kea_aside" ;;
+					esac
+				fi
 
 				# Kea is not run by ha-cluster and so is never what makes the
 				# cluster faulty; but a cluster whose DHCP server is down, deaf
