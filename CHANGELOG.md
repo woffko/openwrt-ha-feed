@@ -14,8 +14,8 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r26, `luci-app-ha-cluster` 2.0.0-r17,
-`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r4. See
+packages are `ha-cluster` 2.0.0-r27, `luci-app-ha-cluster` 2.0.0-r18,
+`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r6 and `dnsmasq-ha` 2.93-r5. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
 
@@ -65,6 +65,16 @@ upgrading a node.
     254 in keepalived, which takes 255 for the owner of the addresses and
     then ignores `nopreempt` and the weights of the checks;
   - the views put status and config data in as text, not as HTML.
+- r27, from the re-audit of that build:
+  - the timer that starts LuCI's web server again after a sysupgrade that
+    did not go on acts only while the mark of its own hand-over stands
+    (`uhttpd-restore` in the run directory): the timer of a failed attempt
+    no longer starts the server under a later attempt, where the flash
+    page would take the device as rebooted; `maintenance` takes the mark
+    away and starts the server at once;
+  - the hand-over of a sysupgrade runs under the lock of the maintenance
+    commands. It waits five seconds for a command that runs, then goes on
+    without the lock, because the upgrade goes on in any case.
 - r25: the hand-over at a sysupgrade is quick (a few seconds: the mark,
   Kea with four seconds for its partner, the uplinks down, keepalived
   removed from procd) instead of a full maintenance with a reload of the
@@ -331,6 +341,11 @@ upgrading a node.
   and the static leases of dnsmasq the import left for luci-app-kea.
 - The status lists an IPv6 guard handler of an earlier release under
   `earlier_model`, and reads the import's leftovers without eval.
+- r18: the hook editor sets the script as the value of its text field.
+  As a child of the element it was read as HTML, and an `&amp;` or `&lt;`
+  of a script came back as `&` or `<` at the next save. The remaining
+  messages and status cells built from data (hook names, error texts,
+  states, the generated key) go in as text.
 
 ### kea-dnsmasq-hosts (new, 1.0.0-r4)
 - The names of Kea's DHCP clients in dnsmasq's DNS, which takes no DDNS
@@ -357,6 +372,10 @@ upgrading a node.
   the bench, r4).
 
 ### lease-sync, owsync, dnsmasq-ha
+- dnsmasq-ha r5: the two patches OpenWrt carries for dnsmasq 2.93 since
+  2026-11 (`001-fix_severe_SIGHUP_reload_slowdown`,
+  `002-tune-store_name-fix-in-47864f3`): a reload on SIGHUP with large
+  hosts files no longer slows down with every reload.
 - lease-sync: DHCPv6 leases identified by DUID and IAID, the echo of a
   deletion asked of dnsmasq suppressed, peers checked before a message
   is used.
@@ -378,6 +397,10 @@ upgrading a node.
   first byte.
 
 ### Tests
+- The rootless characterization run no longer depends on what the rootfs
+  holds of keepalived-sync: its hooks are removed from the test root, and
+  the cases about them write their own. The init script is bound with the
+  mode the package installs (0755); case 168 runs the sysupgrade hook.
 - `tests/unit`: host-side tests, no container needed.
 - `tests/scripts/run-characterization-rootless.sh`: the T24 cases
   without podman or docker, in a bubblewrap sandbox over an unpacked
