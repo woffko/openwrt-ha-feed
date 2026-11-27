@@ -572,7 +572,7 @@ return view.extend({
 						]),
 						E('pre', {
 							'style': 'padding: 10px; border: 1px solid; border-radius: 4px; user-select: all; font-family: monospace; word-break: break-all;'
-						}, result.key),
+						}, [ result.key ]),
 						E('p', { 'style': 'margin-top: 1em;' }, _('Click the key above to select it.')),
 						E('div', { 'class': 'alert-message info', 'style': 'margin-top: 1em;' }, [
 							E('strong', {}, _('Next steps:')),

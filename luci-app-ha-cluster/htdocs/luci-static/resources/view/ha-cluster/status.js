@@ -105,8 +105,8 @@ return view.extend({
 		return E('tr', { 'class': 'tr' }, [
 			E('td', { 'class': 'td left', 'data-title': _('Service') }, name),
 			E('td', { 'class': 'td left', 'data-title': _('Status') }, statusBadge),
-			E('td', { 'class': 'td left', 'data-title': _('PID') }, String(pid)),
-			E('td', { 'class': 'td left', 'data-title': _('Uptime') }, uptime)
+			E('td', { 'class': 'td left', 'data-title': _('PID') }, [ String(pid) ]),
+			E('td', { 'class': 'td left', 'data-title': _('Uptime') }, [ uptime ])
 		]);
 	},
 
@@ -160,8 +160,8 @@ return view.extend({
 		return E('tr', { 'class': 'tr' }, [
 			E('td', { 'class': 'td left', 'data-title': _('Service') }, name),
 			E('td', { 'class': 'td left', 'data-title': _('Status') }, status),
-			E('td', { 'class': 'td left', 'data-title': _('PID') }, String(pid)),
-			E('td', { 'class': 'td left', 'data-title': _('Uptime') }, uptime)
+			E('td', { 'class': 'td left', 'data-title': _('PID') }, [ String(pid) ]),
+			E('td', { 'class': 'td left', 'data-title': _('Uptime') }, [ uptime ])
 		]);
 	},
 
@@ -245,7 +245,7 @@ return view.extend({
 		var keaImport = status.kea_import || {};
 		if (keaImport.left > 0)
 			earlierWarning.push(E('div', { 'class': 'alert-message warning' }, [
-				E('p', {}, _('%d static leases of dnsmasq are not in Kea: open the import from dnsmasq in the Kea pages to take them over.').format(keaImport.left)),
+				E('p', {}, [ _('%d static leases of dnsmasq are not in Kea: open the import from dnsmasq in the Kea pages to take them over.').format(keaImport.left) ]),
 				E('ul', {}, (keaImport.entries || []).map(function(entry) {
 					return E('li', {}, [ entry.name || '-', ' ', entry.identifier || '', ' ', entry.address || '',
 						' (', entry.status || '', ')' ]);
@@ -282,13 +282,13 @@ return view.extend({
 						E('tr', { 'class': 'tr' }, [
 							E('td', { 'class': 'td left' }, _('Cluster State')),
 							E('td', { 'class': 'td left' }, [
-								E('span', { 'class': stateClass }, clusterState)
+								E('span', { 'class': stateClass }, [ clusterState ])
 							])
 						]),
 						E('tr', { 'class': 'tr' }, [
 							E('td', { 'class': 'td left' }, _('Node Role')),
 							E('td', { 'class': 'td left' }, [
-								E('span', { 'class': roleClass }, nodeRole)
+								E('span', { 'class': roleClass }, [ nodeRole ])
 							])
 						]),
 						E('tr', { 'class': 'tr' }, [
@@ -306,9 +306,9 @@ return view.extend({
 						}
 						return E('tr', { 'class': 'tr' }, [
 							E('td', { 'class': 'td left', 'style': 'padding-left: 2em;' },
-								_('Instance: %s').format(name)),
+								[ _('Instance: %s').format(name) ]),
 							E('td', { 'class': 'td left' }, [
-								E('span', { 'class': instClass }, instRole)
+								E('span', { 'class': instClass }, [ instRole ])
 							])
 						]);
 					}) : []))
@@ -420,7 +420,7 @@ return view.extend({
 						details.push(_('down for %s').format(self.formatUptime(u.down_for)));
 					if (u.up_in)
 						details.push(_('up in %d s').format(u.up_in));
-					var stateCell = [ E('span', { 'class': label[0] }, label[1]) ];
+					var stateCell = [ E('span', { 'class': label[0] }, [ label[1] ]) ];
 					if (u.problem === 'down')
 						stateCell.push(' ', E('span', { 'class': 'label important' }, _('MASTER without uplink')));
 					else if (u.problem === 'down-on-backup')
@@ -457,7 +457,7 @@ return view.extend({
 				}, _('Enter anyway (force)'))));
 			ui.addNotification(_('Maintenance'), body, 'warning');
 		}, this)).catch(function(err) {
-			ui.addNotification(null, E('p', _('Maintenance command failed: %s').format(err.message || err)), 'danger');
+			ui.addNotification(null, E('p', {}, [ _('Maintenance command failed: %s').format(err.message || err) ]), 'danger');
 		});
 	},
 

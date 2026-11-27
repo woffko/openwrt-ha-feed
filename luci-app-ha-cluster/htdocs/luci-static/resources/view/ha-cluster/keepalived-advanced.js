@@ -58,13 +58,19 @@ return view.extend({
 		return L.resolveDefault(fs.read(filepath), '').then(L.bind(function(content) {
 			var displayContent = (content && content.trim()) ? content : hookTemplate;
 
-			ui.showModal(_('Edit Hook: %s').format(filename), [
-			E('p', {}, _('Shell script executed on VRRP state changes. Environment variables: $ACTION, $NAME, $TYPE.')),
-			E('textarea', {
+			// The script as the value of the field: a string child would be
+			// read as HTML, and "&amp;" or "&lt;" of a script would come
+			// back changed at the next save
+			var editor = E('textarea', {
 				'id': 'modal-hook-content',
 				'rows': 20,
 				'wrap': 'off'
-			}, displayContent),
+			});
+			editor.value = displayContent;
+
+			ui.showModal(_('Edit Hook: %s').format(filename), [
+			E('p', {}, _('Shell script executed on VRRP state changes. Environment variables: $ACTION, $NAME, $TYPE.')),
+			editor,
 			E('div', { 'class': 'right' }, [
 				E('button', {
 					'type': 'button',
@@ -95,9 +101,9 @@ return view.extend({
 
 		return fs.write(filepath, content).then(function() {
 			ui.hideModal();
-			ui.addNotification(null, E('p', _('Hook "%s" saved.').format(filename)), 'info');
+			ui.addNotification(null, E('p', {}, [ _('Hook "%s" saved.').format(filename) ]), 'info');
 		}).catch(function(e) {
-			ui.addNotification(null, E('p', _('Unable to save hook: %s').format(e.message)));
+			ui.addNotification(null, E('p', {}, [ _('Unable to save hook: %s').format(e.message) ]));
 		});
 	},
 
@@ -111,9 +117,9 @@ return view.extend({
 			ui.hideModal();
 			var row = document.querySelector('[data-hook="' + CSS.escape(filename) + '"]');
 			if (row) row.remove();
-			ui.addNotification(null, E('p', _('Hook "%s" deleted.').format(filename)), 'info');
+			ui.addNotification(null, E('p', {}, [ _('Hook "%s" deleted.').format(filename) ]), 'info');
 		}).catch(function(e) {
-			ui.addNotification(null, E('p', _('Unable to delete hook: %s').format(e.message)));
+			ui.addNotification(null, E('p', {}, [ _('Unable to delete hook: %s').format(e.message) ]));
 		});
 	},
 
@@ -135,9 +141,9 @@ return view.extend({
 
 		return fs.write(filepath, hookTemplate).then(function() {
 			nameInput.value = '';
-			ui.addNotification(null, E('p', _('Hook "%s" created. Reload page to edit.').format(filename)), 'info');
+			ui.addNotification(null, E('p', {}, [ _('Hook "%s" created. Reload page to edit.').format(filename) ]), 'info');
 		}).catch(function(e) {
-			ui.addNotification(null, E('p', _('Unable to create hook: %s').format(e.message)));
+			ui.addNotification(null, E('p', {}, [ _('Unable to create hook: %s').format(e.message) ]));
 		});
 	},
 
@@ -260,8 +266,8 @@ return view.extend({
 			});
 
 			if (blocking.length) {
-				ui.addNotification(null, E('p', _('The instance "%s" is the only one the dataplane check "%s" tracks. Edit or remove that check first.')
-					.format(section_id, blocking.map(function(check) { return check['.name']; }).join('", "'))), 'warning');
+				ui.addNotification(null, E('p', {}, [ _('The instance "%s" is the only one the dataplane check "%s" tracks. Edit or remove that check first.')
+					.format(section_id, blocking.map(function(check) { return check['.name']; }).join('", "')) ]), 'warning');
 				return Promise.resolve();
 			}
 
