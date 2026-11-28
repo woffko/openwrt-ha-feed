@@ -256,6 +256,7 @@ ha-cluster.conf
 script-on-renewal
 == ls /etc/ha-cluster
 dhcp-backend
+firewall-dhcp-server
 service_states
 == /etc/ha-cluster/service_states
 keepalived=1
@@ -392,6 +393,7 @@ ha-cluster.conf
 script-on-renewal
 == ls /etc/ha-cluster
 dhcp-backend
+firewall-dhcp-server
 service_states
 == /etc/ha-cluster/service_states
 keepalived=1

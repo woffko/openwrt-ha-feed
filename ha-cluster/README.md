@@ -222,6 +222,32 @@ seconds. Before, a DHCP pool or a firewall rule changed on one node
 reached the other node's file and stayed out of its running service until
 something else reloaded it.
 
+**What config sync does when something is in its way** (owsync 1.3.0-r8
+of this feed; the nodes of a cluster may be upgraded to it one at a time):
+
+- A change made while the peer is out of reach, off, rebooting, or with
+  the sync link down, is sent when the peer is back: owsync tries the
+  session again after a second or two, then at growing intervals up to
+  the poll interval (30 s). The log has one error line for the first
+  failure, `Sync to ... failed: ...; it is tried again until it
+  succeeds`, and one line when it worked, with the number of attempts.
+- Of two copies of a file the one changed last still wins, by the dates
+  the files have on the nodes where they were edited: a file that arrives
+  keeps the sender's date. Keep the clocks of the nodes in step all the
+  same (a session is refused when they differ by more than a minute).
+- A file you edit on a node while a session with its peer runs is not
+  replaced by that session; the next one compares it.
+- A session that is cut after it wrote a file still has the services
+  reload what arrived.
+- One session runs at a time. Two nodes that connect to each other at the
+  same moment turn each other away and come back at different moments; a
+  line `A session is running: connection from a peer closed` is no error.
+- A file larger than 16 MB is not synced; the log says so at every
+  session.
+- A file deleted on one node and edited on the other within one poll
+  interval may end up deleted on both: owsync learns of a deletion at its
+  next scan and dates it then.
+
 ### Which daemons run
 
 keepalived always runs while ha-cluster is enabled. The sync daemons run
@@ -308,11 +334,11 @@ goes to the peer in that same session, as any new file does.
 - A LuCI apply that is not confirmed yet holds the join back, because a
   rollback would put the files of before in place with a new date.
 - With Kea as the DHCP server, set `dhcp_backend` as on the working node
-  and set up Kea on the new router first. Each node writes the rules of
-  the cluster in `/etc/config/firewall` for the DHCP server it runs
-  itself; a new router that still runs dnsmasq writes the file without
-  the rules for Kea's high availability, after the join as at any other
-  time, and config sync carries that file to the working node.
+  and set up Kea on the new router. A new router that still runs dnsmasq
+  when it joins does no harm to the working node: it leaves the firewall
+  rules of Kea's high availability, which are the working node's, as they
+  are (see [Firewall](#firewall)). It serves no DHCP on the cluster
+  interfaces until Kea runs on it, and the status says so.
 
 ## Quick Start
 
@@ -1074,6 +1100,21 @@ What the clients need (DHCP, DNS, Router Advertisements) is not in these
 rules: that is the business of the zone the clients are in, as it is
 without a cluster.
 
+Three of the rules depend on the DHCP server, and the nodes need not run
+the same one at every moment: a router joins a pair on Kea before Kea is
+set up on it, or a pair is moved from one server to the other node by
+node. `HA-Cluster-lease-sync` is written by a node that runs dnsmasq;
+`HA-Cluster-Kea-HA` and `HA-Cluster-Kea-HA-drop` by a node that runs Kea,
+from the ports in its own Kea config. A node leaves the rules of the
+server it does not run as the config holds them, and its log names them:
+they are another node's, and the firewall config is one file for all. They
+go when the node that needed them switches to the other server (a node
+notes in `/etc/ha-cluster/firewall-dhcp-server` which server it ran when
+it last wrote the rules); a node that still runs the old server writes
+its own again at its next start or reload. Should such a rule stay behind
+with no node left to need it, as when the only node on Kea was taken out
+of the cluster, delete its section: no node writes it again.
+
 How the rules are kept:
 
 - They are written at every start and reload of ha-cluster, and only when
@@ -1081,7 +1122,8 @@ How the rules are kept:
   they were written, or when they are in the config and not in the loaded
   ruleset (as after owsync brought the config from another node).
 - They are rules of ha-cluster: a change made to one by hand, or another
-  section named `ha_cluster_...`, is undone at the next start. Rules of
+  section named `ha_cluster_...`, is undone at the next start (but for
+  the rules of the DHCP server this node does not run, see above). Rules of
   your own under other names are left alone, and so are changes you have
   staged in LuCI and not yet applied: ha-cluster writes its rules on a copy
   of the committed file, not through uci's pending changes, which `uci -t`
@@ -1344,12 +1386,14 @@ Available environment variables:
 /usr/lib/ha-cluster/ha-cluster.sh       Core library
 /usr/lib/ha-cluster/migrate-config      The upgrade's migration, for a config put back after it
 /etc/ha-cluster/dhcp-backend            The DHCP server the node runs (dnsmasq or kea), kept across sysupgrade
+/etc/ha-cluster/firewall-dhcp-server    The DHCP server the node ran when it last wrote the firewall rules of the cluster
 /etc/hotplug.d/iface/60-ha-cluster-kea  With Kea as the DHCP server: Kea rereads its config at ifup
 /etc/hotplug.d/keepalived/10-ha-cluster-role  Runs /usr/lib/ha-cluster/role at each VRRP state change
 /usr/lib/ha-cluster/role                The uplinks and Kea at VRRP changes; the uplink monitor
 /usr/lib/ha-cluster/owsync-join         Runs in place of owsync while the node joins a cluster (sync_join)
 /etc/owsync/owsync.db                   owsync's record of the synced files, kept across sysupgrade
 /etc/owsync/owsync.db.synced            Left by owsync after the first session with a peer that ended well
+/etc/owsync/owsync.db.lock              Held by the one owsync session or scan that works on the files (owsync 1.3.0-r8)
 /lib/upgrade/ha-cluster.sh              Hands the roles over at a sysupgrade (maintenance until reboot)
 /var/run/ha-cluster/                        Generated configs (runtime)
 ```

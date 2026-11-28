@@ -187,6 +187,7 @@ vrrp_instance main {
 (absent)
 == ls /etc/ha-cluster
 dhcp-backend
+firewall-dhcp-server
 service_states
 == /etc/ha-cluster/service_states
 keepalived=1

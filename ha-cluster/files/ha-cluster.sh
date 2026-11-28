@@ -56,6 +56,9 @@ KEA_SETUP_BIN="${KEA_SETUP_BIN:-/usr/libexec/luci-app-kea/setup-from-dnsmasq}"
 # The DHCP server this node runs for the cluster interfaces, dnsmasq or kea,
 # kept across reboots and upgrades: what a switch starts from
 HA_DHCP_BACKEND_STATE="${HA_DHCP_BACKEND_STATE:-${HA_CLUSTER_ROOT}/etc/ha-cluster/dhcp-backend}"
+# The DHCP server this node ran when it last wrote the firewall rules of the
+# cluster (see _ha_fw_foreign_sections)
+HA_FW_BACKEND_STATE="${HA_FW_BACKEND_STATE:-${HA_CLUSTER_ROOT}/etc/ha-cluster/firewall-dhcp-server}"
 # Why the server asked for is not the one in use, when it is not
 HA_DHCP_BACKEND_PROBLEM="${HA_CLUSTER_RUN_DIR}/dhcp-backend-problem"
 # What the last import printed
@@ -3283,12 +3286,81 @@ _ha_fw_in_config() {
 	_ha_fw_uci -q show firewall 2>/dev/null | sed -n 's/^firewall\.\(ha_cluster_[A-Za-z0-9_]*[.=].*\)$/\1/p'
 }
 
-# Usage: _ha_fw_delete_sections
-# Stages the removal of every rule of ha-cluster.
+# Usage: _ha_fw_foreign_sections (ha-cluster config loaded)
+# Prints the sections of the rules that are another node's to write.
+# Three rules depend on the DHCP server: the rule of lease-sync, which a
+# node that runs dnsmasq writes, and the two rules of Kea's high
+# availability, which a node that runs Kea writes from the ports in its own
+# Kea config. /etc/config/firewall is one file for all nodes (config sync),
+# and the nodes need not run the same server at the same moment: a router
+# joins a pair on Kea while it still runs dnsmasq, or a pair is moved from
+# one server to the other node by node. A node that wrote the file for its
+# own server alone took the other server's rules out of it on every node:
+# on the node that runs Kea, the rule its partner needs and the one that
+# keeps everybody else from the listener of Kea's high availability.
+# So a node leaves the rules of the server it does not run as the config
+# holds them: they are neither compared nor written. They go when the node
+# that needed them stops needing them: a node that ran that server when it
+# last wrote the rules, and runs the other one now, has nothing foreign and
+# writes the rules anew as a whole. Should another node still run the old
+# server, it writes its rules again at its next start or reload, which the
+# change of /etc/config/dhcp that comes with a switch brings about.
+_ha_fw_foreign_sections() {
+	local now was=""
+
+	now="$(ha_dhcp_backend)"
+	[ -r "$HA_FW_BACKEND_STATE" ] && read -r was < "$HA_FW_BACKEND_STATE"
+	case "$was" in
+		dnsmasq|kea) [ "$was" = "$now" ] || return 0 ;;
+	esac
+	if [ "$now" = "kea" ]; then
+		echo "ha_cluster_lease_sync"
+	else
+		echo "ha_cluster_kea ha_cluster_kea_drop"
+	fi
+}
+
+# Usage: _ha_fw_note_backend (ha-cluster config loaded)
+# Remembers the DHCP server the rules in the config were written for.
+_ha_fw_note_backend() {
+	local now was=""
+
+	now="$(ha_dhcp_backend)"
+	[ -r "$HA_FW_BACKEND_STATE" ] && read -r was < "$HA_FW_BACKEND_STATE"
+	[ "$was" = "$now" ] && return 0
+	mkdir -p "${HA_FW_BACKEND_STATE%/*}" &&
+		printf '%s\n' "$now" > "$HA_FW_BACKEND_STATE.new" &&
+		mv -f "$HA_FW_BACKEND_STATE.new" "$HA_FW_BACKEND_STATE"
+}
+
+# Usage: _ha_fw_own_in_config <sections to leave out>
+# The rules of ha-cluster in the config without those of the sections
+# given, as sorted lines: with rules left in place among rules written
+# anew, the order of the sections in the file is not the order they are
+# described in, and says nothing about whether the rules are the same.
+_ha_fw_own_in_config() {
+	local section pattern=""
+
+	for section in $1; do
+		pattern="${pattern:+$pattern|}$section"
+	done
+	if [ -n "$pattern" ]; then
+		_ha_fw_in_config | grep -vE "^($pattern)[.=]"
+	else
+		_ha_fw_in_config
+	fi | LC_ALL=C sort
+}
+
+# Usage: _ha_fw_delete_sections [<sections to keep>]
+# Stages the removal of every rule of ha-cluster but those of the sections
+# given.
 _ha_fw_delete_sections() {
-	local section
+	local section keep=" ${1:-} "
 
 	for section in $(_ha_fw_in_config | sed -n 's/^\(ha_cluster_[A-Za-z0-9_]*\)=.*/\1/p'); do
+		case "$keep" in
+			*" $section "*) continue ;;
+		esac
 		_ha_fw_uci -q delete "firewall.$section"
 	done
 }
@@ -3388,6 +3460,7 @@ ha_apply_firewall() {
 
 _ha_apply_firewall() {
 	local wanted description wanted_rules kind section option value names try=0 rc=0
+	local foreign kept
 
 	# No firewall config: no firewall4 to open anything in
 	uci -q show firewall >/dev/null 2>&1 || return 0
@@ -3415,10 +3488,21 @@ _ha_apply_firewall() {
 		fi
 		return 0
 	}
-	wanted_rules="$(printf '%s\n' "$description" | _ha_fw_as_shown)"
+	wanted_rules="$(printf '%s\n' "$description" | _ha_fw_as_shown | LC_ALL=C sort)"
 	names="$(printf '%s\n' "$description" | sed -n 's/^O|[^|]*|name|//p')"
 
-	if [ "$wanted_rules" = "$(_ha_fw_in_config)" ]; then
+	# The rules of the DHCP server this node does not run are another
+	# node's: left as the config holds them
+	foreign="$(_ha_fw_foreign_sections)"
+	kept=""
+	for section in $foreign; do
+		_ha_fw_in_config | grep -q "^$section=" && kept="${kept:+$kept }$section"
+	done
+	[ -z "$kept" ] ||
+		ha_log_info "Firewall rules of the cluster: $(echo "$kept" | sed 's/ha_cluster_lease_sync/HA-Cluster-lease-sync/; s/ha_cluster_kea_drop/HA-Cluster-Kea-HA-drop/; s/ha_cluster_kea/HA-Cluster-Kea-HA/') left as they are: they are for the DHCP server another node runs (this node runs $(ha_dhcp_backend))"
+
+	if [ "$wanted_rules" = "$(_ha_fw_own_in_config "$foreign")" ]; then
+		_ha_fw_note_backend
 		[ -z "$names" ] || _ha_fw_loaded "$names" || {
 			ha_log_info "Firewall rules of the cluster are in /etc/config/firewall and not loaded: reloading the firewall"
 			_ha_fw_reload
@@ -3427,7 +3511,7 @@ _ha_apply_firewall() {
 	fi
 
 	while :; do
-		_ha_fw_delete_sections
+		_ha_fw_delete_sections "$foreign"
 		# For tests: time for another writer to step in, were it not held off
 		[ -z "${HA_FIREWALL_HOLD:-}" ] || sleep "$HA_FIREWALL_HOLD"
 		while IFS='|' read -r kind section option value; do
@@ -3446,9 +3530,10 @@ EOF
 		# on what it holds now, if there is still something to write
 		try=$((try + 1))
 		_ha_iso_begin firewall || return 0
-		[ "$wanted_rules" = "$(_ha_fw_in_config)" ] && { rc=3; break; }
+		[ "$wanted_rules" = "$(_ha_fw_own_in_config "$foreign")" ] && { rc=3; break; }
 	done
 	if [ "$rc" -eq 3 ]; then
+		_ha_fw_note_backend
 		_ha_fw_loaded "$names" || _ha_fw_reload
 		return 0
 	fi
@@ -3465,6 +3550,7 @@ EOF
 		ha_log_error "firewall4 does not pass its check with the rules of ha-cluster: they are taken out again; open what the cluster needs from its peers yourself"
 		return 0
 	fi
+	_ha_fw_note_backend
 	_ha_fw_reload
 }
 

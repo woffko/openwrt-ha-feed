@@ -14,8 +14,8 @@ version.
 ## Fork changes (woffko/openwrt-ha-feed) on top of 2.0.0
 
 This fork merges upstream 2.0.0 and carries the changes below. Its
-packages are `ha-cluster` 2.0.0-r29, `luci-app-ha-cluster` 2.0.0-r20,
-`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r7 and `dnsmasq-ha` 2.93-r5. See
+packages are `ha-cluster` 2.0.0-r30, `luci-app-ha-cluster` 2.0.0-r20,
+`lease-sync` 1.2.1-r6, `owsync` 1.3.0-r8 and `dnsmasq-ha` 2.93-r5. See
 [Notes for this fork](ha-cluster/README.md#notes-for-this-fork) before
 upgrading a node.
 
@@ -375,6 +375,30 @@ upgrading a node.
   address. It names the entry to write, the device with this node's own
   address on it (found by the luci-app-kea session in Kea 3.0.4's
   cfg_iface.cc, measured three times over with three addresses).
+- r30: the firewall rules that depend on the DHCP server are written by
+  the node that runs that server, and left alone by a node that does not.
+  `/etc/config/firewall` is one file for all nodes (config sync), and
+  every node wrote the whole set for the server it ran itself: a node on
+  dnsmasq (a router that joined a pair on Kea before Kea was set up on
+  it, or the node not yet moved when a pair goes to Kea node by node)
+  wrote the file without `HA-Cluster-Kea-HA` and `HA-Cluster-Kea-HA-drop`,
+  and config sync took them from the node that runs Kea: the rule its
+  partner needs, and the one that keeps everybody else from the listener
+  of Kea's high availability, which takes commands from whoever connects.
+  The other way round a node on Kea took out `HA-Cluster-lease-sync`.
+  - A node leaves the rules of the server it does not run as the config
+    holds them; the log names them. They go when the node that needed
+    them stops needing them: a node that ran that server when it last
+    wrote the rules (noted in `/etc/ha-cluster/firewall-dhcp-server`) and
+    runs the other one now writes the rules anew as a whole. A node that
+    still runs the old server writes its own again at its next start or
+    reload, which the change of `/etc/config/dhcp` that comes with a
+    switch brings about.
+  - The rules in the config are compared with what the node needs
+    without regard to the order of their sections: rules left in place
+    among rules written anew are in another order than they are
+    described in, and two nodes would otherwise rewrite the file in
+    turns.
 
 ### luci-app-ha-cluster
 - Advanced WAN page for the uplink sections, with a description under
@@ -482,12 +506,50 @@ upgrading a node.
   daemon's peers are written (046). `on_change` (r6): a program
   run, without a shell and detached, after a sync session wrote or removed
   local files.
+- owsync r8: the four weak places a study of owsync found in how it
+  handles failures (two daemons on one machine, a bench pair, and the
+  routers, where the first one showed at a boot). The wire protocol is
+  unchanged: a node with r8 syncs with a node without it, so the nodes of
+  a cluster are upgraded one at a time. Tests: `tests/owsync/`.
+  - 080: a session that failed is tried again. A change made while the
+    peer was out of reach stayed on one node until the next change or
+    restart; the daemon now keeps at every peer until a session with it
+    has ended well, at growing intervals up to the poll interval, each
+    drawn anew. Sessions no longer run side by side: one lock for a
+    session and for the poller's scan; a session that finds it taken
+    gives way at once and is made again. A read or write on a session's
+    socket times out after 30 s (300), a connection after 10 s (the
+    kernel's two minutes).
+  - 060: a file that arrives keeps the date it has on the sender, and a
+    deletion the date of the peer's deletion. With the date of its
+    arrival, a second edit made right after the first, or any edit while
+    the receiver's clock was ahead, lost against its own predecessor and
+    was undone on both nodes. The receiver takes only what it asked for
+    and only if its SHA-256 is the one announced; a file edited on the
+    node while a session ran is neither replaced by the session nor
+    swallowed into the database unoffered; a date in the future (a clock
+    that was wrong) is set to the present in a session.
+  - 070: a session that is cut after it wrote a file still records the
+    file and runs `on_change`: the services no longer keep running a
+    config their file does not hold.
+  - 050: the database is synced to disk before and after its rename (an
+    empty database after a power cut forgets every deletion, and the
+    deleted files come back), temporary files are of the writing
+    thread's own and hidden, and a file a peer deleted is removed only
+    inside the sync root.
 - dnsmasq-ha: DHCPv6 leases carry the client DUID over ubus; the
   dhcp-script forwards only `NAME=value` lines to hotplug. The log line
   of an injected DHCPv6 lease shows the whole client id; it showed its
   first byte.
 
 ### Tests
+- `tests/owsync/run-tests.sh`: what the owsync patches 050-080 are for,
+  on two daemons of the owsync under test and a peer scripted by hand
+  that cuts a session, sends other content than it announced, or waits
+  while a file is edited. Fifty-two checks; twenty-two of them fail on
+  owsync 1.3.0-r7.
+- Cases 174 to 176: the firewall rules of the DHCP server a node does not
+  run are left alone, and go when the node that needed them switched.
 - The rootless characterization run no longer depends on what the rootfs
   holds of keepalived-sync: its hooks are removed from the test root, and
   the cases about them write their own. The init script is bound with the
