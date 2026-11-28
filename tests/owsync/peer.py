@@ -22,6 +22,9 @@
 #   wrong-content    announces the files and sends other content for them
 #   unasked          announces nothing and sends the files all the same
 #   hold             as "give", waiting for "go" before the content is sent
+#   take-and-drop    announces nothing, asks for the file want=NAME and says
+#                    it is done, all at once; reads 64 KiB of what the
+#                    daemon sends and drops the connection
 # Prints what the daemon asked for. Exit code 0 when the scenario ran.
 import hashlib
 import json
@@ -92,6 +95,17 @@ def main():
     if theirs is None or theirs.get("type") != "SyncState":
         print("no SyncState from the daemon")
         return 1
+
+    if scenario == "take-and-drop":
+        for message in ({"type": "SyncState", "files": []},
+                        {"type": "RequestFiles", "paths": [settings["want"]]},
+                        {"type": "EndOfSync"}):
+            send(sock, message)
+        recv_exact(sock, 65536)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sock.close()
+        print("dropped while the daemon was sending")
+        return 0
 
     announced = []
     if scenario != "unasked":

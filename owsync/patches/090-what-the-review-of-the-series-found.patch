@@ -1,0 +1,365 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: what the review of the patches 050 to 080 found
+
+The auditor's review of the four patches before (turn 7 of the joint
+review of 2026-11-27/28) found these, each checked in the code:
+
+- A file that could not be sent still made a session that ended well.
+  The sender did not look at what its sends returned: with the link gone
+  or the peer stalled it went on, read the end-of-sync the peer had sent
+  long before, cleared what it owed that peer and wrote the stamp of a
+  completed session. With a peer that does not ask again (an owsync
+  without patch 080, a listener, a one-shot session) the file stayed
+  where it was. A failed send now ends the session as failed.
+- The limit of a file's size was half the message size, but the file
+  travels as hex inside a JSON document with its path, which may be
+  encrypted: a file within a few dozen bytes of that limit was offered
+  and could never be sent, and no session with it would be complete. The
+  limit is MAX_FILE_SIZE now, 64 KiB below. A file the peer announces
+  that is larger (a peer without patch 060 announces every file) is not
+  asked for: with such a peer a session, and the join of a router, would
+  otherwise never be complete.
+- The lock file was released by closing its descriptor. The program run
+  after a change is a child that holds the same open file for the instant
+  before it closes its descriptors; until then the lock stood, and a
+  session right after (the daemon that follows the one-shot session of a
+  join) could find it taken. It is unlocked before it is closed.
+- Two nodes that connect to each other at the same moment each got an
+  error, "Failed to receive Hello", for what is expected: the peer closed
+  the connection because its own session ran. A connection that the peer
+  closes before its greeting is OWSYNC_ERROR_REFUSED now, said at info
+  level, and the daemon tries again within two seconds, three times,
+  before it counts it as a failure like any other (a peer that does not
+  know this node's address closes the same way). Only a connection
+  closed within two seconds counts as that: a peer that stays silent
+  until the timeout, and a greeting that cannot be decrypted (another
+  key) or read, are errors that say what they are.
+- What a session could not finish (a file not replaced, not sent, not
+  what was announced) is a warning the first time and a debug line while
+  the same session is being tried again; a file that cannot be put in
+  place says why.
+
+Not changed, and why: a change that arrives from one peer is not passed
+on to a third node that only the receiver connects to (as before the
+series; every node of a cluster lists every other). A file that is all in
+the kernel's send buffer when the link goes counts as sent, since the
+protocol has no acknowledgement: a peer with patch 080 notices that its
+session failed and asks again.
+
+The wire protocol does not change.
+
+diff -ru a/include/common.h b/include/common.h
+--- a/include/common.h
++++ b/include/common.h
+@@ -21,6 +21,14 @@
+ #define OWSYNC_MAX_MESSAGE_SIZE (32 * 1024 * 1024)
+ #endif
+ #define MAX_MESSAGE_SIZE OWSYNC_MAX_MESSAGE_SIZE
++/*
++ * The largest file that fits a message. Its content travels as hex, twice
++ * its size, inside a JSON document that also holds its path, and the
++ * document may be encrypted: 64 KiB are left for all of that. Half the
++ * message size, as the limit was, let a file within a few dozen bytes of
++ * it be offered that could not be sent.
++ */
++#define MAX_FILE_SIZE ((MAX_MESSAGE_SIZE - 65536) / 2)
+ 
+ #define CLOCK_SKEW_THRESHOLD 60                     /* Max acceptable clock difference in seconds */
+ #define TOMBSTONE_TTL_MS (30ULL * 24 * 3600 * 1000) /* Tombstone retention: 30 days in milliseconds */
+@@ -39,6 +47,7 @@ typedef enum {
+     OWSYNC_ERROR_VERSION_MISMATCH = -7, /* Protocol version mismatch */
+     OWSYNC_ERROR_INCOMPLETE = -8,    /* Session ran to its end, but not every file was applied or sent */
+     OWSYNC_ERROR_BUSY = -9,          /* Another session is running: nothing was done, try again */
++    OWSYNC_ERROR_REFUSED = -10,      /* The peer closed the connection before its greeting */
+ } owsync_error_t;
+ 
+ /* Dynamic byte buffer with automatic growth */
+diff -ru a/src/daemon.c b/src/daemon.c
+--- a/src/daemon.c
++++ b/src/daemon.c
+@@ -44,6 +44,7 @@ typedef struct {
+ typedef struct {
+     bool pending;           /* A session to this peer is owed */
+     uint32_t failures;      /* Sessions that failed in a row */
++    uint32_t refusals;      /* Times in a row the peer closed before its greeting */
+     uint64_t next_try_ms;   /* Not before this (monotonic clock) */
+     uint64_t backoff_ms;    /* The wait before the last retry */
+ } peer_state_t;
+@@ -247,11 +248,17 @@ static void *poller_thread(void *arg) {
+                 }
+                 peer->pending = false;
+                 peer->failures = 0;
++                peer->refusals = 0;
+                 peer->backoff_ms = 0;
+                 peer->next_try_ms = 0;
+-            } else if (result == OWSYNC_ERROR_BUSY) {
+-                /* Another session runs, most likely one this very peer
+-                 * started: no failure, and soon tried again */
++            } else if (result == OWSYNC_ERROR_BUSY ||
++                       (result == OWSYNC_ERROR_REFUSED && peer->failures == 0 && ++peer->refusals <= 3)) {
++                /* A session runs here, most likely one this very peer
++                 * started, or the peer turned this node away because one
++                 * runs there (the two connected to each other at the same
++                 * moment): no failure, and soon tried again. A peer that
++                 * goes on closing the connection is a failure like any
++                 * other, from the fourth time. */
+                 peer->next_try_ms = now + spread(&seed, RETRY_FIRST_MS);
+             } else {
+                 peer->failures++;
+diff -ru a/src/main.c b/src/main.c
+--- a/src/main.c
++++ b/src/main.c
+@@ -561,6 +561,9 @@ static int cmd_connect(int argc, char **argv) {
+ 
+     if (result == OWSYNC_ERROR_BUSY) {
+         fprintf(stderr, "Another owsync session is at work on this database: try again.\n");
++    } else if (result == OWSYNC_ERROR_REFUSED) {
++        fprintf(stderr, "The peer closed the connection before its greeting: it is at work on "
++                "another session (try again), or this node is not one of its peers.\n");
+     }
+ 
+     file_filter_free(filter);
+diff -ru a/src/net.c b/src/net.c
+--- a/src/net.c
++++ b/src/net.c
+@@ -17,6 +17,7 @@
+ #include <sys/stat.h>
+ #include <sys/syscall.h>
+ #include <sys/time.h>
++#include <time.h>
+ #include <libgen.h>
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -161,7 +162,12 @@ int net_session_enter(const char *db_path, bool wait) {
+ 
+ void net_session_leave(void) {
+     if (session_lock_fd >= 0) {
+-        close(session_lock_fd);  /* releases the flock */
++        /* Unlocked, not only closed: the program run after a change
++         * (run_on_change) is a child that holds this descriptor for the
++         * instant before it closes its descriptors, and a lock goes with
++         * the open file, not with one descriptor of it */
++        flock(session_lock_fd, LOCK_UN);
++        close(session_lock_fd);
+         session_lock_fd = -1;
+     }
+     pthread_mutex_unlock(&session_mutex);
+@@ -1035,9 +1041,42 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     log_debug("Waiting for peer Hello");
+ 
+     message_t *peer_hello = NULL;
+-    if (channel_receive(channel, &peer_hello) != OWSYNC_OK) {
+-        log_reach("Failed to receive Hello");
+-        return OWSYNC_ERROR_IO;
++    struct timespec hello_t0, hello_t1;
++    clock_gettime(CLOCK_MONOTONIC, &hello_t0);
++    int hello_rc = channel_receive(channel, &peer_hello);
++    if (hello_rc != OWSYNC_OK) {
++        clock_gettime(CLOCK_MONOTONIC, &hello_t1);
++        long waited_ms = (long)(hello_t1.tv_sec - hello_t0.tv_sec) * 1000 +
++                         (hello_t1.tv_nsec - hello_t0.tv_nsec) / 1000000;
++        /*
++         * A peer that is at work on another session closes a connection
++         * at once, before its greeting: often the session it has just
++         * started to this very node. No error, then, the first few times
++         * (the caller counts); a peer that does not know this node's
++         * address looks the same. Only that: a peer that stays silent
++         * until the timeout, a greeting that cannot be read (another
++         * key, encrypted against plain) are errors and are said as such.
++         */
++        if (hello_rc == OWSYNC_ERROR_IO && waited_ms < 2000) {
++            if (connect_quiet) {
++                log_debug("No greeting from the peer");
++            } else {
++                log_info("No greeting from the peer: it closed the connection "
++                         "(at work on another session, or this node is not one of its peers)");
++            }
++            return OWSYNC_ERROR_REFUSED;
++        }
++        if (hello_rc == OWSYNC_ERROR_CRYPTO) {
++            log_reach("The peer's greeting cannot be decrypted: its key is not this node's");
++            return OWSYNC_ERROR_CRYPTO;
++        }
++        if (hello_rc == OWSYNC_ERROR_IO) {
++            log_reach("Failed to receive Hello: the peer did not greet within %ld s", waited_ms / 1000);
++            return OWSYNC_ERROR_IO;
++        }
++        log_reach("Failed to receive Hello: not a greeting this node can read "
++                  "(a peer that encrypts while this node does not, or the other way round?)");
++        return OWSYNC_ERROR_PROTOCOL;
+     }
+ 
+     log_debug("Received message type: %d", peer_hello->type);
+@@ -1120,10 +1159,10 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     }
+     for (size_t i = 0; i < local_files->count; i++) {
+         file_state_t *f = &local_files->files[i];
+-        if (!f->deleted && f->size > (uint64_t)(MAX_MESSAGE_SIZE / 2)) {
+-            log_error("File '%s' too large to sync (%llu bytes). "
++        if (!f->deleted && f->size > (uint64_t)MAX_FILE_SIZE) {
++            log_reach("File '%s' too large to sync (%llu bytes). "
+                       "Max file size is %d bytes (due to encoding overhead). Not offered to the peer.",
+-                      f->path, (unsigned long long)f->size, MAX_MESSAGE_SIZE / 2);
++                      f->path, (unsigned long long)f->size, MAX_FILE_SIZE);
+             continue;
+         }
+         file_state_t copy = *f;
+@@ -1185,6 +1224,25 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+         }
+     }
+ 
++    /*
++     * A file the peer announces and cannot send (a peer without this
++     * patch announces every file) is not asked for: it would never come,
++     * and no session with that peer would ever be complete.
++     */
++    for (size_t i = 0; remote_files && i < remote_files->count; ) {
++        file_state_t *f = &remote_files->files[i];
++        if (!f->deleted && f->size > (uint64_t)MAX_FILE_SIZE) {
++            log_unfinished("The peer's '%s' is too large to be sent (%llu bytes): not asked for",
++                           f->path, (unsigned long long)f->size);
++            free(f->path);
++            free(f->hash);
++            remote_files->files[i] = remote_files->files[remote_files->count - 1];
++            remote_files->count--;
++            continue;
++        }
++        i++;
++    }
++
+     /* Calculate what files we need from remote */
+     log_debug("Calculating diff");
+     sync_plan_t *plan = NULL;
+@@ -1232,7 +1290,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+         if (!unchanged_since_scan(full_path, find_state(local_files, plan->files_to_delete.paths[i]))) {
+             struct stat changed_st;
+             if (lstat(full_path, &changed_st) == 0) {
+-                log_warning("Not deleting '%s': it changed here since this session's scan; "
++                log_unfinished("Not deleting '%s': it changed here since this session's scan; "
+                             "the next session compares it again", plan->files_to_delete.paths[i]);
+                 incomplete = true;
+                 continue;
+@@ -1249,7 +1307,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+         struct stat del_st;
+         if (lstat(full_path, &del_st) == 0) {
+             if (!is_path_safe(root, plan->files_to_delete.paths[i])) {
+-                log_warning("Not deleting '%s': resolves outside the sync root",
++                log_unfinished("Not deleting '%s': resolves outside the sync root",
+                             plan->files_to_delete.paths[i]);
+                 incomplete = true;
+                 continue;
+@@ -1258,7 +1316,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                 log_info("Deleted: %s", plan->files_to_delete.paths[i]);
+                 deletion_performed = true;
+             } else {
+-                log_warning("Cannot delete '%s': %s", plan->files_to_delete.paths[i], strerror(errno));
++                log_unfinished("Cannot delete '%s': %s", plan->files_to_delete.paths[i], strerror(errno));
+                 incomplete = true;
+                 continue;
+             }
+@@ -1347,7 +1405,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                  * not notice, so this side asks for another session */
+                 FILE *fp = fopen(full_path, "rb");
+                 if (!fp) {
+-                    log_warning("Cannot open '%s' to send it: %s", path, strerror(errno));
++                    log_unfinished("Cannot open '%s' to send it: %s", path, strerror(errno));
+                     incomplete = true;
+                     continue;
+                 }
+@@ -1363,10 +1421,10 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                     continue;
+                 }
+ 
+-                if (file_size > (MAX_MESSAGE_SIZE / 2)) {
+-                    log_error("File '%s' too large to sync (%ld bytes). "
++                if (file_size > MAX_FILE_SIZE) {
++                    log_reach("File '%s' too large to sync (%ld bytes). "
+                               "Max file size is %d bytes (due to encoding overhead).",
+-                              path, file_size, MAX_MESSAGE_SIZE / 2);
++                              path, file_size, MAX_FILE_SIZE);
+                     fclose(fp);
+                     incomplete = true;
+                     continue;
+@@ -1403,7 +1461,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                 char *sent_hash = NULL;
+                 if (compute_hash_buf(data, got, &sent_hash) != OWSYNC_OK ||
+                         strcmp(sent_hash, fs->hash) != 0) {
+-                    log_warning("'%s' changed since it was announced to the peer: not sent now, "
++                    log_unfinished("'%s' changed since it was announced to the peer: not sent now, "
+                                 "the next session takes it", path);
+                     free(sent_hash);
+                     free(data);
+@@ -1418,13 +1476,34 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                 file_msg->payload.file_content.data_len = file_size;
+                 file_msg->payload.file_content.mode = fs->mode;
+ 
+-                channel_send(channel, file_msg);
++                /*
++                 * A file that did not go out did not arrive. Unnoticed,
++                 * the session went on, read the end-of-sync the peer had
++                 * sent long before, and ended as a success: with a peer
++                 * that does not ask again, the file stayed where it was.
++                 */
++                int sent = channel_send(channel, file_msg);
+                 message_free(file_msg);
++                if (sent == OWSYNC_ERROR_IO) {
++                    log_reach("Sending '%s' to the peer failed: %s", path, strerror(errno));
++                    message_free(msg);
++                    rc = OWSYNC_ERROR_IO;
++                    goto out;
++                }
++                if (sent != OWSYNC_OK) {
++                    log_unfinished("'%s' could not be put into a message: not sent", path);
++                    incomplete = true;
++                }
+             }
+ 
+             message_t *end_msg = message_new(MSG_END_OF_SYNC);
+-            channel_send(channel, end_msg);
++            int end_sent = channel_send(channel, end_msg);
+             message_free(end_msg);
++            if (end_sent != OWSYNC_OK) {
++                message_free(msg);
++                rc = OWSYNC_ERROR_IO;
++                goto out;
++            }
+ 
+             received_peer_request = true;
+             break;
+@@ -1453,7 +1532,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+             }
+             file_state_t *announced = find_state(remote_files, path);
+             if (want == wanted_count || !announced || announced->deleted || !announced->hash) {
+-                log_warning("Ignoring '%s' from the peer: it was not asked for", path);
++                log_unfinished("Ignoring '%s' from the peer: it was not asked for", path);
+                 message_free(msg);
+                 continue;
+             }
+@@ -1470,7 +1549,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+             if (compute_hash_buf(msg->payload.file_content.data, msg->payload.file_content.data_len,
+                                  &got_hash) != OWSYNC_OK ||
+                     strcmp(got_hash, announced->hash) != 0) {
+-                log_warning("'%s' is not what the peer announced (it changed there meanwhile): "
++                log_unfinished("'%s' is not what the peer announced (it changed there meanwhile): "
+                             "not written, the next session takes it", path);
+                 free(got_hash);
+                 message_free(msg);
+@@ -1485,7 +1564,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+             }
+ 
+             if (!unchanged_since_scan(full_path, find_state(local_files, path))) {
+-                log_warning("Not replacing '%s': it changed here since this session's scan; "
++                log_unfinished("Not replacing '%s': it changed here since this session's scan; "
+                             "the next session compares it again", path);
+                 message_free(msg);
+                 continue;
+@@ -1628,6 +1707,9 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                     database_put(db, path, &taken);
+                     db_changed = true;
+                 } else {
++                    if (ok) {
++                        log_unfinished("Cannot put '%s' in place: %s", path, strerror(errno));
++                    }
+                     unlink(tmp_path);
+                 }
+             }

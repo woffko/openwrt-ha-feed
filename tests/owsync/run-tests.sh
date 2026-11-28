@@ -187,6 +187,20 @@ t_cut() {
 	stop_all
 }
 
+t_send_fails() {
+	echo "== a file that could not be sent is not a session that ended well"
+	mk a
+	head -c 8000000 /dev/urandom > "$W/a/config/big"
+	start a
+	sleep 1
+	# The peer asks for the file, says at once that it is done, and drops
+	# the connection while the daemon is still sending
+	peer take-and-drop want=big >/dev/null
+	check "the daemon noticed that the session failed" wait_for 10 grep -q "Session error" "$W/a/log"
+	check "and did not take it for a completed one" [ ! -e "$W/a/db/owsync.db.synced" ]
+	stop_all
+}
+
 t_content() {
 	echo "== F5: content that is not what was announced, and a file nobody asked for"
 	mk a
@@ -283,12 +297,17 @@ t_large() {
 	echo "== a file too large to be sent"
 	mk a; mk b
 	head -c 17000000 /dev/zero > "$W/a/config/huge"
+	# Under half the message size by sixteen bytes: its content as hex
+	# fits a message, the message around it does not
+	head -c 16777200 /dev/zero > "$W/a/config/edge"
 	echo "small" > "$W/a/config/dhcp"
 	start a; start b
 	check "the small file next to it reaches B" wait_for 15 has b dhcp small
 	check "the large file is not on B" [ ! -e "$W/b/config/huge" ]
-	check "A says it is too large and not offered" grep -q "too large to sync.*Not offered" "$W/a/log"
-	check "the session still counts as complete" wait_for 5 [ -e "$W/a/db/owsync.db.synced" ]
+	check "nor the one just under half the message size" [ ! -e "$W/b/config/edge" ]
+	check "A says of both that they are too large and not offered" [ "$(grep -c "too large to sync.*Not offered" "$W/a/log")" -ge 2 ]
+	check "the session still counts as complete on A" wait_for 5 [ -e "$W/a/db/owsync.db.synced" ]
+	check "and on B" wait_for 5 [ -e "$W/b/db/owsync.db.synced" ]
 	stop_all
 }
 
@@ -308,6 +327,17 @@ t_encrypted() {
 	start b
 	echo "two" > "$W/b/config/firewall"
 	check "an edit on B reaches A afterwards" wait_for $((POLL * 3 + 2)) has a firewall two
+	stop_all
+	# Two nodes with different keys: nothing crosses, and the log says
+	# what is wrong, not that the peer is busy
+	# shellcheck disable=SC2086
+	other="$($OWSYNC genkey 2>/dev/null | tail -1)"
+	mk a "$key"; mk b "$other"
+	echo "of A" > "$W/a/config/dhcp"
+	start a; start b
+	check "with another key the log names the key" wait_for 10 sh -c "cat '$W/a/log' '$W/b/log' | grep -q 'cannot be decrypted'"
+	sleep $((POLL + 1))
+	check "and nothing crosses" [ ! -e "$W/b/config/dhcp" ]
 	stop_all
 }
 
@@ -331,6 +361,16 @@ t_mixed() {
 	start b listen "$OWSYNC_OLD"
 	check "a change made while the old node was away arrives when it is back" wait_for $((POLL * 3 + 2)) has b network "made while the old node was away"
 	stop_all
+	# The old node announces every file, also one it cannot send: the
+	# new node does not ask for it, and its sessions are complete
+	mk a; mk b
+	head -c 17000000 /dev/zero > "$W/b/config/huge"
+	echo "next to it" > "$W/b/config/dhcp"
+	start b daemon "$OWSYNC_OLD"; start a
+	check "next to a file the old node cannot send, its other file arrives" wait_for 15 has a dhcp "next to it"
+	check "the new node does not ask for the large one" grep -q "too large to be sent.*not asked for" "$W/a/log"
+	check "and its session with the old node is complete" wait_for 5 [ -e "$W/a/db/owsync.db.synced" ]
+	stop_all
 	# Both start at the same moment: the new node turns the old one's
 	# session away while its own runs, and its own brings both files over
 	mk a; mk b
@@ -340,7 +380,7 @@ t_mixed() {
 	stop_all
 }
 
-ALL="basic retry date cut content edit_during together database future large encrypted mixed"
+ALL="basic retry date cut send_fails content edit_during together database future large encrypted mixed"
 [ "${1:-}" = list ] && { echo "$ALL"; rm -rf "$W"; exit 0; }
 [ $# -gt 0 ] || set -- $ALL
 # shellcheck disable=SC2086
