@@ -133,6 +133,7 @@ rc=0
 reload_trigger [ha-cluster]
 raw_trigger [kea.service] [1000] [/etc/init.d/ha-cluster] [kea_changed]
 config_trigger [config.change] [dhcp] [/etc/init.d/ha-cluster] [dhcp_changed]
+config_trigger [config.change] [firewall] [/etc/init.d/ha-cluster] [firewall_changed]
 == log
 ha-cluster|daemon.info|Starting HA cluster
 ha-cluster|daemon.err|DHCP server of the cluster interfaces: another switch of the DHCP server is still at work: nothing changed now, tried again at the next start or reload

@@ -178,6 +178,9 @@ case "$mode" in
 				reload) reload_service ;;
 				stop) stop ;;
 				firewall) firewall ;;
+				# procd runs it when reload_config finds
+				# /etc/config/firewall changed
+				firewall_changed) firewall_changed ;;
 				# procd runs it on the event luci-app-kea sends
 				kea_changed) kea_changed ;;
 				# procd runs it when reload_config finds /etc/config/dhcp

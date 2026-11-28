@@ -91,6 +91,7 @@ rc=0
 reload_trigger [ha-cluster]
 raw_trigger [kea.service] [1000] [/etc/init.d/ha-cluster] [kea_changed]
 config_trigger [config.change] [dhcp] [/etc/init.d/ha-cluster] [dhcp_changed]
+config_trigger [config.change] [firewall] [/etc/init.d/ha-cluster] [firewall_changed]
 == log
 ha-cluster|daemon.warning|/etc/config/ha-cluster holds what the releases before 2.0 wrote and this release does not read: sync_leases, an anonymous advanced section. It comes back when a backup of an earlier release is restored, or when the first boot of an upgrade reboots before its end. Migrating it now, as the upgrade does
 ha-cluster|daemon.info|/etc/config/ha-cluster migrated to the model of this release
@@ -210,6 +211,7 @@ ha-cluster.conf
 script-on-renewal
 == ls /etc/ha-cluster
 dhcp-backend
+firewall-dhcp-server
 service_states
 == /etc/ha-cluster/service_states
 keepalived=1

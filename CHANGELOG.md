@@ -391,14 +391,35 @@ upgrading a node.
     them stops needing them: a node that ran that server when it last
     wrote the rules (noted in `/etc/ha-cluster/firewall-dhcp-server`) and
     runs the other one now writes the rules anew as a whole. A node that
-    still runs the old server writes its own again at its next start or
-    reload, which the change of `/etc/config/dhcp` that comes with a
-    switch brings about.
+    still runs the old server writes its own again as soon as the file
+    reaches it: the service has a trigger on a change of
+    `/etc/config/firewall` (`/etc/init.d/ha-cluster firewall_changed`)
+    that brings its rules up to date and touches nothing else. The same
+    trigger puts a rule back that was changed or removed by hand as soon
+    as the change is applied, where it waited for the next start before.
+    It writes at most once in ten minutes: two nodes whose settings
+    differ in what the rules are made of (the device of a VRRP instance,
+    the ports of Kea's high availability, `option firewall`) would
+    otherwise write the one file in turns for ever. The second time the
+    rules are left as they are and a warning says why.
   - The rules in the config are compared with what the node needs
     without regard to the order of their sections: rules left in place
     among rules written anew are in another order than they are
     described in, and two nodes would otherwise rewrite the file in
-    turns.
+    turns. The one order that matters is still kept: the rule that
+    accepts the nodes on the ports of Kea's high availability before the
+    one that drops everybody else there; moved by hand, the two are
+    written anew.
+  - From the auditor's review (turns 7 and 8): the trigger above (a node
+    on Kea whose partner left Kea would otherwise have been without its
+    rules until its next reload) and its limit of one write in ten
+    minutes, the order of the two rules of Kea, the server noted before
+    a switch made at the node's first start with this release, and no
+    rules put back on a node whose service was disabled meanwhile. Left
+    as a limit: a rule of a DHCP server that no node
+    runs any more, where no node made the switch itself (the only node on
+    Kea replaced by a router on dnsmasq), stays until its section is
+    deleted.
 
 ### luci-app-ha-cluster
 - Advanced WAN page for the uplink sections, with a description under
@@ -537,6 +558,19 @@ upgrading a node.
     deleted files come back), temporary files are of the writing
     thread's own and hidden, and a file a peer deleted is removed only
     inside the sync root.
+  - 090, from the auditor's review of the four: a file that could not be
+    sent no longer leaves a session that "ended well"; the size limit of
+    a file counts the message around it (64 KiB under half the message
+    size), and a larger file that a peer announces is not asked for; the
+    lock file is unlocked before it is closed; two nodes that connect to
+    each other at the same moment log no error for it, while a peer with
+    another key, or one that stays silent, is still an error that says
+    what it is.
+  - Limits that stay: a file deleted on one node and edited on the other
+    within one poll interval may end up deleted; a file that is wholly in
+    the kernel's send buffer when the link goes counts as sent (the
+    protocol has no acknowledgement; a peer with r8 notices and asks
+    again); the clocks of the nodes must still agree within a minute.
 - dnsmasq-ha: DHCPv6 leases carry the client DUID over ubus; the
   dhcp-script forwards only `NAME=value` lines to hotplug. The log line
   of an injected DHCPv6 lease shows the whole client id; it showed its
@@ -546,10 +580,12 @@ upgrading a node.
 - `tests/owsync/run-tests.sh`: what the owsync patches 050-080 are for,
   on two daemons of the owsync under test and a peer scripted by hand
   that cuts a session, sends other content than it announced, or waits
-  while a file is edited. Fifty-two checks; twenty-two of them fail on
-  owsync 1.3.0-r7.
-- Cases 174 to 176: the firewall rules of the DHCP server a node does not
-  run are left alone, and go when the node that needed them switched.
+  while a file is edited. Sixty-one checks; of the fifty-two that need
+  one owsync only, twenty-four fail on owsync 1.3.0-r7.
+- Cases 174 to 180: the firewall rules of the DHCP server a node does not
+  run are left alone, and go when the node that needed them switched; the
+  two rules of Kea are put back in their order; rules changed from
+  outside are put back on the change of the file, once in ten minutes.
 - The rootless characterization run no longer depends on what the rootfs
   holds of keepalived-sync: its hooks are removed from the test root, and
   the cases about them write their own. The init script is bound with the

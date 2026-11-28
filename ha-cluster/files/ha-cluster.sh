@@ -75,6 +75,10 @@ HA_KEA_FOLLOWED="${HA_KEA_FOLLOWED:-${HA_CLUSTER_ROOT}/etc/ha-cluster/kea-follow
 HA_DHCP_BACKEND_LOCK="${HA_DHCP_BACKEND_LOCK:-${HA_CLUSTER_RUN_DIR}/dhcp-backend.lock}"
 FW4_BIN="${FW4_BIN:-/sbin/fw4}"
 HA_FIREWALL_LOCK="${HA_FIREWALL_LOCK:-${HA_CLUSTER_RUN_DIR}/firewall.lock}"
+# When the rules were last written because /etc/config/firewall had
+# changed (firewall_changed), and how long before that may happen again
+HA_FIREWALL_CHANGE_STAMP="${HA_FIREWALL_CHANGE_STAMP:-${HA_CLUSTER_RUN_DIR}/firewall-written-on-change}"
+HA_FIREWALL_CHANGE_INTERVAL="${HA_FIREWALL_CHANGE_INTERVAL:-600}"
 HA_DATAPLANE_CHECK="${HA_DATAPLANE_CHECK:-/usr/lib/ha-cluster/check-dataplane}"
 HA_DHCPV6_GUARD_TABLE="ha_cluster_dhcpv6"
 HA_RA_GUARD_TABLE="ha_cluster_ra"
@@ -2908,6 +2912,15 @@ ha_apply_dhcp_backend() {
 	wanted="$(ha_dhcp_backend_wanted)"
 	[ "$mode" = "auto" ] && follow="$(_ha_dhcp_pair_follow "$current")"
 
+	# The firewall rules were last written for the server the node runs
+	# before any switch made here, when nothing says otherwise: without
+	# this, a node that switches at its first start with this release
+	# would take the old server's rules for another node's and leave them
+	if [ ! -e "$HA_FW_BACKEND_STATE" ]; then
+		mkdir -p "${HA_FW_BACKEND_STATE%/*}" 2>/dev/null &&
+			printf '%s\n' "$current" > "$HA_FW_BACKEND_STATE" 2>/dev/null
+	fi
+
 	[ -r "$HA_DHCP_BACKEND_STATE" ] && read -r state < "$HA_DHCP_BACKEND_STATE"
 	if [ "$state" = "switching" ]; then
 		ha_log_warning "A switch of the DHCP server to Kea was cut short (a reboot or a kill)"
@@ -3303,8 +3316,13 @@ _ha_fw_in_config() {
 # that needed them stops needing them: a node that ran that server when it
 # last wrote the rules, and runs the other one now, has nothing foreign and
 # writes the rules anew as a whole. Should another node still run the old
-# server, it writes its rules again at its next start or reload, which the
-# change of /etc/config/dhcp that comes with a switch brings about.
+# server, it writes its rules again as soon as the file reaches it: the
+# service has a trigger on a change of /etc/config/firewall that runs
+# ha_apply_firewall and nothing else (service_triggers). The server noted
+# is that of before a switch made at this start (ha_apply_dhcp_backend
+# notes it when nothing is noted yet), so that a node whose first start
+# with this release is also the one at which it switches still takes the
+# old server's rules out.
 _ha_fw_foreign_sections() {
 	local now was=""
 
@@ -3349,6 +3367,60 @@ _ha_fw_own_in_config() {
 	else
 		_ha_fw_in_config
 	fi | LC_ALL=C sort
+}
+
+# Usage: _ha_fw_kea_order_ok
+# The rule that accepts the nodes on the ports of Kea's high availability
+# stands before the one that drops everybody else there. The rules are
+# compared without regard to their order (_ha_fw_own_in_config), and these
+# two are the ones whose order matters: moved by hand, the drop would come
+# first and shut the partner out.
+_ha_fw_kea_order_ok() {
+	case "$(_ha_fw_in_config | sed -n 's/^\(ha_cluster_kea\(_drop\)\{0,1\}\)=.*/\1/p' | tr '\n' ' ')" in
+		"ha_cluster_kea_drop ha_cluster_kea "*) return 1 ;;
+	esac
+	return 0
+}
+
+# Usage: _ha_fw_kea_order_wrong <sections that are another node's>
+# The two rules of Kea are this node's own and stand in the wrong order
+_ha_fw_kea_order_wrong() {
+	case " $1 " in
+		*" ha_cluster_kea "*) return 1 ;;
+	esac
+	! _ha_fw_kea_order_ok
+}
+
+# Usage: _ha_fw_up_to_date <wanted rules, sorted> <sections that are another node's>
+# The config holds this node's rules as it needs them
+_ha_fw_up_to_date() {
+	_ha_fw_kea_order_wrong "$2" && return 1
+	[ "$1" = "$(_ha_fw_own_in_config "$2")" ]
+}
+
+# Usage: _ha_fw_change_write_due
+# The rules were not written on a change of the file within the last
+# HA_FIREWALL_CHANGE_INTERVAL seconds
+_ha_fw_change_write_due() {
+	local last="" now
+
+	[ -r "$HA_FIREWALL_CHANGE_STAMP" ] && read -r last < "$HA_FIREWALL_CHANGE_STAMP"
+	case "$last" in
+		''|*[!0-9]*) return 0 ;;
+	esac
+	now="$(date +%s)"
+	# A clock that was set back: no reason to hold off for ever
+	[ "$now" -ge "$last" ] || return 0
+	[ $((now - last)) -ge "$HA_FIREWALL_CHANGE_INTERVAL" ]
+}
+
+# Usage: _ha_fw_on_change_hold
+# True, with a warning, when the rules were already written on a change of
+# the file a short while ago and are left as they are this time
+_ha_fw_on_change_hold() {
+	_ha_fw_change_write_due && return 1
+	ha_log_warning "Firewall rules of the cluster in /etc/config/firewall are not as this node needs them, a second time within $((HA_FIREWALL_CHANGE_INTERVAL / 60)) minutes of its writing them: left as they are. If another node keeps writing other rules, its settings differ from this node's (see \"Settings that must match on all nodes\"); \"/etc/init.d/ha-cluster firewall\" writes this node's rules"
+	return 0
 }
 
 # Usage: _ha_fw_delete_sections [<sections to keep>]
@@ -3468,6 +3540,13 @@ _ha_apply_firewall() {
 
 	config_get_bool wanted config firewall 1
 	if [ "$wanted" -eq 0 ]; then
+		# On a change of the file as below: a node with option firewall
+		# '0' next to one that writes the rules would take them out again
+		# and again
+		if [ -n "${HA_FIREWALL_ON_CHANGE:-}" ] && [ -n "$(_ha_fw_in_config)" ]; then
+			_ha_fw_on_change_hold && return 0
+			date +%s > "$HA_FIREWALL_CHANGE_STAMP" 2>/dev/null
+		fi
 		_ha_remove_firewall
 		return 0
 	fi
@@ -3501,7 +3580,7 @@ _ha_apply_firewall() {
 	[ -z "$kept" ] ||
 		ha_log_info "Firewall rules of the cluster: $(echo "$kept" | sed 's/ha_cluster_lease_sync/HA-Cluster-lease-sync/; s/ha_cluster_kea_drop/HA-Cluster-Kea-HA-drop/; s/ha_cluster_kea/HA-Cluster-Kea-HA/') left as they are: they are for the DHCP server another node runs (this node runs $(ha_dhcp_backend))"
 
-	if [ "$wanted_rules" = "$(_ha_fw_own_in_config "$foreign")" ]; then
+	if _ha_fw_up_to_date "$wanted_rules" "$foreign"; then
 		_ha_fw_note_backend
 		[ -z "$names" ] || _ha_fw_loaded "$names" || {
 			ha_log_info "Firewall rules of the cluster are in /etc/config/firewall and not loaded: reloading the firewall"
@@ -3509,6 +3588,13 @@ _ha_apply_firewall() {
 		}
 		return 0
 	fi
+
+	_ha_fw_kea_order_wrong "$foreign" &&
+		ha_log_warning "Firewall rules of the cluster: HA-Cluster-Kea-HA-drop stands before HA-Cluster-Kea-HA in /etc/config/firewall and would shut Kea's partner out: written anew in their order"
+
+	# Written because the file had changed (firewall_changed): once in a
+	# while only, or two nodes whose settings differ would write in turns
+	[ -z "${HA_FIREWALL_ON_CHANGE:-}" ] || ! _ha_fw_on_change_hold || return 0
 
 	while :; do
 		_ha_fw_delete_sections "$foreign"
@@ -3530,7 +3616,7 @@ EOF
 		# on what it holds now, if there is still something to write
 		try=$((try + 1))
 		_ha_iso_begin firewall || return 0
-		[ "$wanted_rules" = "$(_ha_fw_own_in_config "$foreign")" ] && { rc=3; break; }
+		_ha_fw_up_to_date "$wanted_rules" "$foreign" && { rc=3; break; }
 	done
 	if [ "$rc" -eq 3 ]; then
 		_ha_fw_note_backend
@@ -3551,6 +3637,7 @@ EOF
 		return 0
 	fi
 	_ha_fw_note_backend
+	[ -z "${HA_FIREWALL_ON_CHANGE:-}" ] || date +%s > "$HA_FIREWALL_CHANGE_STAMP" 2>/dev/null
 	_ha_fw_reload
 }
 

@@ -240,10 +240,11 @@ of this feed; the nodes of a cluster may be upgraded to it one at a time):
 - A session that is cut after it wrote a file still has the services
   reload what arrived.
 - One session runs at a time. Two nodes that connect to each other at the
-  same moment turn each other away and come back at different moments; a
-  line `A session is running: connection from a peer closed` is no error.
-- A file larger than 16 MB is not synced; the log says so at every
-  session.
+  same moment turn each other away and come back at different moments; the
+  lines `A session is running: connection from a peer closed` and `No
+  greeting from the peer` are no errors.
+- A file larger than 16 MB (16,744,448 bytes) is not synced; the log
+  says so.
 - A file deleted on one node and edited on the other within one poll
   interval may end up deleted on both: owsync learns of a deletion at its
   next scan and dates it then.
@@ -1111,19 +1112,30 @@ they are another node's, and the firewall config is one file for all. They
 go when the node that needed them switches to the other server (a node
 notes in `/etc/ha-cluster/firewall-dhcp-server` which server it ran when
 it last wrote the rules); a node that still runs the old server writes
-its own again at its next start or reload. Should such a rule stay behind
-with no node left to need it, as when the only node on Kea was taken out
-of the cluster, delete its section: no node writes it again.
+its own again as soon as the file reaches it. Should such a rule stay
+behind with no node left to need it, as when the only node on Kea was
+replaced by a router on dnsmasq, delete its section: no node writes it
+again.
 
 How the rules are kept:
 
-- They are written at every start and reload of ha-cluster, and only when
-  they differ from what the config holds; the firewall is reloaded when
-  they were written, or when they are in the config and not in the loaded
-  ruleset (as after owsync brought the config from another node).
+- They are written at every start and reload of ha-cluster, and when
+  `/etc/config/firewall` changes (a change you apply in LuCI, a file that
+  config sync brought from another node), and only when they differ from
+  what the config holds; the firewall is reloaded when they were written,
+  or when they are in the config and not in the loaded ruleset.
+- On a change of the file they are written at most once in ten minutes.
+  Two nodes that need different rules, because a setting that must match
+  does not (the device of a VRRP instance, the ports of Kea's high
+  availability, `option firewall`), would otherwise write the one file in
+  turns for ever. The second time a warning says that the rules were left
+  as they are; make the settings match, or run
+  `/etc/init.d/ha-cluster firewall`, which always writes.
 - They are rules of ha-cluster: a change made to one by hand, or another
-  section named `ha_cluster_...`, is undone at the next start (but for
-  the rules of the DHCP server this node does not run, see above). Rules of
+  section named `ha_cluster_...`, is undone as soon as it is applied (but
+  for the rules of the DHCP server this node does not run, see above).
+  Their order among each other is of no account, with one exception that
+  is kept: `HA-Cluster-Kea-HA` before `HA-Cluster-Kea-HA-drop`. Rules of
   your own under other names are left alone, and so are changes you have
   staged in LuCI and not yet applied: ha-cluster writes its rules on a copy
   of the committed file, not through uci's pending changes, which `uci -t`
