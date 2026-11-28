@@ -1,0 +1,169 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: what a session changed is recorded and applied however the session ends
+
+A session writes each file as it arrives, but saved the database and ran
+the program that applies the files (on_change, on OpenWrt reload_config)
+only after its last message. A session that was cut after one file of
+two, by a link that went down or a peer that was restarted, left that
+file in place and did neither. The next scan took the file for a local
+edit and recorded it, so no later session ran the program for it either:
+the services kept running a config their file no longer held, until
+something else reloaded them.
+
+Every way out of a session that has started to change files now goes
+through one place, which saves the database with what was written and
+removed and runs the program if anything was. The session still returns
+its error.
+
+The wire protocol does not change.
+
+diff -ru a/src/net.c b/src/net.c
+--- a/src/net.c
++++ b/src/net.c
+@@ -1101,6 +1101,24 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     bool incomplete = false;
+     bool db_changed = false;
+ 
++    /*
++     * From here on the session changes files. However it ends - to its
++     * end, with the connection cut after one file of two, with a peer
++     * that sends nonsense - what it did change must be remembered in the
++     * database and applied by the system: every way out goes through
++     * "out" below. Before this patch a session that was cut left the
++     * files it had written in place, said nothing to the database, and
++     * the program that applies them (on_change) never ran for them: the
++     * next scan then took them for local edits, and the services kept
++     * running what the files no longer held.
++     */
++    int rc = OWSYNC_OK;
++    size_t wanted_count = 0;
++    char **wanted = NULL;
++    bool *arrived = NULL;
++    bool received_new_files = false;
++    bool ran_to_its_end = false;
++
+     bool deletion_performed = false;
+     for (size_t i = 0; i < plan->files_to_delete.count; i++) {
+         char full_path[MAX_PATH_LEN];
+@@ -1159,21 +1177,18 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     }
+ 
+     if (db_changed) {
+-        database_save(db, db_path);
++        if (database_save(db, db_path) == OWSYNC_OK) db_changed = false;
+     }
+ 
+     /* What is asked of the peer, and what has arrived of it */
+-    size_t wanted_count = plan->files_to_request.count;
+-    char **wanted = wanted_count ? calloc(wanted_count, sizeof(char *)) : NULL;
+-    bool *arrived = wanted_count ? calloc(wanted_count, sizeof(bool)) : NULL;
++    wanted_count = plan->files_to_request.count;
++    wanted = wanted_count ? calloc(wanted_count, sizeof(char *)) : NULL;
++    arrived = wanted_count ? calloc(wanted_count, sizeof(bool)) : NULL;
+     if (wanted_count && (!wanted || !arrived)) {
+-        free(wanted);
+-        free(arrived);
++        wanted_count = 0;
+         sync_plan_free(plan);
+-        file_state_list_free(remote_files);
+-        file_state_list_free(local_files);
+-        database_free(db);
+-        return OWSYNC_ERROR_MEMORY;
++        rc = OWSYNC_ERROR_MEMORY;
++        goto out;
+     }
+     for (size_t i = 0; i < wanted_count; i++) {
+         wanted[i] = strdup(plan->files_to_request.paths[i]);
+@@ -1191,31 +1206,20 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     if (channel_send(channel, request) != OWSYNC_OK) {
+         message_free(request);
+         sync_plan_free(plan);
+-        for (size_t i = 0; i < wanted_count; i++) free(wanted[i]);
+-        free(wanted);
+-        free(arrived);
+-        file_state_list_free(remote_files);
+-        file_state_list_free(local_files);
+-        database_free(db);
+-        return OWSYNC_ERROR_IO;
++        rc = OWSYNC_ERROR_IO;
++        goto out;
+     }
+     message_free(request);
+     sync_plan_free(plan);
+ 
+     bool received_peer_request = false;
+     bool received_end_of_sync = false;
+-    bool received_new_files = false;
+ 
+     while (!received_peer_request || !received_end_of_sync) {
+         message_t *msg = NULL;
+         if (channel_receive(channel, &msg) != OWSYNC_OK) {
+-            for (size_t i = 0; i < wanted_count; i++) free(wanted[i]);
+-            free(wanted);
+-            free(arrived);
+-            file_state_list_free(remote_files);
+-            file_state_list_free(local_files);
+-            database_free(db);
+-            return OWSYNC_ERROR_IO;
++            rc = OWSYNC_ERROR_IO;
++            goto out;
+         }
+ 
+         switch (msg->type) {
+@@ -1531,40 +1535,43 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+ 
+         default:
+             message_free(msg);
+-            for (size_t i = 0; i < wanted_count; i++) free(wanted[i]);
+-            free(wanted);
+-            free(arrived);
+-            file_state_list_free(remote_files);
+-            file_state_list_free(local_files);
+-            database_free(db);
+-            return OWSYNC_ERROR_PROTOCOL;
++            rc = OWSYNC_ERROR_PROTOCOL;
++            goto out;
+         }
+ 
+         message_free(msg);
+     }
++    ran_to_its_end = true;
+ 
+-    if (received_new_files) {
++out:
++    /* What this session wrote and removed, whatever became of the session */
++    if (db_changed) {
+         database_save(db, db_path);
+     }
+ 
+-    size_t missing = 0;
+     for (size_t i = 0; i < wanted_count; i++) {
+-        if (!arrived[i]) {
++        if (ran_to_its_end && !arrived[i]) {
+             log_warning("'%s' was asked of the peer and not taken in this session", wanted[i] ? wanted[i] : "?");
+-            missing++;
++            incomplete = true;
+         }
+         free(wanted[i]);
+     }
+     free(wanted);
+     free(arrived);
+-    if (missing > 0) incomplete = true;
+ 
+     file_state_list_free(remote_files);
+     file_state_list_free(local_files);
+     database_free(db);
+ 
+-    if (received_new_files || deletion_performed)
++    if (received_new_files || deletion_performed) {
++        if (rc != OWSYNC_OK) {
++            log_warning("The session was cut short after it changed files here: "
++                        "they are recorded and applied as they are");
++        }
+         run_on_change();
++    }
++
++    if (rc != OWSYNC_OK) return rc;
+ 
+     if (incomplete) {
+         log_warning("Session ran to its end, but not everything was applied or sent");

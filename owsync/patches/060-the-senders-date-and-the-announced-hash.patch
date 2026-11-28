@@ -1,0 +1,676 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: the sender's date kept, the hash checked, the database told what arrived
+
+owsync picks, of two copies of a file, the one with the later date. A file
+that arrived got the date of its arrival, by the receiver's clock, and
+after a session with files the whole directory was scanned again into the
+database. Both lose edits.
+
+- With the receiver's clock a few seconds ahead, or with a second edit on
+  the sender within the time the first took to arrive, the receiver's
+  copy of the first edit is "newer" than the second edit itself: the next
+  session undoes the second edit on both nodes. A file now keeps the date
+  it has on the sender (the peer's SyncState carries it; nothing is added
+  to the wire), and a deletion is recorded with the date of the peer's
+  deletion, so both nodes hold the same record.
+- The scan after a session took into the database whatever else had been
+  edited on this node while the session ran. The poller compares the
+  directory with the database, found nothing new and never offered that
+  edit to the peer. The session now records the files it wrote and
+  removed, and nothing else.
+- A file edited on this node between the session's scan and the arrival
+  of the peer's copy was replaced by that copy, although the comparison
+  had been made with the file as it was before. A file that is no longer
+  what the scan saw is now left alone; the next session compares it.
+- Content was written as it came. A file that changed on the sender
+  between its scan and its reading (an older sender does not check)
+  arrived with other content than was compared, or half-written. The
+  receiver now takes only what it asked for, each file once, and only if
+  its SHA-256 is the one the peer announced; the sender checks the same
+  before it sends.
+
+A session in which a file that was asked for did not arrive, or was not
+taken or not sent for one of these reasons, runs to its end and returns
+OWSYNC_ERROR_INCOMPLETE: nothing is damaged, and a caller knows that
+another session is owed. A file too large to be sent at all is no longer
+offered to the peer, which would otherwise ask for it in every session.
+
+A date further in the future than two clocks may differ (60 s) was
+written while a clock was wrong and wins every comparison until that day
+comes; with dates kept it would travel to the peer and stay on both. In a
+session, where the peer's clock confirms this node's, such a file gets
+the present as its date, and a peer's date in the future is taken as the
+present.
+
+A file and a deletion of the same instant left each node with its own
+answer for ever (each wanted the other to be strictly newer). The file
+wins on both now.
+
+The wire protocol does not change: a node with this patch syncs with a
+node without it. A file sent to a node without the patch still gets the
+date of its arrival there.
+
+diff -ru a/include/common.h b/include/common.h
+--- a/include/common.h
++++ b/include/common.h
+@@ -37,6 +37,7 @@ typedef enum {
+     OWSYNC_ERROR_CRYPTO = -5,        /* Encryption/decryption failed */
+     OWSYNC_ERROR_CLOCK_SKEW = -6,    /* Peer clock difference exceeds threshold */
+     OWSYNC_ERROR_VERSION_MISMATCH = -7, /* Protocol version mismatch */
++    OWSYNC_ERROR_INCOMPLETE = -8,    /* Session ran to its end, but not every file was applied or sent */
+ } owsync_error_t;
+ 
+ /* Dynamic byte buffer with automatic growth */
+diff -ru a/include/state.h b/include/state.h
+--- a/include/state.h
++++ b/include/state.h
+@@ -89,5 +89,16 @@ bool file_filter_matches(file_filter_t *filter, const char *path);
+ /* Directory scanning and hashing */
+ int scan_directory(const char *root, file_filter_t *filter, file_state_list_t **out_list);
+ int compute_hash(const char *path, char **out_hash);  /* SHA-256, returns hex string */
++int compute_hash_buf(const uint8_t *data, size_t len, char **out_hash);  /* The same of a buffer */
++
++/*
++ * Dates that lie in the future by more than limit_ms - now_ms: a file or a
++ * tombstone written while the clock was wrong. Such a date wins every
++ * comparison until that day comes. The file gets the date now_ms, on disk
++ * and in the database; *dirty is set when something was changed. Only to
++ * be called when the clock is known to be right (see the caller).
++ */
++void database_clamp_future(database_t *db, const char *root, uint64_t now_ms,
++                           uint64_t limit_ms, bool *dirty);
+ 
+ #endif
+diff -ru a/src/net.c b/src/net.c
+--- a/src/net.c
++++ b/src/net.c
+@@ -879,6 +879,39 @@ static void mark_synced(const char *db_path) {
+     }
+ }
+ 
++/* The entry of path in a list of file states, or NULL */
++static file_state_t *find_state(file_state_list_t *list, const char *path) {
++    if (!list || !path) return NULL;
++    for (size_t i = 0; i < list->count; i++) {
++        if (list->files[i].path && strcmp(list->files[i].path, path) == 0) {
++            return &list->files[i];
++        }
++    }
++    return NULL;
++}
++
++/*
++ * The file at full_path is still what this session's scan saw: a regular
++ * file of the same date and size where the scan listed one (was), no
++ * regular file where it listed none or a deletion. A file that was written
++ * here after the scan was not part of the comparison with the peer:
++ * replacing or removing it now would destroy an edit nobody has compared
++ * with anything. What a scan never lists (a link, a special file) is not
++ * such an edit, and gives way to the peer's file as it always did.
++ */
++static bool unchanged_since_scan(const char *full_path, const file_state_t *was) {
++    struct stat st;
++
++    if (lstat(full_path, &st) != 0) {
++        return errno == ENOENT && (!was || was->deleted);
++    }
++    if (!S_ISREG(st.st_mode)) return !was || was->deleted;
++    if (!was || was->deleted) return false;
++
++    uint64_t mtime = (uint64_t)st.st_mtim.tv_sec * 1000 + st.st_mtim.tv_nsec / 1000000;
++    return mtime == was->mtime && (uint64_t)st.st_size == was->size;
++}
++
+ static int handle_protocol(channel_t *channel, const char *root, const char *db_path,
+                            file_filter_t *filter, int64_t clock_offset) {
+     uint64_t now = get_time_sec() + clock_offset;
+@@ -949,6 +982,18 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     bool dirty = false;
+     log_debug("Scanning directory %s", root);
+     database_update_from_scan(db, root, filter, &dirty);
++
++    /*
++     * A date further in the future than the clocks of two nodes may differ
++     * was written while a clock was wrong, and wins every comparison until
++     * that day comes. Here, and only here, the clock is known to be right
++     * enough to say so: the peer's clock agrees with it within
++     * CLOCK_SKEW_THRESHOLD. Dates are kept from now on (see below), so
++     * such a date would otherwise travel to the peer and stay on both.
++     */
++    uint64_t future_limit = now_ms + (uint64_t)CLOCK_SKEW_THRESHOLD * 1000;
++    database_clamp_future(db, root, now_ms, future_limit, &dirty);
++
+     if (dirty) {
+         log_debug("Database dirty, saving");
+         database_save(db, db_path);
+@@ -957,21 +1002,52 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     file_state_list_t *local_files = database_get_all_filtered(db, filter);
+     log_debug("Local files count: %zu", local_files ? local_files->count : 0);
+ 
++    /*
++     * What is offered to the peer: all of it but a file too large to be
++     * sent at all. Offered, the peer would ask for it in every session,
++     * never get it, and no session with it would ever be complete. The
++     * peer's own copy of such a file is still compared with it here.
++     */
++    file_state_list_t *offered = file_state_list_new();
++    if (!offered || !local_files) {
++        file_state_list_free(offered);
++        file_state_list_free(local_files);
++        database_free(db);
++        return OWSYNC_ERROR_MEMORY;
++    }
++    for (size_t i = 0; i < local_files->count; i++) {
++        file_state_t *f = &local_files->files[i];
++        if (!f->deleted && f->size > (uint64_t)(MAX_MESSAGE_SIZE / 2)) {
++            log_error("File '%s' too large to sync (%llu bytes). "
++                      "Max file size is %d bytes (due to encoding overhead). Not offered to the peer.",
++                      f->path, (unsigned long long)f->size, MAX_MESSAGE_SIZE / 2);
++            continue;
++        }
++        file_state_t copy = *f;
++        copy.path = f->path ? strdup(f->path) : NULL;
++        copy.hash = f->hash ? strdup(f->hash) : NULL;
++        if (!copy.path || file_state_list_add(offered, &copy) != OWSYNC_OK) {
++            free(copy.path);
++            free(copy.hash);
++            file_state_list_free(offered);
++            file_state_list_free(local_files);
++            database_free(db);
++            return OWSYNC_ERROR_MEMORY;
++        }
++    }
++
+     message_t *sync_state = message_new(MSG_SYNC_STATE);
+-    sync_state->payload.sync_state.files = local_files;
++    sync_state->payload.sync_state.files = offered;
+ 
+-    log_debug("Sending SyncState with %zu files", local_files->count);
++    log_debug("Sending SyncState with %zu files", offered->count);
+     if (channel_send(channel, sync_state) != OWSYNC_OK) {
+         log_error("Failed to send SyncState");
+-        // Don't free local_files here - we need it for diff calculation
+-        sync_state->payload.sync_state.files = NULL;
+         message_free(sync_state);
+         file_state_list_free(local_files);
+         database_free(db);
+         return OWSYNC_ERROR_IO;
+     }
+-    // Don't free local_files - we still need it for diff calculation
+-    sync_state->payload.sync_state.files = NULL;
++    /* local_files stays: the comparison with the peer needs it */
+     message_free(sync_state);
+ 
+     log_debug("Waiting for peer SyncState");
+@@ -996,19 +1072,52 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     peer_sync_state->payload.sync_state.files = NULL;
+     message_free(peer_sync_state);
+ 
++    /* A peer without this rule, or one whose clock was wrong a moment
++     * ago, may still announce a date in the future */
++    for (size_t i = 0; remote_files && i < remote_files->count; i++) {
++        if (remote_files->files[i].mtime > future_limit) {
++            log_warning("The peer dates '%s' in the future: taken as dated now",
++                        remote_files->files[i].path);
++            remote_files->files[i].mtime = now_ms;
++        }
++    }
++
+     /* Calculate what files we need from remote */
+     log_debug("Calculating diff");
+     sync_plan_t *plan = NULL;
+     calculate_diff(local_files, remote_files, filter, &plan);
+     log_debug("Files to request: %zu, Files to delete: %zu",
+               plan->files_to_request.count, plan->files_to_delete.count);
+-    file_state_list_free(remote_files);
++
++    /*
++     * What the peer announced is kept to the end of the session: a file
++     * that arrives is checked against the hash announced for it and gets
++     * the date announced for it, and a deletion gets the date of the
++     * peer's deletion. The wire carries both already; nothing is added.
++     */
++
++    /* Not everything that should have been applied or sent was: the
++     * session still runs to its end, and ends as OWSYNC_ERROR_INCOMPLETE */
++    bool incomplete = false;
++    bool db_changed = false;
+ 
+     bool deletion_performed = false;
+     for (size_t i = 0; i < plan->files_to_delete.count; i++) {
+         char full_path[MAX_PATH_LEN];
+         snprintf(full_path, sizeof(full_path), "%s/%s", root, plan->files_to_delete.paths[i]);
+ 
++        file_state_t *gone = find_state(remote_files, plan->files_to_delete.paths[i]);
++        if (!gone) continue;
++        if (!unchanged_since_scan(full_path, find_state(local_files, plan->files_to_delete.paths[i]))) {
++            struct stat changed_st;
++            if (lstat(full_path, &changed_st) == 0) {
++                log_warning("Not deleting '%s': it changed here since this session's scan; "
++                            "the next session compares it again", plan->files_to_delete.paths[i]);
++                incomplete = true;
++                continue;
++            }
++        }
++
+         /*
+          * The path comes from the peer. It is removed only where it
+          * resolves inside the sync root: a directory below the root that
+@@ -1021,6 +1130,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+             if (!is_path_safe(root, plan->files_to_delete.paths[i])) {
+                 log_warning("Not deleting '%s': resolves outside the sync root",
+                             plan->files_to_delete.paths[i]);
++                incomplete = true;
+                 continue;
+             }
+             if (unlink(full_path) == 0) {
+@@ -1028,24 +1138,47 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                 deletion_performed = true;
+             } else {
+                 log_warning("Cannot delete '%s': %s", plan->files_to_delete.paths[i], strerror(errno));
++                incomplete = true;
+                 continue;
+             }
+         }
+ 
++        /* The deletion is remembered with the date the peer gave it, not
++         * with the moment it was repeated here: both nodes then hold the
++         * same record, and a later edit is compared with the same date on
++         * either of them. */
+         file_state_t *entry = database_get(db, plan->files_to_delete.paths[i]);
+         if (entry) {
+             entry->deleted = true;
+-            entry->mtime = now_ms;
++            entry->mtime = gone->mtime;
+             free(entry->hash);
+             entry->hash = NULL;
+             entry->size = 0;
++            db_changed = true;
+         }
+     }
+ 
+-    if (deletion_performed) {
++    if (db_changed) {
+         database_save(db, db_path);
+     }
+ 
++    /* What is asked of the peer, and what has arrived of it */
++    size_t wanted_count = plan->files_to_request.count;
++    char **wanted = wanted_count ? calloc(wanted_count, sizeof(char *)) : NULL;
++    bool *arrived = wanted_count ? calloc(wanted_count, sizeof(bool)) : NULL;
++    if (wanted_count && (!wanted || !arrived)) {
++        free(wanted);
++        free(arrived);
++        sync_plan_free(plan);
++        file_state_list_free(remote_files);
++        file_state_list_free(local_files);
++        database_free(db);
++        return OWSYNC_ERROR_MEMORY;
++    }
++    for (size_t i = 0; i < wanted_count; i++) {
++        wanted[i] = strdup(plan->files_to_request.paths[i]);
++    }
++
+     message_t *request = message_new(MSG_REQUEST_FILES);
+     request->payload.request_files.paths = path_list_new();
+     if (request->payload.request_files.paths) {
+@@ -1058,6 +1191,10 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     if (channel_send(channel, request) != OWSYNC_OK) {
+         message_free(request);
+         sync_plan_free(plan);
++        for (size_t i = 0; i < wanted_count; i++) free(wanted[i]);
++        free(wanted);
++        free(arrived);
++        file_state_list_free(remote_files);
+         file_state_list_free(local_files);
+         database_free(db);
+         return OWSYNC_ERROR_IO;
+@@ -1072,6 +1209,10 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     while (!received_peer_request || !received_end_of_sync) {
+         message_t *msg = NULL;
+         if (channel_receive(channel, &msg) != OWSYNC_OK) {
++            for (size_t i = 0; i < wanted_count; i++) free(wanted[i]);
++            free(wanted);
++            free(arrived);
++            file_state_list_free(remote_files);
+             file_state_list_free(local_files);
+             database_free(db);
+             return OWSYNC_ERROR_IO;
+@@ -1090,8 +1231,19 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                     continue;
+                 }
+ 
++                /* Only what this session announced to the peer is sent */
++                file_state_t *fs = database_get(db, path);
++                if (!fs || fs->deleted || !fs->hash) continue;
++
++                /* From here on a file that is not sent leaves the peer
++                 * without something it was promised: an older peer does
++                 * not notice, so this side asks for another session */
+                 FILE *fp = fopen(full_path, "rb");
+-                if (!fp) continue;
++                if (!fp) {
++                    log_warning("Cannot open '%s' to send it: %s", path, strerror(errno));
++                    incomplete = true;
++                    continue;
++                }
+ 
+                 fseek(fp, 0, SEEK_END);
+                 long file_size = ftell(fp);
+@@ -1100,6 +1252,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                 if (file_size < 0) {
+                     log_warning("Cannot determine size of '%s': %s", path, strerror(errno));
+                     fclose(fp);
++                    incomplete = true;
+                     continue;
+                 }
+ 
+@@ -1108,12 +1261,14 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                               "Max file size is %d bytes (due to encoding overhead).",
+                               path, file_size, MAX_MESSAGE_SIZE / 2);
+                     fclose(fp);
++                    incomplete = true;
+                     continue;
+                 }
+ 
+-                uint8_t *data = malloc(file_size);
++                uint8_t *data = malloc(file_size ? (size_t)file_size : 1);
+                 if (!data) {
+                     fclose(fp);
++                    incomplete = true;
+                     continue;
+                 }
+ 
+@@ -1128,20 +1283,33 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                 if (got != (size_t)file_size) {
+                     log_warning("Short read on '%s' (%zu of %ld bytes), not sending", path, got, file_size);
+                     free(data);
++                    incomplete = true;
++                    continue;
++                }
++
++                /*
++                 * The peer asked for the file as it was announced: that
++                 * hash, with that date. A file that was written since, in
++                 * full or caught half-way, is something else; it goes out
++                 * with the session that announces it.
++                 */
++                char *sent_hash = NULL;
++                if (compute_hash_buf(data, got, &sent_hash) != OWSYNC_OK ||
++                        strcmp(sent_hash, fs->hash) != 0) {
++                    log_warning("'%s' changed since it was announced to the peer: not sent now, "
++                                "the next session takes it", path);
++                    free(sent_hash);
++                    free(data);
++                    incomplete = true;
+                     continue;
+                 }
++                free(sent_hash);
+ 
+                 message_t *file_msg = message_new(MSG_FILE_CONTENT);
+                 file_msg->payload.file_content.path = strdup(path);
+                 file_msg->payload.file_content.data = data;
+                 file_msg->payload.file_content.data_len = file_size;
+-
+-                file_state_t *fs = database_get(db, path);
+-                if (fs) {
+-                    file_msg->payload.file_content.mode = fs->mode;
+-                } else {
+-                    file_msg->payload.file_content.mode = 0644;
+-                }
++                file_msg->payload.file_content.mode = fs->mode;
+ 
+                 channel_send(channel, file_msg);
+                 message_free(file_msg);
+@@ -1168,12 +1336,54 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                 continue;
+             }
+ 
++            /* Only what was asked for is taken, and each file once */
++            size_t want = wanted_count;
++            for (size_t i = 0; i < wanted_count; i++) {
++                if (!arrived[i] && wanted[i] && strcmp(wanted[i], path) == 0) {
++                    want = i;
++                    break;
++                }
++            }
++            file_state_t *announced = find_state(remote_files, path);
++            if (want == wanted_count || !announced || announced->deleted || !announced->hash) {
++                log_warning("Ignoring '%s' from the peer: it was not asked for", path);
++                message_free(msg);
++                continue;
++            }
++
++            /*
++             * The content must be what the peer announced: the hash this
++             * node compared, with the date this node compared. A peer
++             * whose file changed between its scan and its sending (an
++             * older one does not check) would otherwise hand over content
++             * that gets the date of something else, and a file caught
++             * half-written would be taken for a good one.
++             */
++            char *got_hash = NULL;
++            if (compute_hash_buf(msg->payload.file_content.data, msg->payload.file_content.data_len,
++                                 &got_hash) != OWSYNC_OK ||
++                    strcmp(got_hash, announced->hash) != 0) {
++                log_warning("'%s' is not what the peer announced (it changed there meanwhile): "
++                            "not written, the next session takes it", path);
++                free(got_hash);
++                message_free(msg);
++                continue;
++            }
++            free(got_hash);
++
+             char full_path[MAX_PATH_LEN];
+             if (snprintf(full_path, sizeof(full_path), "%s/%s", root, path) >= (int)sizeof(full_path)) {
+                 message_free(msg);
+                 continue;
+             }
+ 
++            if (!unchanged_since_scan(full_path, find_state(local_files, path))) {
++                log_warning("Not replacing '%s': it changed here since this session's scan; "
++                            "the next session compares it again", path);
++                message_free(msg);
++                continue;
++            }
++
+             char *dir_path = strdup(full_path);
+             if (!dir_path) {
+                 message_free(msg);
+@@ -1245,11 +1455,37 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                     log_warning("fchmod failed for '%s': %s", path, strerror(errno));
+                 }
+ 
++                /*
++                 * The file keeps the date it has on the peer. With the
++                 * date of its arrival, by this node's clock, it would be
++                 * "newer" than the peer's own next edit whenever this
++                 * clock is ahead, or the edit follows within the time the
++                 * transfer took: that edit would lose against its own
++                 * predecessor and be undone on both nodes.
++                 */
++                struct timespec times[2];
++                times[0].tv_sec = 0;
++                times[0].tv_nsec = UTIME_OMIT;
++                times[1].tv_sec = (time_t)(announced->mtime / 1000);
++                times[1].tv_nsec = (long)(announced->mtime % 1000) * 1000000L;
++                if (ok && futimens(fd, times) != 0) {
++                    log_error("Cannot set the date of '%s': %s", path, strerror(errno));
++                    ok = 0;
++                }
++
+                 if (ok && fsync(fd) != 0) {
+                     log_error("fsync failed for '%s': %s", path, strerror(errno));
+                     ok = 0;
+                 }
+ 
++                /* The date as the file system kept it, as a scan reads it */
++                struct stat written_st;
++                uint64_t written_mtime = announced->mtime;
++                if (ok && fstat(fd, &written_st) == 0) {
++                    written_mtime = (uint64_t)written_st.st_mtim.tv_sec * 1000 +
++                                    written_st.st_mtim.tv_nsec / 1000000;
++                }
++
+                 if (close(fd) != 0 && ok) {
+                     log_error("close failed for '%s': %s", path, strerror(errno));
+                     ok = 0;
+@@ -1266,6 +1502,21 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+                     }
+                     log_info("Synced: %s", path);
+                     received_new_files = true;
++                    arrived[want] = true;
++
++                    /* The database learns of this file here and of nothing
++                     * else: a scan of the whole directory at this point
++                     * would also take in what was edited here during the
++                     * session, and the poller would never offer it. */
++                    file_state_t taken = {0};
++                    taken.path = (char *)path;
++                    taken.hash = announced->hash;
++                    taken.mtime = written_mtime;
++                    taken.size = msg->payload.file_content.data_len;
++                    taken.mode = msg->payload.file_content.mode & 0777;
++                    taken.deleted = false;
++                    database_put(db, path, &taken);
++                    db_changed = true;
+                 } else {
+                     unlink(tmp_path);
+                 }
+@@ -1280,6 +1531,10 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+ 
+         default:
+             message_free(msg);
++            for (size_t i = 0; i < wanted_count; i++) free(wanted[i]);
++            free(wanted);
++            free(arrived);
++            file_state_list_free(remote_files);
+             file_state_list_free(local_files);
+             database_free(db);
+             return OWSYNC_ERROR_PROTOCOL;
+@@ -1289,17 +1544,34 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     }
+ 
+     if (received_new_files) {
+-        database_update_from_scan(db, root, filter, &dirty);
+         database_save(db, db_path);
+     }
+ 
++    size_t missing = 0;
++    for (size_t i = 0; i < wanted_count; i++) {
++        if (!arrived[i]) {
++            log_warning("'%s' was asked of the peer and not taken in this session", wanted[i] ? wanted[i] : "?");
++            missing++;
++        }
++        free(wanted[i]);
++    }
++    free(wanted);
++    free(arrived);
++    if (missing > 0) incomplete = true;
++
++    file_state_list_free(remote_files);
+     file_state_list_free(local_files);
+     database_free(db);
+ 
+-    mark_synced(db_path);
+-
+     if (received_new_files || deletion_performed)
+         run_on_change();
++
++    if (incomplete) {
++        log_warning("Session ran to its end, but not everything was applied or sent");
++        return OWSYNC_ERROR_INCOMPLETE;
++    }
++
++    mark_synced(db_path);
+     return OWSYNC_OK;
+ }
+ 
+diff -ru a/src/state.c b/src/state.c
+--- a/src/state.c
++++ b/src/state.c
+@@ -924,3 +924,58 @@ int compute_hash(const char *path, char **out_hash) {
+     *out_hash = hex_encode(hash, hash_len);
+     return *out_hash ? OWSYNC_OK : OWSYNC_ERROR_MEMORY;
+ }
++
++/* SHA-256 of a buffer, hex-encoded (caller must free). */
++int compute_hash_buf(const uint8_t *data, size_t len, char **out_hash) {
++    if ((!data && len > 0) || !out_hash) return OWSYNC_ERROR;
++
++    uint8_t hash[EVP_MAX_MD_SIZE];
++    unsigned int hash_len = 0;
++
++    if (EVP_Digest(data ? data : (const uint8_t *)"", len, hash, &hash_len, EVP_sha256(), NULL) != 1) {
++        return OWSYNC_ERROR;
++    }
++
++    *out_hash = hex_encode(hash, hash_len);
++    return *out_hash ? OWSYNC_OK : OWSYNC_ERROR_MEMORY;
++}
++
++void database_clamp_future(database_t *db, const char *root, uint64_t now_ms,
++                           uint64_t limit_ms, bool *dirty) {
++    if (!db || !root) return;
++
++    for (size_t i = 0; i < db->bucket_count; i++) {
++        for (db_entry_t *entry = db->buckets[i]; entry; entry = entry->next) {
++            if (entry->state.mtime <= limit_ms) continue;
++
++            if (!entry->state.deleted) {
++                char full_path[MAX_PATH_LEN];
++                if (snprintf(full_path, sizeof(full_path), "%s/%s", root, entry->path) >= (int)sizeof(full_path)) {
++                    continue;
++                }
++                struct timespec times[2];
++                times[0].tv_sec = 0;
++                times[0].tv_nsec = UTIME_OMIT;
++                times[1].tv_sec = (time_t)(now_ms / 1000);
++                times[1].tv_nsec = (long)(now_ms % 1000) * 1000000L;
++                if (utimensat(AT_FDCWD, full_path, times, AT_SYMLINK_NOFOLLOW) != 0) {
++                    log_warning("'%s' is dated in the future and its date cannot be set: %s",
++                                entry->path, strerror(errno));
++                    continue;
++                }
++                log_warning("'%s' was dated in the future (the clock was wrong when it was written): "
++                            "its date is now the present", entry->path);
++                /* What the file system kept of it, as a scan reads it */
++                struct stat st;
++                if (lstat(full_path, &st) == 0) {
++                    entry->state.mtime = (uint64_t)st.st_mtim.tv_sec * 1000 + st.st_mtim.tv_nsec / 1000000;
++                } else {
++                    entry->state.mtime = now_ms;
++                }
++            } else {
++                entry->state.mtime = now_ms;
++            }
++            if (dirty) *dirty = true;
++        }
++    }
++}
+diff -ru a/src/sync.c b/src/sync.c
+--- a/src/sync.c
++++ b/src/sync.c
+@@ -85,7 +85,7 @@ static file_state_t *find_file_state(file_state_list_t *list, const char *path)
+  * deleted      | deleted     | (ignore - both agree)
+  * deleted      | live        | delete if remote.mtime > local.mtime
+  * live         | not found   | request file
+- * live         | deleted     | request if remote.mtime > local.mtime
++ * live         | deleted     | request if remote.mtime >= local.mtime
+  * live         | live        | request if hashes differ AND (remote.mtime > local.mtime
+  *              |             |   OR (mtime equal AND hash tie-breaker favors remote))
+  *
+@@ -129,8 +129,11 @@ int calculate_diff(file_state_list_t *local, file_state_list_t *remote,
+             } else {
+                 /* Remote is live */
+                 if (local_file->deleted) {
+-                    /* Local deleted, remote live - resurrect if remote newer */
+-                    if (remote_file->mtime > local_file->mtime) {
++                    /* Local deleted, remote live - resurrect if remote newer.
++                     * At the same instant the file wins: the other side, which
++                     * sees a deletion that is not newer than its file, keeps
++                     * it, and both must arrive at the same answer. */
++                    if (remote_file->mtime >= local_file->mtime) {
+                         path_list_add(&plan->files_to_request, remote_file->path);
+                     }
+                 } else {

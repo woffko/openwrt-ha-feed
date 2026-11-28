@@ -622,6 +622,53 @@ cleanup restores `/etc/config/lease-sync` and restarts ha-cluster.
 T28 belongs to this fork, which adds the IPv6 BACKUP guard handler
 (`/etc/hotplug.d/keepalived/20-ipv6-backup-guard`).
 
+### owsync patches (no container)
+
+`tests/owsync/run-tests.sh` tests what the owsync patches 050-080 of this
+feed are for. It needs no container: two owsync daemons run against each
+other on the loopback addresses 127.0.0.1 and 127.0.0.2, in a network and
+process namespace of their own (`bwrap`), and `peer.py` plays a peer by
+hand where two daemons cannot be made to do something at a chosen moment:
+it cuts a session after the first file, sends other content than it
+announced, sends a file nobody asked for, or waits in the middle of a
+session while the test edits a file. `ptyrun.py` gives each daemon a
+terminal, because owsync logs to standard error only then. Needs
+`python3` and `bwrap`.
+
+```
+OWSYNC=<command> [OWSYNC_OLD=<command>] sh tests/owsync/run-tests.sh [test ...]
+```
+
+`OWSYNC` is the owsync under test, `OWSYNC_OLD` one without the patches
+for the tests of a pair with one node upgraded (skipped without it). A
+binary built for a router runs on an x86_64 machine through the image's
+loader:
+
+```
+R=<build tree>/build_dir/target-x86_64_musl/root-x86
+OWSYNC="$R/lib/ld-musl-x86_64.so.1 --library-path $R/lib:$R/usr/lib <new owsync binary>" \
+OWSYNC_OLD="$R/lib/ld-musl-x86_64.so.1 --library-path $R/lib:$R/usr/lib $R/usr/bin/owsync" \
+	sh tests/owsync/run-tests.sh
+```
+
+| Test | What it shows |
+|------|---------------|
+| `basic` | an edit goes each way, a deletion goes over and has the same date in both databases |
+| `retry` | a change made while the peer was out of reach arrives when the peer is back, through the retry of the node that holds it |
+| `date` | a file keeps the sender's date; a second edit right after the first is not undone by the first |
+| `cut` | a session cut after one file of two: the file is recorded and the program after a change runs |
+| `content` | content that does not match the announced hash, and a file that was not asked for, are not written |
+| `edit_during` | a file edited on the node while a session runs is not replaced, and another one edited meanwhile is still offered to the peer |
+| `together` | both nodes start at the same moment with a large file for each other, eight times |
+| `database` | the database under its own name only; its directory made again when it went missing |
+| `future` | a file dated in the future gets the present as its date and no longer wins against a later edit |
+| `large` | a file too large to be sent is not offered, and the session counts as complete |
+| `encrypted` | an encrypting pair, and the one-shot session of a router that joins |
+| `mixed` | a node with the patches and one without: both directions, a deletion, a change made while the old node was away, both started together |
+
+Twenty-two of the fifty-two checks fail on owsync 1.3.0-r7, each where
+the patch that fixes it says.
+
 ## Usage
 
 ### Run All Priority 1 Tests

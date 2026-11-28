@@ -1,0 +1,993 @@
+From: OpenWrt HA build <local>
+Subject: [PATCH] owsync: one session at a time, a failed session tried again, shorter timeouts
+
+A daemon started a session to its peers once, when it started and when a
+scan found a change. If that session failed, because the peer was being
+restarted, its link was down or its owsync was not listening yet, nothing
+tried again: the change stayed on one node until the next change or the
+next restart. Seen on a router whose owsync started two seconds after its
+sync interface came up.
+
+The poller now keeps, for every peer, whether a session to it is owed:
+from the start of the daemon, from every change a scan finds, and from
+every session with it that did not end well. Only a session this node
+started and that ended well clears it. Until then the session is tried
+again, first after one to two seconds, then after up to twice as long
+each time, up to the poll interval. Every wait is drawn anew and kept to
+the millisecond: two nodes that turned each other away at the same moment
+would, with equal waits or waits on the ticks of a clock, come back at
+the same moment for ever. The first failure is logged as an error, the
+attempts after it at debug level, and the success with the number of
+attempts it took.
+
+Sessions no longer run side by side. Two at once worked on the same files
+and the same database with nothing between them: both nodes start a
+session to each other whenever both start together or both find a change
+in the same poll, and the poller scanned while a session a peer had
+started was writing. One lock, in the process and (a lock file next to
+the database) between a daemon and a one-shot command, is held by a
+session and by the poller's scan. A session that finds it taken does not
+wait, which would leave two nodes waiting for each other: a connection
+from a peer is closed at once and the peer tries again, and a session of
+this node's own returns OWSYNC_ERROR_BUSY and is tried again shortly.
+Whatever leaves a peer without a session it was owed - a session it
+started that ended badly or was turned away, a change that a session's
+scan found before the poller did - makes the daemon sync to its peers
+again.
+
+With one session at a time a peer that stalls keeps every other session
+out, so the timeout of a read or write on a session's socket is 30
+seconds instead of 300, and a connection to a peer is given 10 seconds
+instead of the kernel's two minutes. A source address that cannot be
+bound (its interface is down) is no longer skipped: the connection would
+leave through whatever route there is, with a source the peer does not
+accept.
+
+The wire protocol does not change. A node without the patch whose session
+is turned away does not try again; the node with the patch does, and
+brings over what both hold.
+
+diff -ru a/include/common.h b/include/common.h
+--- a/include/common.h
++++ b/include/common.h
+@@ -38,6 +38,7 @@ typedef enum {
+     OWSYNC_ERROR_CLOCK_SKEW = -6,    /* Peer clock difference exceeds threshold */
+     OWSYNC_ERROR_VERSION_MISMATCH = -7, /* Protocol version mismatch */
+     OWSYNC_ERROR_INCOMPLETE = -8,    /* Session ran to its end, but not every file was applied or sent */
++    OWSYNC_ERROR_BUSY = -9,          /* Another session is running: nothing was done, try again */
+ } owsync_error_t;
+ 
+ /* Dynamic byte buffer with automatic growth */
+diff -ru a/include/net.h b/include/net.h
+--- a/include/net.h
++++ b/include/net.h
+@@ -88,6 +88,28 @@ void net_set_allowed_peers(char **peers, size_t count);
+  */
+ void net_set_on_change(const char *path);
+ 
++/*
++ * One session at a time works on the sync directory and the database, in
++ * this process and (through a lock file next to the database) across the
++ * processes that share them. With wait a caller blocks until the session
++ * that runs has ended; without, it gets OWSYNC_ERROR_BUSY at once.
++ * net_session_leave() ends what a successful net_session_enter() began.
++ */
++int net_session_enter(const char *db_path, bool wait);
++void net_session_leave(void);
++
++/*
++ * True, once, when something happened that leaves a peer without what
++ * this node has, or this node without what a peer has, and no session of
++ * this node's own will follow by itself: a session a peer started ended
++ * badly or was turned away, or a session's scan found a change the poller
++ * has not seen. The daemon then syncs to its peers again.
++ */
++bool net_take_resync_request(void);
++
++/* Repeated failures to reach a peer are logged at debug level only */
++void net_set_connect_quiet(bool quiet);
++
+ /* Server mode: listen for incoming connections, spawn threads */
+ int start_server(const char *host, const char *port, const char *key,
+                  const char *root, const char *db_path, file_filter_t *filter,
+diff -ru a/src/daemon.c b/src/daemon.c
+--- a/src/daemon.c
++++ b/src/daemon.c
+@@ -11,6 +11,8 @@
+ #include <stdbool.h>
+ #include <string.h>
+ #include <errno.h>
++#include <stdint.h>
++#include <time.h>
+ 
+ /* Daemon state shared between server, poller, and signal handler */
+ typedef struct {
+@@ -26,24 +28,25 @@ typedef struct {
+     size_t peer_count;       /* Number of peers */
+     int64_t clock_offset;    /* Debug clock offset */
+ 
+-    /* Synchronization state */
+-    pthread_mutex_t sync_mutex;       /* Protects sync_in_progress */
+-    volatile bool sync_in_progress;   /* Prevents overlapping syncs */
+     volatile sig_atomic_t shutdown;   /* Signal handler sets this (async-signal-safe) */
+ } daemon_context_t;
+ 
+-/* Arguments for sync worker thread (one per peer) */
++/*
++ * What the poller knows of one peer. A peer is "pending" while this node
++ * may hold something the peer has not got, or the other way round: from
++ * the start of the daemon, from every change a scan finds, and from every
++ * session with it that did not end well. Only a session this node started
++ * to it and that ended well clears it. Until then the session is tried
++ * again, first after a few seconds, then at doubling intervals up to the
++ * poll interval: a peer that was out of reach when a file changed gets the
++ * file when it is back, without waiting for the next change.
++ */
+ typedef struct {
+-    const char *peer;        /* Peer hostname (shared, do not free) */
+-    const char *port;        /* Port (shared, do not free) */
+-    const char *key;         /* Encryption key (shared) */
+-    const char *root;        /* Sync root (shared) */
+-    const char *db_path;     /* Database path (shared) */
+-    file_filter_t *filter;   /* File filter (shared) */
+-    int64_t clock_offset;    /* Debug clock offset */
+-    char *source_address;    /* Per-peer source address (NULL if not set, owned by task) */
+-    char *parsed_peer;       /* Parsed peer address (owned by task) */
+-} sync_task_t;
++    bool pending;           /* A session to this peer is owed */
++    uint32_t failures;      /* Sessions that failed in a row */
++    uint64_t next_try_ms;   /* Not before this (monotonic clock) */
++    uint64_t backoff_ms;    /* The wait before the last retry */
++} peer_state_t;
+ 
+ /*
+  * Global daemon context for signal handler access.
+@@ -60,131 +63,95 @@ static void signal_handler(int sig) {
+     }
+ }
+ 
+-/* Worker thread: sync to one peer (runs in parallel with other workers) */
+-static void *sync_peer_worker(void *arg) {
+-    sync_task_t *task = (sync_task_t *)arg;
+-
+-    /* Use parsed_peer if available (comma-separated format with source) */
+-    const char *peer_addr = task->parsed_peer ? task->parsed_peer : task->peer;
+-
+-    if (task->source_address) {
+-        log_info("Syncing to peer: %s:%s (source: %s)", peer_addr, task->port, task->source_address);
+-    } else {
+-        log_info("Syncing to peer: %s:%s", peer_addr, task->port);
+-    }
+-
+-    int result = connect_peer(peer_addr, task->port, task->key, task->root,
+-                              task->db_path, task->filter, task->clock_offset,
+-                              task->source_address);
+-
+-    if (result != OWSYNC_OK) {
+-        log_error("Sync to %s:%s failed: %d", peer_addr, task->port, result);
+-    } else {
+-        log_info("Sync to %s:%s completed", peer_addr, task->port);
+-    }
+-
+-    /* Free allocated strings */
+-    free(task->source_address);
+-    free(task->parsed_peer);
+-    free(task);  /* Task struct owned by this thread */
+-    return NULL;
++static uint64_t monotonic_ms(void) {
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+ }
+ 
+ /*
+- * Trigger parallel sync to all configured peers.
+- * Spawns one thread per peer, waits for all to complete.
+- * Prevents overlapping sync batches via sync_in_progress flag.
++ * A wait of between half of ms and ms, never the same twice. Two nodes
++ * that connect to each other at the same moment turn each other away, at
++ * the same moment again: with waits that are equal, or that only come in
++ * whole seconds, they would do it again at every retry, for ever. Every
++ * wait is drawn anew, also once the waits have reached their longest.
+  */
+-static void trigger_sync_to_peers(daemon_context_t *ctx) {
+-    pthread_mutex_lock(&ctx->sync_mutex);
+-
+-    if (ctx->sync_in_progress) {
+-        log_warning("Sync already in progress, skipping");
+-        pthread_mutex_unlock(&ctx->sync_mutex);
+-        return;
+-    }
+-
+-    ctx->sync_in_progress = true;
+-    pthread_mutex_unlock(&ctx->sync_mutex);
++static uint64_t spread(unsigned int *seed, uint64_t ms) {
++    return ms / 2 + (uint64_t)rand_r(seed) % (ms / 2 + 1);
++}
+ 
+-    log_info("Triggering sync to %zu peers", ctx->peer_count);
++/* The first retry comes one to two seconds after a failure; each further
++ * one after up to twice as long, up to the poll interval */
++#define RETRY_FIRST_MS 2000
+ 
+-    pthread_t *threads = calloc(ctx->peer_count, sizeof(pthread_t));
+-    bool *thread_created = calloc(ctx->peer_count, sizeof(bool));
++static void sleep_ms(uint64_t ms) {
++    struct timespec ts = { .tv_sec = (time_t)(ms / 1000), .tv_nsec = (long)(ms % 1000) * 1000000L };
++    nanosleep(&ts, NULL);
++}
+ 
+-    if (!threads || !thread_created) {
+-        log_error("Failed to allocate threads array");
+-        free(threads);
+-        free(thread_created);
+-        pthread_mutex_lock(&ctx->sync_mutex);
+-        ctx->sync_in_progress = false;
+-        pthread_mutex_unlock(&ctx->sync_mutex);
+-        return;
++/* One session to one peer, in the poller's own thread: sessions do not
++ * run side by side (see net_session_enter), so a thread each buys nothing */
++static int sync_one_peer(daemon_context_t *ctx, size_t i, bool quiet) {
++    /* Peer format "addr[,source_addr]" */
++    char peer_addr[256];
++    const char *source_address = NULL;
++    const char *comma = strchr(ctx->peers[i], ',');
++    size_t peer_len = comma ? (size_t)(comma - ctx->peers[i]) : strlen(ctx->peers[i]);
++
++    if (peer_len == 0 || peer_len >= sizeof(peer_addr)) {
++        log_error("Unusable peer '%s'", ctx->peers[i]);
++        return OWSYNC_ERROR;
+     }
++    memcpy(peer_addr, ctx->peers[i], peer_len);
++    peer_addr[peer_len] = '\0';
++    if (comma && comma[1] != '\0') source_address = comma + 1;
+ 
+-    for (size_t i = 0; i < ctx->peer_count; i++) {
+-        sync_task_t *task = malloc(sizeof(sync_task_t));
+-        if (!task) {
+-            log_error("Failed to allocate sync task");
+-            continue;
+-        }
+-
+-        /* All peers use the global port */
+-        task->peer = ctx->peers[i];
+-        task->port = ctx->port;
+-        task->key = ctx->key;
+-        task->root = ctx->root;
+-        task->db_path = ctx->db_path;
+-        task->filter = ctx->filter;
+-        task->clock_offset = ctx->clock_offset;
+-
+-        /* Parse peer format "addr[,source_addr]" */
+-        task->source_address = NULL;
+-        task->parsed_peer = NULL;
+-        const char *comma = strchr(ctx->peers[i], ',');
+-        if (comma) {
+-            /* Has source address */
+-            size_t peer_len = comma - ctx->peers[i];
+-            task->parsed_peer = strndup(ctx->peers[i], peer_len);
+-            task->source_address = strdup(comma + 1);
+-            if (!task->parsed_peer || !task->source_address) {
+-                log_error("Failed to allocate peer address strings");
+-                free(task->parsed_peer);
+-                free(task->source_address);
+-                free(task);
+-                continue;
+-            }
+-        }
+-
+-        if (pthread_create(&threads[i], NULL, sync_peer_worker, task) == 0) {
+-            thread_created[i] = true;
++    if (!quiet) {
++        if (source_address) {
++            log_info("Syncing to peer: %s:%s (source: %s)", peer_addr, ctx->port, source_address);
+         } else {
+-            log_error("Failed to create sync thread for %s", ctx->peers[i]);
+-            free(task->source_address);
+-            free(task->parsed_peer);
+-            free(task);
++            log_info("Syncing to peer: %s:%s", peer_addr, ctx->port);
+         }
+     }
+ 
+-    for (size_t i = 0; i < ctx->peer_count; i++) {
+-        if (thread_created[i]) {
+-            pthread_join(threads[i], NULL);
+-        }
++    net_set_connect_quiet(quiet);
++    int result = connect_peer(peer_addr, ctx->port, ctx->key, ctx->root,
++                              ctx->db_path, ctx->filter, ctx->clock_offset,
++                              source_address);
++    net_set_connect_quiet(false);
++    return result;
++}
++
++/* The scan of the poller, with no session at work on the same files:
++ * loads the database, brings it up to date, saves it when it changed */
++static int scan_for_changes(daemon_context_t *ctx, bool *dirty) {
++    *dirty = false;
++
++    database_t *db = database_new();
++    if (!db) {
++        log_error("Failed to create database");
++        return OWSYNC_ERROR_MEMORY;
+     }
+ 
+-    free(threads);
+-    free(thread_created);
++    net_session_enter(ctx->db_path, true);
+ 
+-    pthread_mutex_lock(&ctx->sync_mutex);
+-    ctx->sync_in_progress = false;
+-    pthread_mutex_unlock(&ctx->sync_mutex);
++    if (database_load(db, ctx->db_path) != OWSYNC_OK) {
++        log_warning("Database load failed, will rebuild from filesystem scan");
++    }
++
++    int result = database_update_from_scan(db, ctx->root, ctx->filter, dirty);
++    if (result == OWSYNC_OK && *dirty) {
++        database_save(db, ctx->db_path);
++    }
+ 
+-    log_info("All peer syncs completed");
++    net_session_leave();
++    database_free(db);
++    return result;
+ }
+ 
+ /*
+- * Poller thread: periodically scan filesystem for changes.
+- * On changes: save database, trigger sync to all peers.
++ * Poller thread: periodically scan filesystem for changes, and keep at
++ * every peer until a session with it has ended well.
+  * Initial sync always runs on startup for state reconciliation.
+  */
+ static void *poller_thread(void *arg) {
+@@ -192,84 +159,138 @@ static void *poller_thread(void *arg) {
+ 
+     log_info("Poller started, interval=%us", ctx->poll_interval);
+ 
+-    database_t *db = database_new();
+-    if (!db) {
+-        log_error("Failed to create database");
++    peer_state_t *peers = calloc(ctx->peer_count ? ctx->peer_count : 1, sizeof(peer_state_t));
++    if (!peers) {
++        log_error("Failed to allocate peer states");
+         return NULL;
+     }
+ 
+-    if (database_load(db, ctx->db_path) != OWSYNC_OK) {
+-        log_warning("Database load failed, will rebuild from filesystem scan");
+-    }
++    struct timespec seed_ts;
++    clock_gettime(CLOCK_REALTIME, &seed_ts);
++    unsigned int seed = (unsigned int)seed_ts.tv_nsec ^ (unsigned int)getpid() ^
++                        (unsigned int)(uintptr_t)ctx;
+ 
+     bool dirty = false;
+     log_info("Performing initial scan...");
+-    int result = database_update_from_scan(db, ctx->root, ctx->filter, &dirty);
++    int result = scan_for_changes(ctx, &dirty);
+ 
+     if (result != OWSYNC_OK) {
+         log_error("Initial scan failed: %d", result);
++    } else if (dirty) {
++        log_info("Initial scan detected local changes, saving database");
+     } else {
+-        if (dirty) {
+-            log_info("Initial scan detected local changes, saving database");
+-            database_save(db, ctx->db_path);
+-        } else {
+-            log_debug("No local changes detected in initial scan");
+-        }
++        log_debug("No local changes detected in initial scan");
+     }
+ 
+-    database_free(db);
+-
+     /*
+-     * Always trigger initial sync to peers on startup, regardless of whether
+-     * local changes were detected. This ensures state reconciliation after
+-     * reboots or network partitions. The bidirectional sync protocol will:
++     * Always sync to peers on startup, regardless of whether local changes
++     * were detected. This ensures state reconciliation after reboots or
++     * network partitions. The bidirectional sync protocol will:
+      * - Push any local changes to peers
+      * - Pull any remote changes from peers
+      */
+     log_info("Triggering initial sync to reconcile state with peers");
+-    trigger_sync_to_peers(ctx);
+-
+-    while (!ctx->shutdown) {
+-        // Sleep in 1-second intervals to check shutdown flag frequently
+-        for (uint32_t i = 0; i < ctx->poll_interval && !ctx->shutdown; i++) {
+-            sleep(1);
+-        }
+-
+-        if (ctx->shutdown) break;
++    for (size_t i = 0; i < ctx->peer_count; i++) {
++        peers[i].pending = true;
++    }
+ 
+-        log_debug("Polling for changes...");
++    uint64_t last_scan_ms = monotonic_ms();
++    uint64_t poll_ms = (uint64_t)ctx->poll_interval * 1000;
+ 
+-        db = database_new();
+-        if (!db) {
+-            log_error("Failed to create database");
+-            continue;
++    while (!ctx->shutdown) {
++        uint64_t now = monotonic_ms();
++
++        if (now - last_scan_ms >= poll_ms) {
++            log_debug("Polling for changes...");
++            last_scan_ms = now;
++            dirty = false;
++            result = scan_for_changes(ctx, &dirty);
++            if (result != OWSYNC_OK) {
++                log_error("Scan failed: %d", result);
++            } else if (dirty) {
++                log_info("Changes detected, saving database");
++                log_info("Triggering sync to %zu peers", ctx->peer_count);
++                for (size_t i = 0; i < ctx->peer_count; i++) {
++                    peers[i].pending = true;
++                    /* A peer that is being retried keeps its schedule */
++                    if (peers[i].failures == 0) peers[i].next_try_ms = 0;
++                }
++            } else {
++                log_debug("No changes detected");
++            }
+         }
+ 
+-        if (database_load(db, ctx->db_path) != OWSYNC_OK) {
+-            log_warning("Database load failed, will rebuild from filesystem scan");
++        if (net_take_resync_request()) {
++            log_debug("A session asked for another round with the peers");
++            for (size_t i = 0; i < ctx->peer_count; i++) {
++                peers[i].pending = true;
++            }
+         }
+ 
+-        dirty = false;
+-        result = database_update_from_scan(db, ctx->root, ctx->filter, &dirty);
+-
+-        if (result != OWSYNC_OK) {
+-            log_error("Scan failed: %d", result);
+-            database_free(db);
+-            continue;
++        for (size_t i = 0; i < ctx->peer_count && !ctx->shutdown; i++) {
++            peer_state_t *peer = &peers[i];
++
++            now = monotonic_ms();
++            if (!peer->pending || now < peer->next_try_ms) continue;
++
++            /* After the first failure the attempts are not logged one by
++             * one: a peer that is away for an hour is one line, not 120 */
++            result = sync_one_peer(ctx, i, peer->failures > 0);
++            now = monotonic_ms();
++
++            if (result == OWSYNC_OK) {
++                if (peer->failures > 0) {
++                    log_info("Sync to %s completed after %u failed attempt(s)",
++                             ctx->peers[i], peer->failures);
++                } else {
++                    log_info("Sync to %s completed", ctx->peers[i]);
++                }
++                peer->pending = false;
++                peer->failures = 0;
++                peer->backoff_ms = 0;
++                peer->next_try_ms = 0;
++            } else if (result == OWSYNC_ERROR_BUSY) {
++                /* Another session runs, most likely one this very peer
++                 * started: no failure, and soon tried again */
++                peer->next_try_ms = now + spread(&seed, RETRY_FIRST_MS);
++            } else {
++                peer->failures++;
++                if (peer->failures == 1) {
++                    peer->backoff_ms = RETRY_FIRST_MS;
++                    log_error("Sync to %s failed: %d; it is tried again until it succeeds",
++                              ctx->peers[i], result);
++                } else {
++                    peer->backoff_ms *= 2;
++                    log_debug("Sync to %s failed again: %d (attempt %u)",
++                              ctx->peers[i], result, peer->failures);
++                }
++                if (peer->backoff_ms > poll_ms) peer->backoff_ms = poll_ms;
++                if (peer->backoff_ms < 200) peer->backoff_ms = 200;
++                peer->next_try_ms = now + spread(&seed, peer->backoff_ms);
++            }
+         }
+ 
+-        if (dirty) {
+-            log_info("Changes detected, saving database");
+-            database_save(db, ctx->db_path);
+-            database_free(db);
++        if (ctx->shutdown) break;
+ 
+-            trigger_sync_to_peers(ctx);
+-        } else {
+-            log_debug("No changes detected");
+-            database_free(db);
++        /*
++         * Asleep until the next thing is due, a retry or a scan, to the
++         * millisecond: retries that all fell on the ticks of one clock
++         * would bring two nodes back at the same moment after all. Never
++         * longer than a second, for the shutdown flag and for what a
++         * session of a peer may ask (net_take_resync_request).
++         */
++        now = monotonic_ms();
++        uint64_t due = last_scan_ms + poll_ms;
++        for (size_t i = 0; i < ctx->peer_count; i++) {
++            if (peers[i].pending && peers[i].next_try_ms < due) due = peers[i].next_try_ms;
+         }
++        uint64_t nap = due > now ? due - now : 0;
++        if (nap > 1000) nap = 1000;
++        if (nap < 20) nap = 20;
++        sleep_ms(nap);
+     }
+ 
++    free(peers);
+     log_info("Poller stopped");
+     return NULL;
+ }
+@@ -315,15 +336,9 @@ int start_daemon(const char *host, const char *port, const char *key,
+         .peers = peers,
+         .peer_count = peer_count,
+         .clock_offset = clock_offset,
+-        .sync_in_progress = false,
+         .shutdown = 0
+     };
+ 
+-    if (pthread_mutex_init(&ctx.sync_mutex, NULL) != 0) {
+-        log_error("Failed to initialize sync mutex");
+-        return OWSYNC_ERROR;
+-    }
+-
+     g_daemon_ctx = &ctx;
+ 
+     /*
+@@ -339,7 +354,6 @@ int start_daemon(const char *host, const char *port, const char *key,
+ 
+     if (sigaction(SIGINT, &sa, NULL) != 0 || sigaction(SIGTERM, &sa, NULL) != 0) {
+         log_error("Failed to install signal handlers: %s", strerror(errno));
+-        pthread_mutex_destroy(&ctx.sync_mutex);
+         return OWSYNC_ERROR;
+     }
+ 
+@@ -347,7 +361,6 @@ int start_daemon(const char *host, const char *port, const char *key,
+ 
+     if (pthread_create(&server_tid, NULL, server_thread, &ctx) != 0) {
+         log_error("Failed to create server thread");
+-        pthread_mutex_destroy(&ctx.sync_mutex);
+         return OWSYNC_ERROR;
+     }
+ 
+@@ -356,7 +369,6 @@ int start_daemon(const char *host, const char *port, const char *key,
+         ctx.shutdown = 1;
+         pthread_cancel(server_tid);
+         pthread_join(server_tid, NULL);
+-        pthread_mutex_destroy(&ctx.sync_mutex);
+         return OWSYNC_ERROR;
+     }
+ 
+@@ -367,8 +379,6 @@ int start_daemon(const char *host, const char *port, const char *key,
+     pthread_cancel(server_tid);
+     pthread_join(server_tid, NULL);
+ 
+-    pthread_mutex_destroy(&ctx.sync_mutex);
+-
+     log_info("Shutdown complete");
+     return OWSYNC_OK;
+ }
+diff -ru a/src/main.c b/src/main.c
+--- a/src/main.c
++++ b/src/main.c
+@@ -559,6 +559,10 @@ static int cmd_connect(int argc, char **argv) {
+ 
+     int result = connect_peer(peer_host, opts.port, opts.key, opts.dir, opts.db, filter, opts.clock_offset, source_address);
+ 
++    if (result == OWSYNC_ERROR_BUSY) {
++        fprintf(stderr, "Another owsync session is at work on this database: try again.\n");
++    }
++
+     file_filter_free(filter);
+     free_options(&opts);
+ 
+diff -ru a/src/net.c b/src/net.c
+--- a/src/net.c
++++ b/src/net.c
+@@ -22,6 +22,8 @@
+ #include <fcntl.h>
+ #include <limits.h>
+ #include <sys/wait.h>
++#include <sys/file.h>
++#include <poll.h>
+ 
+ #define MAX_CONNECTIONS 50  /* Limit concurrent connections to prevent resource exhaustion */
+ 
+@@ -30,8 +32,20 @@
+  * A peer that opens a connection and then stalls would otherwise hold one of the
+  * MAX_CONNECTIONS slots forever. The value must stay well above the longest
+  * legitimate silence, which is the peer's initial scan + hash of the sync tree.
++ * One session runs at a time, so a peer that stalls also keeps every other
++ * session out for this long: 30 seconds, where the scan of a directory of
++ * config files takes milliseconds.
+  */
+-#define SOCKET_TIMEOUT_SEC 300
++#ifndef OWSYNC_SOCKET_TIMEOUT_SEC
++#define OWSYNC_SOCKET_TIMEOUT_SEC 30
++#endif
++#define SOCKET_TIMEOUT_SEC OWSYNC_SOCKET_TIMEOUT_SEC
++
++/* How long a connection to a peer may take to be made. The kernel's own
++ * limit is about two minutes, during which the poller would do nothing. */
++#ifndef OWSYNC_CONNECT_TIMEOUT_SEC
++#define OWSYNC_CONNECT_TIMEOUT_SEC 10
++#endif
+ 
+ /*
+  * Cap on the total size of inbound message buffers held at the same time.
+@@ -79,6 +93,92 @@ static void inflight_release(size_t len) {
+     pthread_mutex_unlock(&inflight_mutex);
+ }
+ 
++/*
++ * One session at a time.
++ *
++ * Two sessions at once worked on the same files and the same database with
++ * nothing between them: both nodes start a session to each other at the
++ * same moment whenever both start together or both find a change in the
++ * same poll, and the poller scanned while a session a peer started was
++ * writing. A session that finds another one running does not wait for it:
++ * the two nodes would wait for each other, each holding its own lock,
++ * until a timeout ended both. It gives up at once (OWSYNC_ERROR_BUSY) and
++ * the caller tries again a little later; only the poller's short scan
++ * waits. The lock file next to the database keeps a one-shot command and
++ * a daemon on the same directory apart as well; where it cannot be made,
++ * the lock still holds inside this process.
++ */
++static pthread_mutex_t session_mutex = PTHREAD_MUTEX_INITIALIZER;
++static int session_lock_fd = -1;
++static volatile int resync_wanted = 0;
++/* Of the thread that connects to a peer; a session a peer started runs in
++ * a thread of its own and is never quiet */
++static __thread bool connect_quiet = false;
++
++/* A failure to reach a peer or to greet it: an error, but only a debug
++ * line while the caller is trying a peer again that failed before */
++#define log_reach(...) do { \
++        if (connect_quiet) log_debug(__VA_ARGS__); else log_error(__VA_ARGS__); \
++    } while (0)
++/* What a session could not finish: a warning, and a debug line while the
++ * same session is being tried again */
++#define log_unfinished(...) do { \
++        if (connect_quiet) log_debug(__VA_ARGS__); else log_warning(__VA_ARGS__); \
++    } while (0)
++
++int net_session_enter(const char *db_path, bool wait) {
++    if (wait) {
++        pthread_mutex_lock(&session_mutex);
++    } else if (pthread_mutex_trylock(&session_mutex) != 0) {
++        return OWSYNC_ERROR_BUSY;
++    }
++
++    session_lock_fd = -1;
++    if (db_path) {
++        char lock_path[MAX_PATH_LEN];
++        int n = snprintf(lock_path, sizeof(lock_path), "%s.lock", db_path);
++        if (n > 0 && (size_t)n < sizeof(lock_path)) {
++            int fd = open(lock_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
++            if (fd >= 0) {
++                int rc;
++                do {
++                    rc = flock(fd, wait ? LOCK_EX : (LOCK_EX | LOCK_NB));
++                } while (rc != 0 && errno == EINTR);
++                if (rc != 0) {
++                    close(fd);
++                    if (errno == EWOULDBLOCK) {
++                        pthread_mutex_unlock(&session_mutex);
++                        return OWSYNC_ERROR_BUSY;
++                    }
++                } else {
++                    session_lock_fd = fd;
++                }
++            }
++        }
++    }
++    return OWSYNC_OK;
++}
++
++void net_session_leave(void) {
++    if (session_lock_fd >= 0) {
++        close(session_lock_fd);  /* releases the flock */
++        session_lock_fd = -1;
++    }
++    pthread_mutex_unlock(&session_mutex);
++}
++
++static void request_resync(void) {
++    __sync_lock_test_and_set(&resync_wanted, 1);
++}
++
++bool net_take_resync_request(void) {
++    return __sync_lock_test_and_set(&resync_wanted, 0) != 0;
++}
++
++void net_set_connect_quiet(bool quiet) {
++    connect_quiet = quiet;
++}
++
+ /* Bound the time a single read/write may block on a sync socket. */
+ static void set_socket_timeouts(int fd) {
+     struct timeval tv = { .tv_sec = SOCKET_TIMEOUT_SEC, .tv_usec = 0 };
+@@ -926,7 +1026,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+ 
+     log_debug("Sending Hello message");
+     if (channel_send(channel, hello) != OWSYNC_OK) {
+-        log_error("Failed to send Hello");
++        log_reach("Failed to send Hello");
+         message_free(hello);
+         return OWSYNC_ERROR_IO;
+     }
+@@ -936,7 +1036,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+ 
+     message_t *peer_hello = NULL;
+     if (channel_receive(channel, &peer_hello) != OWSYNC_OK) {
+-        log_error("Failed to receive Hello");
++        log_reach("Failed to receive Hello");
+         return OWSYNC_ERROR_IO;
+     }
+ 
+@@ -949,7 +1049,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     }
+ 
+     if (peer_hello->payload.hello.version != PROTOCOL_VERSION) {
+-        log_error("Version mismatch");
++        log_reach("Version mismatch");
+         message_free(peer_hello);
+         return OWSYNC_ERROR_VERSION_MISMATCH;
+     }
+@@ -957,7 +1057,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     uint64_t peer_time = peer_hello->payload.hello.timestamp;
+     uint64_t diff = (now > peer_time) ? (now - peer_time) : (peer_time - now);
+     if (diff > CLOCK_SKEW_THRESHOLD) {
+-        log_error("Clock skew too large: %lu seconds", diff);
++        log_reach("Clock skew too large: %lu seconds", diff);
+         message_free(peer_hello);
+         return OWSYNC_ERROR_CLOCK_SKEW;
+     }
+@@ -997,6 +1097,9 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+     if (dirty) {
+         log_debug("Database dirty, saving");
+         database_save(db, db_path);
++        /* The change is recorded now, so the poller will not find it;
++         * this session gives it to this peer only */
++        request_resync();
+     }
+ 
+     file_state_list_t *local_files = database_get_all_filtered(db, filter);
+@@ -1440,6 +1543,9 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
+             }
+ 
+             int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
++            if (fd < 0) {
++                log_unfinished("Cannot write '%s' here: %s", path, strerror(errno));
++            }
+             if (fd >= 0) {
+                 /*
+                  * Commit sequence: write -> fsync -> close -> rename -> fsync(dir).
+@@ -1551,7 +1657,7 @@ out:
+ 
+     for (size_t i = 0; i < wanted_count; i++) {
+         if (ran_to_its_end && !arrived[i]) {
+-            log_warning("'%s' was asked of the peer and not taken in this session", wanted[i] ? wanted[i] : "?");
++            log_unfinished("'%s' was asked of the peer and not taken in this session", wanted[i] ? wanted[i] : "?");
+             incomplete = true;
+         }
+         free(wanted[i]);
+@@ -1574,7 +1680,7 @@ out:
+     if (rc != OWSYNC_OK) return rc;
+ 
+     if (incomplete) {
+-        log_warning("Session ran to its end, but not everything was applied or sent");
++        log_unfinished("Session ran to its end, but not everything was applied or sent");
+         return OWSYNC_ERROR_INCOMPLETE;
+     }
+ 
+@@ -1715,10 +1821,24 @@ static void *handle_connection(void *arg) {
+         return NULL;
+     }
+ 
+-    int result = handle_protocol(channel, args->root, args->db_path, args->filter, args->clock_offset);
++    /*
++     * A session is running already (often the one this node started to
++     * the very peer that connects now): the connection is closed at once.
++     * The peer sees its session fail and tries again; this node syncs to
++     * its peers again too, for a peer that does not try again by itself.
++     */
++    if (net_session_enter(args->db_path, false) != OWSYNC_OK) {
++        log_info("A session is running: connection from a peer closed, to be made again");
++        request_resync();
++    } else {
++        int result = handle_protocol(channel, args->root, args->db_path, args->filter, args->clock_offset);
++        net_session_leave();
+ 
+-    if (result != OWSYNC_OK) {
+-        log_error("Session error: %d", result);
++        if (result != OWSYNC_OK) {
++            log_error("Session error: %d", result);
++            /* What the peer wanted to bring or take may not have arrived */
++            request_resync();
++        }
+     }
+ 
+     channel_free(channel);
+@@ -1734,6 +1854,43 @@ static void *handle_connection(void *arg) {
+     return NULL;
+ }
+ 
++/* connect() that gives up after timeout_sec. Returns 0 or -1 with errno. */
++static int connect_with_timeout(int fd, const struct sockaddr *addr, socklen_t addr_len, int timeout_sec) {
++    int flags = fcntl(fd, F_GETFL, 0);
++    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
++        return connect(fd, addr, addr_len);
++    }
++
++    int rc = connect(fd, addr, addr_len);
++    if (rc != 0 && errno == EINPROGRESS) {
++        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
++        int ready;
++        do {
++            ready = poll(&pfd, 1, timeout_sec * 1000);
++        } while (ready < 0 && errno == EINTR);
++
++        if (ready > 0) {
++            int err = 0;
++            socklen_t err_len = sizeof(err);
++            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &err_len) != 0) err = errno;
++            if (err == 0) {
++                rc = 0;
++            } else {
++                errno = err;
++                rc = -1;
++            }
++        } else {
++            if (ready == 0) errno = ETIMEDOUT;
++            rc = -1;
++        }
++    }
++
++    int saved = errno;
++    fcntl(fd, F_SETFL, flags);
++    errno = saved;
++    return rc;
++}
++
+ /*
+  * Start TCP server accepting sync connections.
+  * Supports both IPv4 and IPv6.
+@@ -1948,7 +2105,7 @@ int connect_peer(const char *host, const char *port, const char *key,
+     int gai_err = getaddrinfo(host, port, &hints, &result);
+ 
+     if (gai_err != 0) {
+-        log_error("getaddrinfo failed for %s:%s: %s", host, port, gai_strerror(gai_err));
++        log_reach("getaddrinfo failed for %s:%s: %s", host, port, gai_strerror(gai_err));
+         return OWSYNC_ERROR_IO;
+     }
+ 
+@@ -1968,34 +2125,66 @@ int connect_peer(const char *host, const char *port, const char *key,
+         }
+     }
+ 
++    /* Not while another session runs: the caller tries again. The lock
++     * is held from here to the end of the session, the connecting
++     * included, so that a peer that connects meanwhile is turned away
++     * rather than served next to this session. */
++    if (net_session_enter(db_path, false) != OWSYNC_OK) {
++        log_debug("A session is running: not connecting to %s:%s now", host, port);
++        freeaddrinfo(result);
++        if (source_result) freeaddrinfo(source_result);
++        return OWSYNC_ERROR_BUSY;
++    }
++
+     int sockfd = -1;
++    int last_errno = 0;
+     struct addrinfo *rp;
+     for (rp = result; rp != NULL; rp = rp->ai_next) {
+         sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+-        if (sockfd < 0) continue;
++        if (sockfd < 0) {
++            last_errno = errno;
++            continue;
++        }
+ 
+         /* Bind to source address before connect (if specified) */
+         if (source_result) {
+             /* Find matching address family */
++            bool bound = true;
+             struct addrinfo *src;
+             for (src = source_result; src != NULL; src = src->ai_next) {
+                 if (src->ai_family == rp->ai_family) {
+                     if (bind(sockfd, src->ai_addr, src->ai_addrlen) < 0) {
+-                        log_warning("Failed to bind to source %s: %s",
+-                                   source_address, strerror(errno));
+-                        /* Continue without binding */
++                        /*
++                         * The address is not on this node now: its
++                         * interface is down. Without it the connection
++                         * would leave through whatever route there is, as
++                         * through the uplink, with a source the peer does
++                         * not accept. Not from another address, then.
++                         */
++                        last_errno = errno;
++                        if (!connect_quiet) {
++                            log_warning("Failed to bind to source %s: %s",
++                                        source_address, strerror(errno));
++                        }
++                        bound = false;
+                     } else {
+                         log_debug("Bound to source address: %s", source_address);
+                     }
+                     break;
+                 }
+             }
++            if (!bound) {
++                close(sockfd);
++                sockfd = -1;
++                continue;
++            }
+         }
+ 
+-        if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
++        if (connect_with_timeout(sockfd, rp->ai_addr, rp->ai_addrlen, OWSYNC_CONNECT_TIMEOUT_SEC) == 0) {
+             break;  /* Success */
+         }
+ 
++        last_errno = errno;
+         close(sockfd);
+         sockfd = -1;
+     }
+@@ -2004,17 +2193,13 @@ int connect_peer(const char *host, const char *port, const char *key,
+     if (source_result) freeaddrinfo(source_result);
+ 
+     if (sockfd < 0) {
+-        log_error("Could not connect to %s:%s", host, port);
++        log_reach("Could not connect to %s:%s: %s", host, port, strerror(last_errno));
++        net_session_leave();
+         return OWSYNC_ERROR_IO;
+     }
+ 
+-    /*
+-     * Bounds the reads and writes of the session that follows, as on the accept
+-     * path. The connect() above is not covered - it has already completed here -
+-     * so an unresponsive peer still costs the kernel's TCP retry time (~130s by
+-     * default) before this takes effect. Tolerable because daemon.c syncs peers
+-     * on one thread each, so a dead peer delays only its own.
+-     */
++    /* Bounds the reads and writes of the session that follows, as on the
++     * accept path; the connection itself was bounded above. */
+     set_socket_timeouts(sockfd);
+ 
+     channel_t *channel = NULL;
+@@ -2025,6 +2210,7 @@ int connect_peer(const char *host, const char *port, const char *key,
+         sec_ctx = security_context_new(key);
+         if (!sec_ctx) {
+             close(sockfd);
++            net_session_leave();
+             return OWSYNC_ERROR_CRYPTO;
+         }
+         channel = channel_new(sockfd, true, sec_ctx);
+@@ -2040,10 +2226,12 @@ int connect_peer(const char *host, const char *port, const char *key,
+         security_context_free(sec_ctx);
+ #endif
+         close(sockfd);
++        net_session_leave();
+         return OWSYNC_ERROR_MEMORY;
+     }
+ 
+     int result_code = handle_protocol(channel, root, db_path, filter, clock_offset);
++    net_session_leave();
+ 
+     channel_free(channel);
+ #ifdef ENABLE_ENCRYPTION
